@@ -1,0 +1,101 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_NAME: StreamMulticast
+  QT_VERSION: 6.5.3
+
+jobs:
+  build:
+    name: Build (Windows x64, ${{ matrix.config }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [RelWithDebInfo]
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: ''
+          cache: true
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure CMake
+        run: cmake --preset windows-x64
+
+      - name: Build
+        run: cmake --build --preset windows-x64 --config ${{ matrix.config }}
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          $stage = "stage/${{ env.PLUGIN_NAME }}"
+          New-Item -ItemType Directory -Force -Path "$stage/obs-plugins/64bit" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage/data/obs-plugins/${{ env.PLUGIN_NAME }}/locale" | Out-Null
+          Copy-Item "build_x64/${{ matrix.config }}/${{ env.PLUGIN_NAME }}.dll" "$stage/obs-plugins/64bit/"
+          if (Test-Path "build_x64/${{ matrix.config }}/${{ env.PLUGIN_NAME }}.pdb") {
+            Copy-Item "build_x64/${{ matrix.config }}/${{ env.PLUGIN_NAME }}.pdb" "$stage/obs-plugins/64bit/"
+          }
+          Copy-Item "data/locale/en-US.ini" "$stage/data/obs-plugins/${{ env.PLUGIN_NAME }}/locale/"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-windows-x64-${{ matrix.config }}
+          path: stage/
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip artifact
+        run: |
+          cd artifacts
+          for dir in */; do
+            (cd "$dir" && zip -r "../../${dir%/}.zip" .)
+          done
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.zip'
+          generate_release_notes: true
+          draft: true

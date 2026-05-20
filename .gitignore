@@ -1,0 +1,77 @@
+# StreamMulticast — .gitignore
+
+# Build output directories
+build_x64/
+build_macos/
+build_x86_64/
+cmake-build-*/
+out/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.opendb
+ipch/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Qt artifacts
+.qt/
+*.qm
+*.qrc.depends
+ui_*.h
+moc_*.cpp
+qrc_*.cpp
+*.moc
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+
+# Compiled output
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.o
+
+# Dependency downloads (fetched by cmake configure step)
+.deps/
+.cache/
+
+# OS-specific
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editor backups
+*~
+*.bak
+*.swp
+*.orig
+
+# Build + deps (added during first build session)
+.deps/
+build_x64/
+.vs/
+*.subagent
+
+# Release-Artefakte gehören nur in den GitHub-Release, nicht ins Repo
+/release-stage/
+/*.zip
