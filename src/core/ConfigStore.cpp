@@ -115,14 +115,16 @@ bool ConfigStore::save(const std::vector<Endpoint> &endpoints)
 
 /* -----------------------------------------------------------------------
  * schedule_save() — debounced (used from UI on every change)
+ *
+ * The request timestamp is set HERE, and only here — see save_thread_func()
+ * for why the wait branch must never touch it (that was the livelock bug).
  * ----------------------------------------------------------------------- */
 void ConfigStore::schedule_save(const std::vector<Endpoint> &endpoints)
 {
-	{
-		std::lock_guard<std::mutex> lock(m_pending_mutex);
-		m_pending_endpoints = endpoints;
-		m_save_pending.store(true);
-	}
+	std::lock_guard<std::mutex> lock(m_pending_mutex);
+	m_pending_endpoints   = endpoints;
+	m_last_change_request = std::chrono::steady_clock::now();
+	m_save_pending.store(true);
 	/* The save_thread_func() will pick this up within SAVE_DEBOUNCE_MS */
 }
 
@@ -132,7 +134,6 @@ void ConfigStore::schedule_save(const std::vector<Endpoint> &endpoints)
 void ConfigStore::save_thread_func()
 {
 	using namespace std::chrono;
-	time_point<steady_clock> last_change = steady_clock::now();
 
 	while (m_save_thread_running.load()) {
 		std::this_thread::sleep_for(milliseconds(100));
@@ -140,28 +141,31 @@ void ConfigStore::save_thread_func()
 		if (!m_save_pending.load())
 			continue;
 
-		auto now = steady_clock::now();
-		if (duration_cast<milliseconds>(now - last_change).count() < SAVE_DEBOUNCE_MS) {
-			last_change = now;
-			continue;
-		}
-
-		/* Debounce elapsed — perform the save */
 		std::vector<Endpoint> to_save;
+		bool should_save = false;
 		{
 			std::lock_guard<std::mutex> lock(m_pending_mutex);
-			to_save = m_pending_endpoints;
-			m_save_pending.store(false);
+			auto elapsed = duration_cast<milliseconds>(steady_clock::now() - m_last_change_request);
+			if (elapsed.count() >= SAVE_DEBOUNCE_MS) {
+				to_save = m_pending_endpoints;
+				m_save_pending.store(false);
+				should_save = true;
+			}
+			/* else: still within the debounce window.  Previously this
+			 * branch reset last_change = now, which — with a 100 ms poll
+			 * interval and a 500 ms threshold — meant the elapsed time could
+			 * never reach the threshold as long as schedule_save() itself
+			 * wasn't called again: autosave died silently after the first
+			 * save, a data-loss bug on crash.  m_last_change_request is now
+			 * owned exclusively by schedule_save(); this thread only reads it. */
 		}
 
-		{
+		if (should_save) {
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_endpoints = to_save;
 			if (!m_config_path.empty())
 				write_to_disk(to_save, m_config_path);
 		}
-
-		last_change = steady_clock::now();
 	}
 
 	/* Final flush if something was pending when we shut down */

@@ -62,9 +62,11 @@ public:
 	 * Schedule a debounced save (500 ms delay).  Cheap to call on every UI
 	 * change — the actual disk write happens at most once per 500 ms.
 	 *
-	 * AVANATRO-VERIFY: obs_module_get_config_path ownership — the returned
-	 * char* must be freed with bfree().  Confirm this is still the case in
-	 * OBS 31.x (was true in OBS 30.x).
+	 * Locking: takes only m_pending_mutex (never m_mutex).  Callers such as
+	 * EndpointRegistry::persist() call this while already holding their own,
+	 * unrelated mutex — that is safe precisely because ConfigStore never
+	 * tries to lock back into any registry-owned lock; the two mutexes are
+	 * never acquired in conflicting order.
 	 */
 	void schedule_save(const std::vector<Endpoint> &endpoints);
 
@@ -91,12 +93,17 @@ private:
 	std::string              m_config_path;
 	std::vector<Endpoint>    m_endpoints;
 
-	/* Debounce save */
-	std::atomic<bool>        m_save_pending{false};
-	std::vector<Endpoint>    m_pending_endpoints;
-	std::mutex               m_pending_mutex;
-	std::thread              m_save_thread;
-	std::atomic<bool>        m_save_thread_running{false};
+	/* Debounce save.  m_last_change_request is set ONLY by schedule_save() —
+	 * save_thread_func() must never write it (see the .cpp for the livelock
+	 * this used to cause: with 100 ms polling and a 500 ms threshold,
+	 * refreshing the timestamp on every "not yet elapsed" tick meant it could
+	 * never elapse). */
+	std::atomic<bool>                    m_save_pending{false};
+	std::vector<Endpoint>                m_pending_endpoints;
+	std::chrono::steady_clock::time_point m_last_change_request{};
+	std::mutex                           m_pending_mutex;
+	std::thread                          m_save_thread;
+	std::atomic<bool>                    m_save_thread_running{false};
 
 	void save_thread_func();
 };
