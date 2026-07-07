@@ -54,6 +54,12 @@ All three run **at the same time**, from the same OBS scene.
 - No OAuth flow needed inside StreamMulticast — we piggyback on OBS's own connection
 - Handles OBS 28-31 config layout (`global.ini` legacy + `user.ini` modern)
 
+### v1.0.7 -- TikTok Bridge import
+- **Import TikTok Bridge** button in the Endpoint dialog -- reads local RTMP data from a Bridge JSON file
+- Designed for TikTok's account-gated / ephemeral stream-key workflow
+- StreamMulticast does not generate TikTok keys, perform TikTok login, or bundle third-party generators
+- Default handoff path: `%APPDATA%\obs-studio\plugin_config\streammulticast\tiktok_bridge.json`
+
 ## Not in v1.0.x (planned for v1.1+)
 
 - Per-output **resolution + FPS** (currently global)
@@ -82,16 +88,36 @@ That's it. Building from source is **only** for contributors who want to modify 
 1. Open the **Multistream** dock (`View → Docks → Multistream`)
 2. **Configure** tab → **+ Add Endpoint**
 3. Either click **Import from OBS** to pull the server URL + stream key from your active OBS profile, OR pick a template and paste the stream key manually
-4. Choose **Output Orientation**:
+4. For TikTok, optionally click **Import TikTok Bridge** to read a local bridge handoff file
+5. Choose **Output Orientation**:
    - `Source (match OBS canvas)` — your normal horizontal stream
    - `Vertical 1080×1920 — Letterbox` — for TikTok / Shorts / Reels endpoints
-5. Pick encoder backend + bitrate
-6. Decide whether this endpoint auto-starts with OBS's main "Start Streaming" (the **Linked to main** checkbox)
-7. Save, then switch to the **Health** tab to watch all outputs live
+6. Pick encoder backend + bitrate
+7. Decide whether this endpoint auto-starts with OBS's main "Start Streaming" (the **Linked to main** checkbox)
+8. Save, then switch to the **Health** tab to watch all outputs live
 
 **Parallel horizontal + vertical example:** add Endpoint 1 = Twitch (Source orientation, NVENC 6 Mbit), Endpoint 2 = TikTok (Vertical 1080×1920, x264 2.5 Mbit), enable Linked-to-main on both → click OBS's native "Start Streaming" and both go live at once.
 
 Pair with [Stream Health Doctor](https://tools.avanatro.com/stream-health/) for deeper per-output telemetry in a separate browser window on a second monitor.
+
+### TikTok Bridge handoff format
+
+Optional helper tools can pass TikTok RTMP data to StreamMulticast by writing:
+
+```json
+{
+  "name": "TikTok Bridge",
+  "server_url": "rtmp://push-rtmp.tiktokcdn.com/live",
+  "stream_key": "paste-or-provider-key",
+  "expires_at": "2026-06-08T22:00:00Z"
+}
+```
+
+`server` may be used instead of `server_url`, and `key` may be used instead of `stream_key`. The helper remains separate from StreamMulticast; this plugin only imports the local handoff file.
+
+A minimal Windows companion script lives in `tools/tiktok-bridge/`. It can write
+the handoff file from prompts, clipboard content, or explicit command-line
+values, and can optionally start a user-chosen external helper.
 
 ---
 
@@ -149,7 +175,8 @@ src/
 │   ├── Endpoint           Per-endpoint POD + serialise/deserialise
 │   ├── ConfigStore        JSON persist in OBS plugin_config dir
 │   ├── EndpointRegistry   In-memory list + observer pattern
-│   └── ObsServiceImport   Read active OBS profile's stream key (v1.0.6)
+│   ├── ObsServiceImport   Read active OBS profile's stream key (v1.0.6)
+│   └── TikTokBridgeImport Read local TikTok Bridge handoff JSON (v1.0.7)
 ├── pipeline/
 │   ├── EncoderFactory     obs_encoder_create for x264 / NVENC / QSV / AMF
 │   ├── OutputController   1× per endpoint, state machine, reconnect backoff
