@@ -11,7 +11,47 @@ GPLv2 — see LICENSE for full text.
 #include <obs.h>
 #include <obs-data.h>
 
+#include <set>
+
 namespace smulti {
+
+namespace {
+
+/* -----------------------------------------------------------------------
+ * available_encoder_ids — the set of encoder type IDs obs_enum_encoder_types
+ * reports, computed once.
+ *
+ * L2 perf fix: is_encoder_available() used to re-walk the entire
+ * obs_enum_encoder_types() registry on every call — up to 2x per
+ * create_video_encoder() (NVENC/QSV/AMF fallback checks) plus once more on
+ * every reconnect attempt (reconnect_thread_func() calls create_video_encoder()
+ * again). Encoder availability is fixed for the process lifetime once
+ * obs_startup() has registered all encoder modules, so it only needs to be
+ * enumerated once.
+ *
+ * Thread safety: is_encoder_available() is called from both the Qt UI thread
+ * (OutputController::start()) and each endpoint's reconnect thread
+ * (OutputController::reconnect_thread_func()). A function-local static is
+ * safe here without an explicit mutex/std::call_once — C++11 guarantees
+ * thread-safe, exactly-once initialization of function-local statics (a
+ * "magic static"), and this set is never mutated after construction.
+ * ----------------------------------------------------------------------- */
+const std::set<std::string> &available_encoder_ids()
+{
+	static const std::set<std::string> ids = [] {
+		std::set<std::string> result;
+		size_t      idx = 0;
+		const char *id  = nullptr;
+		while (obs_enum_encoder_types(idx++, &id)) {
+			if (id)
+				result.insert(id);
+		}
+		return result;
+	}();
+	return ids;
+}
+
+} // anonymous namespace
 
 /* -----------------------------------------------------------------------
  * Encoder type ID strings
@@ -39,21 +79,13 @@ std::string EncoderFactory::backend_label(EncoderBackend backend)
 }
 
 /* -----------------------------------------------------------------------
- * is_encoder_available — checks the OBS encoder registry
- *
- * Verified for OBS 31.x: obs_enum_encoder_types uses INDEXED iteration:
- *   EXPORT bool obs_enum_encoder_types(size_t idx, const char **id);
- * Returns true while a valid encoder exists at that index.
+ * is_encoder_available — membership check against the cached encoder-ID
+ * set (see available_encoder_ids() above for the one-time
+ * obs_enum_encoder_types() enumeration this reads from).
  * ----------------------------------------------------------------------- */
 bool EncoderFactory::is_encoder_available(const std::string &type_id)
 {
-	size_t      idx = 0;
-	const char *id  = nullptr;
-	while (obs_enum_encoder_types(idx++, &id)) {
-		if (id && type_id == id)
-			return true;
-	}
-	return false;
+	return available_encoder_ids().count(type_id) != 0;
 }
 
 /* -----------------------------------------------------------------------
