@@ -95,6 +95,16 @@ private:
 	void poll_loop();
 	void sample_output(const Endpoint &ep, const std::shared_ptr<OutputController> &ctrl);
 
+	/**
+	 * Writes a cheap, zeroed HealthSnapshot for an endpoint with no active
+	 * session (disabled, never started, Idle, FailedHard, or mid-reconnect/
+	 * mid-start before the output has actually gone active) and clears its
+	 * rolling bitrate window.  Never touches obs_output_* — either the caller
+	 * has no OutputController at all (disabled endpoint, M3), or it already
+	 * obtained `state`/`last_error` through OutputController's locked getters.
+	 */
+	void write_inactive_snapshot(const Endpoint &ep, const std::string &last_error, OutputState state);
+
 	EndpointRegistry &m_registry;
 
 	mutable std::mutex m_mutex;
