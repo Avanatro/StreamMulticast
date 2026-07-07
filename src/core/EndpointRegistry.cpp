@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "EndpointRegistry.hpp"
 #include "../pipeline/OutputController.hpp"
+#include "../pipeline/ControllerReaper.hpp"
 #include "../plugin-support.h"
 
 #include <algorithm>
@@ -17,8 +18,9 @@ namespace smulti {
 /* -----------------------------------------------------------------------
  * Constructor / Destructor
  * ----------------------------------------------------------------------- */
-EndpointRegistry::EndpointRegistry(ConfigStore &store)
+EndpointRegistry::EndpointRegistry(ConfigStore &store, ControllerReaper &reaper)
 	: m_store(store)
+	, m_reaper(reaper)
 {
 	/* Populate from the already-loaded ConfigStore */
 	auto loaded = store.endpoints();
@@ -28,7 +30,7 @@ EndpointRegistry::EndpointRegistry(ConfigStore &store)
 	          });
 
 	for (auto &ep : loaded) {
-		m_controllers[ep.id] = std::make_unique<OutputController>(ep);
+		m_controllers[ep.id] = std::make_shared<OutputController>(ep, m_reaper);
 		m_endpoints.push_back(std::move(ep));
 	}
 
@@ -37,7 +39,25 @@ EndpointRegistry::EndpointRegistry(ConfigStore &store)
 
 EndpointRegistry::~EndpointRegistry()
 {
-	/* Destroy controllers first — they stop their outputs */
+	/* Hand every remaining controller off to the ControllerReaper instead of
+	 * destroying it here — the reaper is drained and block-joined afterwards
+	 * by obs_module_unload(), off whatever thread destroys this registry.
+	 *
+	 * stop() first, same detach path used by update()/remove() (fix-round 2,
+	 * 2026-07-07): a caller (e.g. obs_module_unload()) may have already
+	 * stopped a controller, but must not be relied on to have done so for
+	 * every controller — a Reconnecting controller in particular. Without
+	 * this, enqueue()'s shutdown_blocking() would run with the session still
+	 * fully attached: obs_output_force_stop() before the reconnect thread is
+	 * joined and m_output nulled, defeating the reconnect thread's identity
+	 * guard and risking a concurrent obs_output_start() vs.
+	 * obs_output_force_stop() on the same obs_output_t. stop() is idempotent
+	 * and cheap when already stopped, so calling it here unconditionally is
+	 * safe regardless of what the caller already did. */
+	for (auto &pair : m_controllers) {
+		pair.second->stop();
+		m_reaper.enqueue(std::move(pair.second));
+	}
 	m_controllers.clear();
 }
 
@@ -60,11 +80,11 @@ const Endpoint *EndpointRegistry::find(const std::string &id) const
 	return nullptr;
 }
 
-OutputController *EndpointRegistry::controller_for(const std::string &id)
+std::shared_ptr<OutputController> EndpointRegistry::controller_for(const std::string &id)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	auto it = m_controllers.find(id);
-	return it != m_controllers.end() ? it->second.get() : nullptr;
+	return it != m_controllers.end() ? it->second : nullptr;
 }
 
 size_t EndpointRegistry::count() const
@@ -86,7 +106,7 @@ void EndpointRegistry::add(Endpoint ep)
 			max_order = std::max(max_order, e.sort_order);
 		ep.sort_order = max_order + 1;
 
-		m_controllers[ep.id] = std::make_unique<OutputController>(ep);
+		m_controllers[ep.id] = std::make_shared<OutputController>(ep, m_reaper);
 		m_endpoints.push_back(ep);
 	}
 
@@ -103,6 +123,7 @@ void EndpointRegistry::add(Endpoint ep)
 void EndpointRegistry::update(const Endpoint &ep)
 {
 	bool was_running = false;
+	std::shared_ptr<OutputController> old_ctrl;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		auto it = std::find_if(m_endpoints.begin(), m_endpoints.end(),
@@ -112,28 +133,40 @@ void EndpointRegistry::update(const Endpoint &ep)
 			return;
 		}
 
-		const bool conn_changed = (it->server_url != ep.server_url ||
-		                           it->stream_key != ep.stream_key ||
-		                           it->encoder_backend != ep.encoder_backend ||
-		                           it->video_bitrate_kbps != ep.video_bitrate_kbps ||
-		                           it->audio_bitrate_kbps != ep.audio_bitrate_kbps);
-
 		*it = ep;
 
-		/* Restart controller if connection settings changed while running */
+		/* Recreate controller with new settings.  The OLD controller is
+		 * extracted here, WHILE HOLDING m_mutex; stop()/enqueue() happen
+		 * AFTER the lock is released below (see item 6 of the fix-round 1
+		 * decision log entry — stop() itself must never run under this
+		 * lock, not just the reaper hand-off).  was_running gates only
+		 * whether the NEW controller gets started afterward. */
 		auto ctrl_it = m_controllers.find(ep.id);
 		if (ctrl_it != m_controllers.end()) {
 			was_running = ctrl_it->second->is_running();
-			if (conn_changed && was_running)
-				ctrl_it->second->stop();
-			/* Recreate controller with new settings */
-			ctrl_it->second = std::make_unique<OutputController>(ep);
+			old_ctrl = std::move(ctrl_it->second);
+			ctrl_it->second = std::make_shared<OutputController>(ep, m_reaper);
 		}
+	}
+
+	if (old_ctrl) {
+		/* stop() is cheap and non-blocking now (see OutputController's
+		 * detach-and-reaper rule) — call it unconditionally rather than only
+		 * when connection settings changed.  The old code's conn_changed
+		 * gate left a window where a Live-but-unrelated-settings-changed
+		 * controller kept streaming, un-stopped, while the just-created NEW
+		 * controller was started right below — briefly double-streaming to
+		 * the same endpoint until the reaper's shutdown_blocking() caught up
+		 * with the old one asynchronously.  Always stopping first also
+		 * closes that window for a Reconnecting old controller, which
+		 * is_running() never covered. */
+		old_ctrl->stop();
+		m_reaper.enqueue(old_ctrl);
 	}
 
 	if (was_running) {
 		/* Restart outside the lock */
-		auto *ctrl = controller_for(ep.id);
+		auto ctrl = controller_for(ep.id);
 		if (ctrl)
 			ctrl->start();
 	}
@@ -148,6 +181,7 @@ void EndpointRegistry::update(const Endpoint &ep)
 void EndpointRegistry::remove(const std::string &id)
 {
 	Endpoint removed_ep;
+	std::shared_ptr<OutputController> old_ctrl;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		auto it = std::find_if(m_endpoints.begin(), m_endpoints.end(),
@@ -158,15 +192,27 @@ void EndpointRegistry::remove(const std::string &id)
 		}
 		removed_ep = *it;
 
-		/* Stop the output before destroying the controller */
+		/* Extract the controller WHILE HOLDING m_mutex; stop()/enqueue() it
+		 * to the ControllerReaper AFTER releasing the lock (below) — stop()
+		 * itself must never run under this lock either, not just the reaper
+		 * hand-off (see item 6 of the fix-round 1 decision log entry). */
 		auto ctrl_it = m_controllers.find(id);
 		if (ctrl_it != m_controllers.end()) {
-			if (ctrl_it->second->is_running())
-				ctrl_it->second->stop();
+			old_ctrl = std::move(ctrl_it->second);
 			m_controllers.erase(ctrl_it);
 		}
 
 		m_endpoints.erase(it);
+	}
+
+	if (old_ctrl) {
+		/* stop() is cheap and non-blocking now — call it unconditionally
+		 * (previously gated on is_running(), which excludes Reconnecting;
+		 * that gap let a Reconnecting controller reach the reaper's
+		 * shutdown_blocking() with its reconnect thread still live and no
+		 * signal-disconnect done first). */
+		old_ctrl->stop();
+		m_reaper.enqueue(old_ctrl);
 	}
 
 	obs_log(LOG_INFO, "EndpointRegistry: removed endpoint '%s'", removed_ep.name.c_str());

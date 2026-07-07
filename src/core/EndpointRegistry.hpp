@@ -21,6 +21,7 @@ namespace smulti {
 
 // Forward declare to avoid circular include
 class OutputController;
+class ControllerReaper;
 
 /**
  * ChangeKind — what happened to an endpoint in the registry.
@@ -38,18 +39,33 @@ using RegistryObserver = std::function<void(ChangeKind, const Endpoint &)>;
  * EndpointRegistry — in-memory list of all configured endpoints.
  *
  * Single source of truth for the endpoint list at runtime.
- * Owns OutputController instances (one per endpoint, created lazily on add).
- * Notifies registered UI observers on every change.
+ * Owns OutputController instances (one per endpoint, created lazily on add),
+ * held as shared_ptr so HealthSampler can keep sampling a controller that is
+ * concurrently being replaced/removed here without racing its destruction —
+ * see controller_for().  Notifies registered UI observers on every change.
  *
  * Thread-safety: all mutating methods are guarded by an internal mutex.
  * Observer callbacks are invoked via Qt's queued connection to guarantee
  * they run on the UI thread.
  *
+ * Controller teardown: remove()/update() extract the OLD OutputController
+ * shared_ptr from the map WHILE HOLDING m_mutex, release the lock, and only
+ * THEN call stop() on it and hand it to the ControllerReaper — neither runs
+ * while m_mutex is held.  stop() itself is cheap and non-blocking (it
+ * detaches the session and hands the actual teardown to the reaper as a
+ * job — see OutputController's "Detach-and-reaper rule"), but this ordering
+ * is kept regardless so this lock can never again be the thing that
+ * propagates a slow teardown into every other endpoint's UI interaction.
+ * See ControllerReaper for the full rationale.
+ *
  * Lifecycle: created in obs_module_load(), destroyed in obs_module_unload().
+ * The destructor enqueues all remaining controllers to the reaper rather
+ * than destroying them directly — obs_module_unload() drains and
+ * block-joins the reaper afterwards.
  */
 class EndpointRegistry {
 public:
-	explicit EndpointRegistry(ConfigStore &store);
+	EndpointRegistry(ConfigStore &store, ControllerReaper &reaper);
 	~EndpointRegistry();
 
 	/* Non-copyable */
@@ -64,8 +80,14 @@ public:
 	/** Find by UUID, returns nullptr if not found */
 	const Endpoint *find(const std::string &id) const;
 
-	/** OutputController for the given endpoint UUID (nullptr if not found) */
-	OutputController *controller_for(const std::string &id);
+	/**
+	 * OutputController for the given endpoint UUID (nullptr if not found).
+	 * Returns a shared_ptr copy (not a raw pointer) so a caller — chiefly
+	 * HealthSampler's background poll thread — can keep using the returned
+	 * controller safely even if remove()/update() concurrently swaps or
+	 * erases the registry's own entry for this id.
+	 */
+	std::shared_ptr<OutputController> controller_for(const std::string &id);
 
 	/** Number of registered endpoints */
 	size_t count() const;
@@ -119,12 +141,13 @@ private:
 	mutable std::mutex m_mutex;
 
 	std::vector<Endpoint>                                    m_endpoints;
-	std::unordered_map<std::string, std::unique_ptr<OutputController>> m_controllers;
+	std::unordered_map<std::string, std::shared_ptr<OutputController>> m_controllers;
 
 	std::vector<std::pair<int, RegistryObserver>> m_observers;
 	int m_next_observer_token = 1;
 
-	ConfigStore &m_store;
+	ConfigStore      &m_store;
+	ControllerReaper &m_reaper;
 };
 
 } // namespace smulti

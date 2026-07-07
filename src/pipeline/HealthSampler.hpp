@@ -18,6 +18,7 @@ GPLv2 — see LICENSE for full text.
 #include <thread>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 
 namespace smulti {
 
@@ -53,10 +54,15 @@ struct HealthSnapshot {
  *     (Qt::QueuedConnection) by the HealthTab — HealthSampler only stores
  *     data; it does not touch Qt objects directly.
  *
- * AVANATRO-VERIFY: obs_output_get_total_bytes / obs_output_get_frames_dropped
- * thread-safety.  OBS stat read functions are implemented with atomic reads
- * (checked in obs-output.c source).  Safe to call from any thread.
- * Verify this is still true in OBS 31.x.
+ * poll_loop() holds a shared_ptr<OutputController> (from
+ * EndpointRegistry::controller_for()) for the duration of each sample, and
+ * reads all obs_output_t* stats through OutputController::sample() — a
+ * single short lock window inside OutputController, never a raw obs_output_t*
+ * held here.  This closes a use-after-free: EndpointRegistry::remove()/
+ * update() can hand a controller to the ControllerReaper for teardown at any
+ * time, and shutdown_blocking() nulls the controller's m_output under its
+ * own mutex before releasing it — HealthSampler can therefore only ever see
+ * the output as fully present or fully gone, never mid-teardown.
  */
 class HealthSampler {
 public:
@@ -87,7 +93,7 @@ public:
 
 private:
 	void poll_loop();
-	void sample_output(const Endpoint &ep, OutputController *ctrl);
+	void sample_output(const Endpoint &ep, const std::shared_ptr<OutputController> &ctrl);
 
 	EndpointRegistry &m_registry;
 

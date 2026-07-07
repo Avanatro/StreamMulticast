@@ -210,7 +210,7 @@ void ConfigTab::on_toggle_endpoint(const std::string &id, bool enabled)
 
 	if (!enabled) {
 		/* Stop the output if it was running */
-		auto *ctrl = m_registry.controller_for(id);
+		auto ctrl = m_registry.controller_for(id);
 		if (ctrl && ctrl->is_running())
 			ctrl->stop();
 	}

@@ -9,9 +9,6 @@ GPLv2 — see LICENSE for full text.
 #include "../core/EndpointRegistry.hpp"
 #include "../plugin-support.h"
 
-#include <obs.h>
-#include <obs-output.h>
-
 #include <numeric>
 #include <chrono>
 #include <thread>
@@ -83,7 +80,10 @@ void HealthSampler::poll_loop()
 		auto endpoints = m_registry.all();
 
 		for (const auto &ep : endpoints) {
-			OutputController *ctrl = m_registry.controller_for(ep.id);
+			/* shared_ptr copy — keeps the controller alive for this sample
+			 * even if EndpointRegistry concurrently removes/replaces it and
+			 * hands it to the ControllerReaper. */
+			auto ctrl = m_registry.controller_for(ep.id);
 			sample_output(ep, ctrl);
 		}
 
@@ -98,17 +98,12 @@ void HealthSampler::poll_loop()
 /* -----------------------------------------------------------------------
  * sample_output — collect health data for one endpoint
  *
- * AVANATRO-VERIFY: obs_output_get_total_bytes thread-safety.
- * OBS uses atomic operations internally for these stat counters.
- * Reading from a non-OBS thread is safe per OBS source inspection.
- * Verify this is documented or confirmed in OBS 31.x source.
- *
- * AVANATRO-VERIFY: obs_output_get_connect_time_ms — confirm this returns
- * the timestamp when the output connected (ms since UNIX epoch or since
- * output start?).  In OBS 30.x it returns milliseconds since the output
- * connected.  We use it to compute uptime.
+ * All obs_output_t access goes through OutputController::sample() /
+ * connected_since() — see the class doc comment in HealthSampler.hpp for
+ * why this indirection exists (it is not just style: it closes a real
+ * use-after-free against the ControllerReaper).
  * ----------------------------------------------------------------------- */
-void HealthSampler::sample_output(const Endpoint &ep, OutputController *ctrl)
+void HealthSampler::sample_output(const Endpoint &ep, const std::shared_ptr<OutputController> &ctrl)
 {
 	HealthSnapshot snap;
 	snap.endpoint_id    = ep.id;
@@ -129,16 +124,16 @@ void HealthSampler::sample_output(const Endpoint &ep, OutputController *ctrl)
 		return;
 	}
 
-	obs_output_t *output = ctrl->raw_output();
-	if (!output || !obs_output_active(output)) {
+	OutputController::SampleData sample = ctrl->sample();
+	if (!sample.active) {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_snapshots[ep.id] = snap;
 		return;
 	}
 
 	/* Bytes sent — compute diff for bitrate rolling average */
-	uint64_t total_bytes = obs_output_get_total_bytes(output);
-	uint64_t dropped     = static_cast<uint64_t>(obs_output_get_frames_dropped(output));
+	uint64_t total_bytes = sample.total_bytes;
+	uint64_t dropped     = static_cast<uint64_t>(sample.frames_dropped);
 
 	auto now = std::chrono::steady_clock::now();
 
@@ -164,12 +159,16 @@ void HealthSampler::sample_output(const Endpoint &ep, OutputController *ctrl)
 
 	snap.dropped_frames = dropped;
 
-	/* Uptime via obs_output_get_connect_time_ms
-	 * AVANATRO-VERIFY: This returns milliseconds since the output connected.
-	 * Divide by 1000 for seconds.  Confirm in OBS 31.x. */
-	// AVANATRO-VERIFY: obs_output_get_connect_time_ms — available in OBS 30+?
-	// If not available in older builds, compute uptime ourselves from a start timestamp.
-	snap.uptime_sec = obs_output_get_connect_time_ms(output) / 1000;
+	/* Uptime — computed from OutputController's own "start" signal timestamp
+	 * (std::chrono::steady_clock), NOT obs_output_get_connect_time_ms(): that
+	 * function returns the one-time RTMP handshake duration (set once, see
+	 * librtmp rtmp.c ~line 1112), not time-since-connect, which is why the
+	 * uptime column previously always showed ~0. */
+	auto connected_since = ctrl->connected_since();
+	if (connected_since.time_since_epoch().count() != 0) {
+		auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - connected_since).count();
+		snap.uptime_sec = uptime > 0 ? uptime : 0;
+	}
 
 	/* Reconnect count — we count it from the reconnect_attempt field via state */
 	/* We don't have direct access to m_reconnect_attempt here (it's private).
