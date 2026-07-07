@@ -44,15 +44,12 @@ public:
 	 * Returns nullptr if the requested encoder backend is unavailable
 	 * (e.g., NVENC on a machine without NVIDIA GPU) or if creation fails.
 	 *
-	 * AVANATRO-VERIFY: obs_video_encoder_create — confirm the "mixer" index
-	 * parameter (3rd positional param in OBS 30+).  In OBS 29 it was
-	 * (id, name, settings, hotkey_data).  OBS 30+ added a "mixer" int param
-	 * at the end for multi-view outputs.  Check exact signature.
-	 *
-	 * AVANATRO-VERIFY: obs_encoder_t* lifetime — caller must call
-	 * obs_encoder_release() when done.  Confirm whether releasing BEFORE
-	 * obs_output_stop() is safe, or whether the output holds a ref.
-	 * Correct pattern: stop output → then release encoders.
+	 * obs_encoder_t* lifetime: the caller (OutputController) must call
+	 * obs_encoder_release() when done.  Releasing after the output has
+	 * stopped is safe regardless of order relative to obs_output_stop(),
+	 * because obs_output_set_video/audio_encoder() takes its OWN reference
+	 * via obs_encoder_get_ref() (see libobs obs-output.c) — the output and
+	 * OutputController each hold an independent ref and release their own.
 	 */
 	obs_encoder_t *create_video_encoder(const Endpoint &ep,
 	                                    const std::string &name_hint) const;
@@ -74,10 +71,9 @@ public:
 	 * Always includes X264 (software x264 is guaranteed available in OBS).
 	 * Includes NVENC/QSV/AMF only if obs_enum_encoder_types reports them.
 	 *
-	 * AVANATRO-VERIFY: obs_enum_encoder_types — confirm callback signature.
-	 * In OBS 30 it is: void obs_enum_encoder_types(
-	 *   bool (*enum_proc)(void*, const char*), void* param).
-	 * Confirm it's still valid in OBS 31.x.
+	 * obs_enum_encoder_types uses indexed iteration in OBS 31.x:
+	 *   EXPORT bool obs_enum_encoder_types(size_t idx, const char **id);
+	 * (there is no callback-based overload — see is_encoder_available()).
 	 */
 	static std::vector<EncoderBackend> available_backends();
 

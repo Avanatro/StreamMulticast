@@ -45,17 +45,6 @@ std::string EncoderFactory::backend_label(EncoderBackend backend)
  *   EXPORT bool obs_enum_encoder_types(size_t idx, const char **id);
  * Returns true while a valid encoder exists at that index.
  * ----------------------------------------------------------------------- */
-struct EnumCtx {
-	std::vector<std::string> found;
-};
-
-static bool enum_encoder_cb(void *param, const char *id)
-{
-	auto *ctx = static_cast<EnumCtx *>(param);
-	ctx->found.emplace_back(id);
-	return true; // continue enumeration
-}
-
 bool EncoderFactory::is_encoder_available(const std::string &type_id)
 {
 	size_t      idx = 0;
