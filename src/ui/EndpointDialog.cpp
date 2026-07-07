@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "EndpointDialog.hpp"
 #include "../plugin-support.h"
 #include "../core/ObsServiceImport.hpp"
+#include "../core/TikTokBridgeImport.hpp"
 
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -15,6 +16,8 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QGroupBox>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QFileDialog>
+#include <QtCore/QFileInfo>
 #include <QtGui/QStandardItemModel>
 #include <QtGui/QStandardItem>
 
@@ -28,6 +31,7 @@ const std::vector<EndpointDialog::ServerTemplate> EndpointDialog::s_templates = 
 	{ QStringLiteral("Twitch"),                QStringLiteral("rtmp://live.twitch.tv/app") },
 	{ QStringLiteral("YouTube"),               QStringLiteral("rtmp://a.rtmp.youtube.com/live2") },
 	{ QStringLiteral("Facebook"),              QStringLiteral("rtmps://live-api-s.facebook.com:443/rtmp") },
+	{ QStringLiteral("TikTok"),                QStringLiteral("rtmp://push-rtmp.tiktokcdn.com/live") },
 	{ QStringLiteral("Kick"),                  QStringLiteral("rtmp://ingest.global-contribute.live-video.net/app") },
 	{ QStringLiteral("Trovo"),                 QStringLiteral("rtmp://livepush.trovo.live/push") },
 };
@@ -152,18 +156,28 @@ void EndpointDialog::setup_ui()
 	m_status_label->setWordWrap(true);
 	outer->addWidget(m_status_label);
 
-	/* Buttons */
-	auto *btn_row = new QHBoxLayout();
+	/* Import buttons */
+	auto *import_row = new QHBoxLayout();
 	m_import_btn = new QPushButton(tr("Import from OBS"), this);
 	m_import_btn->setToolTip(tr("Read server URL and stream key from the active "
 	                            "OBS profile (whatever you've connected via OBS's "
 	                            "native 'Connect Account' for Twitch/YouTube/etc.)"));
+	m_tiktok_bridge_btn = new QPushButton(tr("Import TikTok Bridge"), this);
+	m_tiktok_bridge_btn->setToolTip(tr("Read locally supplied TikTok RTMP data from "
+	                                   "a Bridge JSON file. StreamMulticast does not "
+	                                   "generate keys or perform TikTok login."));
+	import_row->addWidget(m_import_btn);
+	import_row->addWidget(m_tiktok_bridge_btn);
+	import_row->addStretch();
+	outer->addLayout(import_row);
+
+	/* Dialog buttons */
+	auto *btn_row = new QHBoxLayout();
 	m_test_btn   = new QPushButton(tr("Test Connection"), this);
 	m_save_btn   = new QPushButton(tr("Save"), this);
 	m_cancel_btn = new QPushButton(tr("Cancel"), this);
 	m_save_btn->setDefault(true);
 
-	btn_row->addWidget(m_import_btn);
 	btn_row->addWidget(m_test_btn);
 	btn_row->addStretch();
 	btn_row->addWidget(m_save_btn);
@@ -178,6 +192,7 @@ void EndpointDialog::setup_ui()
 	connect(m_show_key_btn, &QPushButton::toggled,
 	        this, &EndpointDialog::on_show_key_toggled);
 	connect(m_import_btn, &QPushButton::clicked, this, &EndpointDialog::on_import_from_obs);
+	connect(m_tiktok_bridge_btn, &QPushButton::clicked, this, &EndpointDialog::on_import_tiktok_bridge);
 	connect(m_test_btn,   &QPushButton::clicked, this, &EndpointDialog::on_test_connection);
 	connect(m_save_btn,   &QPushButton::clicked, this, &EndpointDialog::on_save);
 	connect(m_cancel_btn, &QPushButton::clicked, this, &QDialog::reject);
@@ -310,6 +325,78 @@ void EndpointDialog::on_import_from_obs()
 	m_status_label->setText(
 	    tr("✓ Imported %1 from active OBS profile.")
 	    .arg(QString::fromStdString(cfg.service_name)));
+	m_status_label->setStyleSheet("color: #2ecc71;");
+	m_status_label->setVisible(true);
+}
+
+void EndpointDialog::on_import_tiktok_bridge()
+{
+	std::string default_path = default_tiktok_bridge_path();
+	QString path = QString::fromStdString(default_path);
+
+	if (path.isEmpty() || !QFileInfo::exists(path)) {
+		path = QFileDialog::getOpenFileName(
+			this,
+			tr("Import TikTok Bridge JSON"),
+			path,
+			tr("JSON files (*.json);;All files (*)")
+		);
+		if (path.isEmpty())
+			return;
+	}
+
+	TikTokBridgeConfig cfg = import_tiktok_bridge_file(path.toStdString());
+	if (!cfg.ok) {
+		QMessageBox::warning(this, tr("Import TikTok Bridge"),
+		    tr("Could not import TikTok Bridge data:\n\n%1\n\n"
+		       "Expected JSON fields: server_url/server and stream_key/key.")
+		    .arg(QString::fromStdString(cfg.error_message)));
+		return;
+	}
+
+	m_server_edit->setText(QString::fromStdString(cfg.server_url));
+	m_key_edit->setText(QString::fromStdString(cfg.stream_key));
+
+	if (m_name_edit->text().trimmed().isEmpty() ||
+	    m_name_edit->text() == tr("New Endpoint")) {
+		QString bridge_name = QString::fromStdString(cfg.name).trimmed();
+		m_name_edit->setText(bridge_name.isEmpty() ? tr("TikTok Bridge") : bridge_name);
+	}
+
+	/* Update template dropdown if server matches a known template */
+	for (int i = 1; i < static_cast<int>(s_templates.size()); ++i) {
+		if (QString::fromStdString(cfg.server_url).startsWith(s_templates[i].url)) {
+			m_template_cb->blockSignals(true);
+			m_template_cb->setCurrentIndex(i);
+			m_template_cb->blockSignals(false);
+			break;
+		}
+	}
+
+	for (int i = 0; i < m_orientation_cb->count(); ++i) {
+		if (m_orientation_cb->itemData(i).toInt() ==
+		    static_cast<int>(OutputOrientation::Vertical1080x1920Letterbox)) {
+			m_orientation_cb->setCurrentIndex(i);
+			break;
+		}
+	}
+
+	m_bitrate_spin->setValue(2500);
+	for (int i = 0; i < m_audio_cb->count(); ++i) {
+		if (m_audio_cb->itemData(i).toInt() == 128) {
+			m_audio_cb->setCurrentIndex(i);
+			break;
+		}
+	}
+
+	QString status = tr("Imported TikTok Bridge data from %1.")
+		.arg(QFileInfo(path).fileName());
+	if (!cfg.expires_at.empty()) {
+		status += tr(" Expires: %1.")
+			.arg(QString::fromStdString(cfg.expires_at));
+	}
+
+	m_status_label->setText(status);
 	m_status_label->setStyleSheet("color: #2ecc71;");
 	m_status_label->setVisible(true);
 }

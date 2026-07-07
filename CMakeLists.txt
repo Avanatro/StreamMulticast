@@ -74,6 +74,7 @@ target_sources(
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/ObsServiceImport.cpp
+    src/core/TikTokBridgeImport.cpp
 
     # Pipeline layer
     src/pipeline/EncoderFactory.cpp
