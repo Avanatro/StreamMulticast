@@ -155,14 +155,19 @@ void obs_module_unload()
 
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 
-	/* Request all active outputs to stop.  stop() is non-blocking (lazy-join,
-	 * see OutputController) — this just kicks off a graceful RTMP stop
-	 * before the registry (and, via it, the ControllerReaper) does the real,
-	 * potentially-blocking teardown below. */
+	/* Request every output to stop, unconditionally — no is_running() gate
+	 * (fix-round 2, 2026-07-07).  is_running() excludes Reconnecting, which
+	 * left a window where a reconnecting controller reached
+	 * EndpointRegistry::~EndpointRegistry() (and, via it, the reaper) without
+	 * ever having its session detached here.  stop() is non-blocking and
+	 * idempotent (see OutputController's detach-and-reaper rule) — this just
+	 * kicks off a graceful RTMP stop before the registry destructor (and, via
+	 * it, the ControllerReaper) does the real, potentially-blocking teardown
+	 * below. */
 	if (g_registry) {
 		for (auto &ep : g_registry->all()) {
 			auto ctrl = g_registry->controller_for(ep.id);
-			if (ctrl && ctrl->is_running())
+			if (ctrl)
 				ctrl->stop();
 		}
 	}

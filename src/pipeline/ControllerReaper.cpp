@@ -9,6 +9,8 @@ GPLv2 — see LICENSE for full text.
 #include "OutputController.hpp"
 #include "../plugin-support.h"
 
+#include <exception>
+
 namespace smulti {
 
 ControllerReaper::ControllerReaper()
@@ -92,8 +94,23 @@ void ControllerReaper::worker_loop()
 		 * thread.  For a controller-shutdown job, if this was the last
 		 * reference, ~OutputController runs right after shutdown_blocking()
 		 * returns, also on this thread — its own shutdown_blocking() call is
-		 * then a no-op (idempotency guard). */
-		job();
+		 * then a no-op (idempotency guard).
+		 *
+		 * Wrapped in try/catch (fix-round 2, 2026-07-07): an exception escaping
+		 * job() would otherwise propagate out of this thread function and call
+		 * std::terminate() — crashing all of OBS.  Log and keep the worker
+		 * running so one bad job never kills the reaper thread (which would
+		 * strand every subsequent teardown, including obs_module_unload()'s
+		 * final drain-and-join). */
+		try {
+			job();
+		} catch (const std::exception &e) {
+			obs_log(LOG_ERROR, "ControllerReaper: teardown job threw an "
+			                    "exception — %s (continuing)", e.what());
+		} catch (...) {
+			obs_log(LOG_ERROR, "ControllerReaper: teardown job threw a "
+			                    "non-std exception (continuing)");
+		}
 	}
 }
 

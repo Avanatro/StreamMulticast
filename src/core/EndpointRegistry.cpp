@@ -41,9 +41,23 @@ EndpointRegistry::~EndpointRegistry()
 {
 	/* Hand every remaining controller off to the ControllerReaper instead of
 	 * destroying it here — the reaper is drained and block-joined afterwards
-	 * by obs_module_unload(), off whatever thread destroys this registry. */
-	for (auto &pair : m_controllers)
+	 * by obs_module_unload(), off whatever thread destroys this registry.
+	 *
+	 * stop() first, same detach path used by update()/remove() (fix-round 2,
+	 * 2026-07-07): a caller (e.g. obs_module_unload()) may have already
+	 * stopped a controller, but must not be relied on to have done so for
+	 * every controller — a Reconnecting controller in particular. Without
+	 * this, enqueue()'s shutdown_blocking() would run with the session still
+	 * fully attached: obs_output_force_stop() before the reconnect thread is
+	 * joined and m_output nulled, defeating the reconnect thread's identity
+	 * guard and risking a concurrent obs_output_start() vs.
+	 * obs_output_force_stop() on the same obs_output_t. stop() is idempotent
+	 * and cheap when already stopped, so calling it here unconditionally is
+	 * safe regardless of what the caller already did. */
+	for (auto &pair : m_controllers) {
+		pair.second->stop();
 		m_reaper.enqueue(std::move(pair.second));
+	}
 	m_controllers.clear();
 }
 
