@@ -60,6 +60,13 @@ All three run **at the same time**, from the same OBS scene.
 - StreamMulticast does not generate TikTok keys, perform TikTok login, or bundle third-party generators
 - Default handoff path: `%APPDATA%\obs-studio\plugin_config\streammulticast\tiktok_bridge.json`
 
+### v1.0.7 -- Stability & reliability
+- Fixed a UI freeze when deleting/editing an endpoint or exiting OBS while one of its servers had stopped responding — output teardown now runs on a dedicated background thread instead of blocking the dock
+- Fixed config autosave silently stopping after the first save (a data-loss risk if OBS crashed before the next manual save)
+- An invalid or rejected stream key now fails fast with a clear "Invalid stream key" error instead of retrying to reconnect forever
+- Fixed the Health tab's uptime column, which previously always showed 0
+- Internal thread-safety hardening around output start/stop/reconnect and health polling
+
 ## Not in v1.0.x (planned for v1.1+)
 
 - Per-output **resolution + FPS** (currently global)
