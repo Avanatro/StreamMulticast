@@ -30,7 +30,7 @@ EndpointRegistry::EndpointRegistry(ConfigStore &store, ControllerReaper &reaper)
 	          });
 
 	for (auto &ep : loaded) {
-		m_controllers[ep.id] = std::make_shared<OutputController>(ep);
+		m_controllers[ep.id] = std::make_shared<OutputController>(ep, m_reaper);
 		m_endpoints.push_back(std::move(ep));
 	}
 
@@ -92,7 +92,7 @@ void EndpointRegistry::add(Endpoint ep)
 			max_order = std::max(max_order, e.sort_order);
 		ep.sort_order = max_order + 1;
 
-		m_controllers[ep.id] = std::make_shared<OutputController>(ep);
+		m_controllers[ep.id] = std::make_shared<OutputController>(ep, m_reaper);
 		m_endpoints.push_back(ep);
 	}
 
@@ -119,34 +119,36 @@ void EndpointRegistry::update(const Endpoint &ep)
 			return;
 		}
 
-		const bool conn_changed = (it->server_url != ep.server_url ||
-		                           it->stream_key != ep.stream_key ||
-		                           it->encoder_backend != ep.encoder_backend ||
-		                           it->video_bitrate_kbps != ep.video_bitrate_kbps ||
-		                           it->audio_bitrate_kbps != ep.audio_bitrate_kbps);
-
 		*it = ep;
 
-		/* Restart controller if connection settings changed while running */
+		/* Recreate controller with new settings.  The OLD controller is
+		 * extracted here, WHILE HOLDING m_mutex; stop()/enqueue() happen
+		 * AFTER the lock is released below (see item 6 of the fix-round 1
+		 * decision log entry — stop() itself must never run under this
+		 * lock, not just the reaper hand-off).  was_running gates only
+		 * whether the NEW controller gets started afterward. */
 		auto ctrl_it = m_controllers.find(ep.id);
 		if (ctrl_it != m_controllers.end()) {
 			was_running = ctrl_it->second->is_running();
-			if (conn_changed && was_running)
-				ctrl_it->second->stop(); // request-only (lazy-join) — non-blocking
-
-			/* Recreate controller with new settings.  The OLD controller is
-			 * extracted here, WHILE HOLDING m_mutex, and handed to the
-			 * ControllerReaper below, AFTER the lock is released.  Letting it
-			 * destruct synchronously in this map assignment used to be able
-			 * to block this thread (and, via m_mutex, every other endpoint)
-			 * indefinitely inside obs_output_release() — see ControllerReaper. */
 			old_ctrl = std::move(ctrl_it->second);
-			ctrl_it->second = std::make_shared<OutputController>(ep);
+			ctrl_it->second = std::make_shared<OutputController>(ep, m_reaper);
 		}
 	}
 
-	if (old_ctrl)
-		m_reaper.enqueue(std::move(old_ctrl));
+	if (old_ctrl) {
+		/* stop() is cheap and non-blocking now (see OutputController's
+		 * detach-and-reaper rule) — call it unconditionally rather than only
+		 * when connection settings changed.  The old code's conn_changed
+		 * gate left a window where a Live-but-unrelated-settings-changed
+		 * controller kept streaming, un-stopped, while the just-created NEW
+		 * controller was started right below — briefly double-streaming to
+		 * the same endpoint until the reaper's shutdown_blocking() caught up
+		 * with the old one asynchronously.  Always stopping first also
+		 * closes that window for a Reconnecting old controller, which
+		 * is_running() never covered. */
+		old_ctrl->stop();
+		m_reaper.enqueue(old_ctrl);
+	}
 
 	if (was_running) {
 		/* Restart outside the lock */
@@ -176,14 +178,12 @@ void EndpointRegistry::remove(const std::string &id)
 		}
 		removed_ep = *it;
 
-		/* Request the output to stop, extract the controller WHILE HOLDING
-		 * m_mutex, then hand it to the ControllerReaper AFTER releasing the
-		 * lock (below) — see ControllerReaper for why this must never
-		 * destruct synchronously here. */
+		/* Extract the controller WHILE HOLDING m_mutex; stop()/enqueue() it
+		 * to the ControllerReaper AFTER releasing the lock (below) — stop()
+		 * itself must never run under this lock either, not just the reaper
+		 * hand-off (see item 6 of the fix-round 1 decision log entry). */
 		auto ctrl_it = m_controllers.find(id);
 		if (ctrl_it != m_controllers.end()) {
-			if (ctrl_it->second->is_running())
-				ctrl_it->second->stop(); // request-only (lazy-join) — non-blocking
 			old_ctrl = std::move(ctrl_it->second);
 			m_controllers.erase(ctrl_it);
 		}
@@ -191,8 +191,15 @@ void EndpointRegistry::remove(const std::string &id)
 		m_endpoints.erase(it);
 	}
 
-	if (old_ctrl)
-		m_reaper.enqueue(std::move(old_ctrl));
+	if (old_ctrl) {
+		/* stop() is cheap and non-blocking now — call it unconditionally
+		 * (previously gated on is_running(), which excludes Reconnecting;
+		 * that gap let a Reconnecting controller reach the reaper's
+		 * shutdown_blocking() with its reconnect thread still live and no
+		 * signal-disconnect done first). */
+		old_ctrl->stop();
+		m_reaper.enqueue(old_ctrl);
+	}
 
 	obs_log(LOG_INFO, "EndpointRegistry: removed endpoint '%s'", removed_ep.name.c_str());
 	notify_observers(ChangeKind::Removed, removed_ep);

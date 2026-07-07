@@ -49,12 +49,14 @@ using RegistryObserver = std::function<void(ChangeKind, const Endpoint &)>;
  * they run on the UI thread.
  *
  * Controller teardown: remove()/update() extract the OLD OutputController
- * shared_ptr from the map WHILE HOLDING m_mutex, release the lock, then hand
- * it to the ControllerReaper instead of letting it destruct synchronously
- * here.  ~OutputController (via shutdown_blocking()) can block indefinitely
- * on obs_output_release() if the RTMP send thread is stuck — doing that
- * while holding m_mutex would freeze every other endpoint's UI interaction
- * too.  See ControllerReaper for the full rationale.
+ * shared_ptr from the map WHILE HOLDING m_mutex, release the lock, and only
+ * THEN call stop() on it and hand it to the ControllerReaper — neither runs
+ * while m_mutex is held.  stop() itself is cheap and non-blocking (it
+ * detaches the session and hands the actual teardown to the reaper as a
+ * job — see OutputController's "Detach-and-reaper rule"), but this ordering
+ * is kept regardless so this lock can never again be the thing that
+ * propagates a slow teardown into every other endpoint's UI interaction.
+ * See ControllerReaper for the full rationale.
  *
  * Lifecycle: created in obs_module_load(), destroyed in obs_module_unload().
  * The destructor enqueues all remaining controllers to the reaper rather

@@ -6,6 +6,7 @@ GPLv2 — see LICENSE for full text.
 */
 
 #include "OutputController.hpp"
+#include "ControllerReaper.hpp"
 #include "../plugin-support.h"
 
 #include <obs.h>
@@ -77,8 +78,9 @@ int reconnect_delay_seconds(int attempt, int max_attempts)
 /* -----------------------------------------------------------------------
  * Constructor / Destructor
  * ----------------------------------------------------------------------- */
-OutputController::OutputController(const Endpoint &ep)
+OutputController::OutputController(const Endpoint &ep, ControllerReaper &reaper)
 	: m_endpoint(ep)
+	, m_reaper(reaper)
 {
 }
 
@@ -339,31 +341,122 @@ bool OutputController::start()
 /* -----------------------------------------------------------------------
  * stop()
  *
- * Non-blocking by design (Qt UI thread).  See the "Lazy-join rule" in the
- * class doc comment in OutputController.hpp — this method must never join
- * m_reconnect_thread.
+ * Non-blocking by design (Qt UI thread).  See the class doc comment's
+ * "Detach-and-reaper rule" in OutputController.hpp (fix-round 1,
+ * 2026-07-07) — this method must never join m_reconnect_thread and must
+ * never call a blocking libobs function itself; both are handed to the
+ * ControllerReaper as one job.
  * ----------------------------------------------------------------------- */
 void OutputController::stop()
 {
-	/* Flag any in-flight reconnect to abort.  The thread itself is joined
-	 * lazily by a future start() or by shutdown_blocking() — never here. */
+	/* Flag any in-flight reconnect to abort — checked by
+	 * reconnect_thread_func()'s poll loop and its session-validity guards. */
 	m_stop_reconnect.store(true);
 
-	std::lock_guard<std::mutex> lock(m_mutex);
+	obs_output_t *output_for_signals;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_state == OutputState::Idle && !m_output)
+			return; // nothing to do
+		output_for_signals = m_output;
+	}
 
-	/* Re-check state under the lock: handle_stop() (OBS signal thread) may
-	 * have changed m_state between an earlier unlocked check by the caller
-	 * and this point — this closes that TOCTOU window. */
-	if (m_state == OutputState::Idle)
-		return;
+	/* Disconnect the output's "start"/"stop" signal handlers BEFORE
+	 * re-taking m_mutex below, and deliberately OUTSIDE any lock on it.
+	 *
+	 * Why outside the lock: signal_handler_disconnect() locks libobs's own
+	 * per-signal mutex (see obs-studio-31.1.1/libobs/callback/signal.c,
+	 * signal_handler_disconnect()/signal_handler_signal()) — and that same
+	 * mutex is held by signal_handler_signal() for the *entire* callback
+	 * loop of an emission, i.e. for the whole duration of on_start_signal()/
+	 * on_stop_signal(), which themselves lock our m_mutex.  Calling
+	 * disconnect() while WE hold m_mutex would be a textbook AB-BA lock-order
+	 * inversion against the OBS signal thread (us: m_mutex -> libobs signal
+	 * mutex; signal thread: libobs signal mutex -> m_mutex) — a real
+	 * deadlock, verified against the vendored libobs source, not a
+	 * hypothetical one.
+	 *
+	 * Once signal_handler_disconnect() returns here, no on_start_signal/
+	 * on_stop_signal invocation for this output is either in flight or will
+	 * ever fire again (per the same source: a disconnect during an active
+	 * emission marks the callback for removal, and that removal completes,
+	 * still under the signal's own lock, before the emitting thread releases
+	 * it — so disconnect() blocks until any such removal is done). */
+	if (output_for_signals) {
+		signal_handler_t *sh = obs_output_get_signal_handler(output_for_signals);
+		signal_handler_disconnect(sh, "start", on_start_signal, this);
+		signal_handler_disconnect(sh, "stop",  on_stop_signal,  this);
+	}
 
-	obs_log(LOG_INFO, "OutputController [%s]: stopping", m_endpoint.name.c_str());
+	obs_output_t  *output_to_release;
+	obs_encoder_t *video_to_release;
+	obs_encoder_t *audio_to_release;
+	std::thread    reconnect_to_join;
 
-	if (m_output && obs_output_active(m_output))
-		obs_output_force_stop(m_output);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
 
-	do_release_encoders_locked();
-	m_state = OutputState::Idle;
+		/* Re-check under the lock: another stop() call, or handle_stop()'s
+		 * hard-fail path, may have already detached/idled the session while
+		 * we were disconnecting signals above. */
+		if (m_state == OutputState::Idle && !m_output)
+			return;
+
+		obs_log(LOG_INFO, "OutputController [%s]: stopping", m_endpoint.name.c_str());
+
+		/* Detach: extract everything into locals and clear our own fields.
+		 * From the caller's point of view the controller is Idle again
+		 * immediately — the actual (potentially blocking) teardown happens
+		 * on the reaper thread below. */
+		output_to_release = m_output;
+		video_to_release  = m_video_enc;
+		audio_to_release  = m_audio_enc;
+		reconnect_to_join = std::move(m_reconnect_thread);
+
+		m_output          = nullptr;
+		m_video_enc       = nullptr;
+		m_audio_enc       = nullptr;
+		m_state           = OutputState::Idle;
+		m_connected_since = std::chrono::steady_clock::time_point{};
+	}
+
+	/* Hand the detached session to the ControllerReaper as one job.  `self`
+	 * pins this controller alive until the job runs: reconnect_thread_func()
+	 * — if it is still unwinding after observing m_stop_reconnect / the
+	 * session-validity guard — keeps touching this-members
+	 * (m_reconnect_attempt, m_factory, ...) until it returns, and the job
+	 * below joins it before touching anything else.
+	 *
+	 * std::thread is move-only, but std::function<void()> requires a
+	 * copy-constructible target — wrap it in a shared_ptr so the lambda
+	 * stays copyable (the reaper's queue only needs to move std::function
+	 * itself, but std::function's own type-erased storage still requires
+	 * this). */
+	auto self               = shared_from_this();
+	auto reconnect_to_join_p = std::make_shared<std::thread>(std::move(reconnect_to_join));
+	m_reaper.enqueue([self, output_to_release, video_to_release, audio_to_release,
+	                  reconnect = std::move(reconnect_to_join_p)]() {
+		if (reconnect->joinable())
+			reconnect->join();
+
+		/* Unconditional — no obs_output_active() gate.  obs_output_force_stop()
+		 * itself only checks its own "stopping" dedup flag (see
+		 * obs-output.c), not active(); the rtmp_output module's stop path
+		 * joins its own connect thread even mid-connection-attempt, which is
+		 * exactly what closes the "stop() during the very first connect
+		 * attempt used to no-op" bug (obs_output_active() is false during
+		 * that window, so the old gate skipped force_stop entirely). */
+		if (output_to_release)
+			obs_output_force_stop(output_to_release);
+
+		if (video_to_release)
+			obs_encoder_release(video_to_release);
+		if (audio_to_release)
+			obs_encoder_release(audio_to_release);
+
+		if (output_to_release)
+			obs_output_release(output_to_release);
+	});
 }
 
 /* -----------------------------------------------------------------------
@@ -382,7 +475,12 @@ void OutputController::shutdown_blocking()
 		std::lock_guard<std::mutex> lock(m_mutex);
 		output_to_stop = m_output;
 	}
-	if (output_to_stop && obs_output_active(output_to_stop))
+	/* Unconditional — no obs_output_active() gate.  Same "connecting window"
+	 * argument as stop() (see its doc comment above): obs_output_force_stop()
+	 * itself doesn't require active() to be true, and this path only ever
+	 * runs on the reaper/unload thread anyway, so there's no UI-blocking
+	 * concern to trade off against by calling it unconditionally. */
+	if (output_to_stop)
 		obs_output_force_stop(output_to_stop);
 
 	/* Join the reconnect thread — this is the one place that is allowed to
@@ -529,18 +627,30 @@ void OutputController::handle_stop(int code)
 }
 
 /* -----------------------------------------------------------------------
- * reconnect_thread_func — exponential backoff reconnect loop
+ * reconnect_thread_func — exponential backoff reconnect loop.
+ * See the session-validity guard doc comment on the declaration in
+ * OutputController.hpp for the full rationale (fix-round 1, 2026-07-07).
  * ----------------------------------------------------------------------- */
 void OutputController::reconnect_thread_func()
 {
+	obs_output_t *captured_output;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		captured_output = m_output;
+	}
+	if (!captured_output)
+		return; // session already detached before this thread got to run
+
 	while (!m_stop_reconnect.load()) {
 		int delay = reconnect_delay_seconds(m_reconnect_attempt);
 		if (delay < 0) {
 			obs_log(LOG_ERROR, "OutputController [%s]: max reconnect attempts reached — FailedHard",
 			        m_endpoint.name.c_str());
 			std::lock_guard<std::mutex> lock(m_mutex);
-			m_state      = OutputState::FailedHard;
-			m_last_error = "Max reconnect attempts reached";
+			if (m_output == captured_output) {
+				m_state      = OutputState::FailedHard;
+				m_last_error = "Max reconnect attempts reached";
+			}
 			return;
 		}
 
@@ -556,15 +666,12 @@ void OutputController::reconnect_thread_func()
 
 		++m_reconnect_attempt;
 
-		obs_output_t *output;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stop_reconnect.load() || m_output != captured_output)
+				return; // stop() (or a fresh start()) already detached this session
 			do_release_encoders_locked(); // release stale encoders before restarting
-			output = m_output;
 		}
-
-		if (!output)
-			continue;
 
 		/* Re-attach guard: signal_stop() fires before the output's internal
 		 * "active" flag actually clears.  Attaching encoders while the
@@ -577,7 +684,7 @@ void OutputController::reconnect_thread_func()
 		for (int waited_ms = 0; waited_ms < REATTACH_WAIT_TIMEOUT_MS; waited_ms += REATTACH_POLL_MS) {
 			if (m_stop_reconnect.load())
 				break;
-			if (!obs_output_active(output)) {
+			if (!obs_output_active(captured_output)) {
 				became_inactive = true;
 				break;
 			}
@@ -595,6 +702,16 @@ void OutputController::reconnect_thread_func()
 			continue;
 		}
 
+		/* Session-validity guard #1 — before creating encoders.  If stop()
+		 * detached this session (or start() reclaimed it) while we were
+		 * waiting above, bail out now rather than creating encoders for a
+		 * session nobody owns any more. */
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stop_reconnect.load() || m_output != captured_output)
+				return;
+		}
+
 		obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti");
 		obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
 
@@ -608,16 +725,28 @@ void OutputController::reconnect_thread_func()
 			continue;
 		}
 
+		/* Session-validity guard #2 — immediately before obs_output_start().
+		 * This is the exact race Finding A.2 described: without this check,
+		 * a stop() that ran during encoder creation above could otherwise be
+		 * raced by obs_output_start() below on an output stop() has already
+		 * handed to the ControllerReaper.  If invalid, release the
+		 * just-created, not-yet-attached encoders and exit without touching
+		 * shared state further — the reaper owns the captured output now. */
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stop_reconnect.load() || m_output != captured_output) {
+				obs_encoder_release(video_enc);
+				obs_encoder_release(audio_enc);
+				return;
+			}
 			m_video_enc = video_enc;
 			m_audio_enc = audio_enc;
 		}
 
-		obs_output_set_video_encoder(output, video_enc);
-		obs_output_set_audio_encoder(output, audio_enc, 0);
+		obs_output_set_video_encoder(captured_output, video_enc);
+		obs_output_set_audio_encoder(captured_output, audio_enc, 0);
 
-		bool ok = obs_output_start(output);
+		bool ok = obs_output_start(captured_output);
 		if (ok) {
 			obs_log(LOG_INFO, "OutputController [%s]: reconnected successfully",
 			        m_endpoint.name.c_str());
@@ -625,7 +754,17 @@ void OutputController::reconnect_thread_func()
 			return;
 		}
 
-		const char *err = obs_output_get_last_error(output);
+		/* Re-check once more after obs_output_start() returns: if stop() ran
+		 * while obs_output_start() was in flight, do nothing further — the
+		 * output's signal handlers are already disconnected, and the reaper
+		 * owns cleanup of the now-detached captured_output. */
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_output != captured_output)
+				return;
+		}
+
+		const char *err = obs_output_get_last_error(captured_output);
 		obs_log(LOG_WARNING, "OutputController [%s]: reconnect attempt %d failed: %s",
 		        m_endpoint.name.c_str(), m_reconnect_attempt,
 		        err ? err : "(unknown)");

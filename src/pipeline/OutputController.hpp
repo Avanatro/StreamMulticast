@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <vector>
 #include <cstdint>
 
@@ -28,6 +29,8 @@ struct calldata;
 typedef struct calldata calldata_t;
 
 namespace smulti {
+
+class ControllerReaper;
 
 /**
  * OutputState — state machine for a single RTMP output.
@@ -67,23 +70,28 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  *     from more than one of the threads above and are guarded by m_mutex.
  *     There is no field that is mutated from two threads without the lock.
  *
- * Lazy-join rule (load-bearing — do not "simplify" this away):
- *   stop() (called on the Qt UI thread) NEVER joins m_reconnect_thread — it
- *   only sets m_stop_reconnect and force-stops the output.  Joining a thread
- *   that may be sleeping in a backoff wait, or blocked inside
- *   obs_output_start() on a socket connect, would block the UI.  The join is
- *   paid instead by whichever of these runs next:
- *     - start()             — before it re-creates encoders (Qt thread; the
- *                              wait here is bounded by the reconnect thread's
- *                              stop-flag polling, not by the network).
- *     - shutdown_blocking()  — on the ControllerReaper thread, where a long
- *                              block is fine because it is off the UI thread.
+ * Detach-and-reaper rule (fix-round 1, 2026-07-07 — load-bearing, do not
+ * "simplify" this away): stop() never blocks and never joins
+ * m_reconnect_thread itself.  Instead it disconnects the output's "start"/
+ * "stop" signal handlers (so no late signal can ever touch this controller
+ * again), then — under m_mutex — extracts m_output, m_video_enc, m_audio_enc
+ * and m_reconnect_thread into locals and clears its own fields (state goes
+ * to Idle immediately, from the caller's point of view).  It then hands those
+ * extracted resources, plus a shared_from_this() pin, to the
+ * ControllerReaper as one job that joins the reconnect thread, force-stops
+ * the output, and releases everything — off the Qt UI thread.  This replaces
+ * the earlier "lazy-join" design, which left a window where
+ * reconnect_thread_func() could call obs_output_start() after a user-issued
+ * stop() had already run (see reconnect_thread_func()'s session-validity
+ * guard below for the other half of that fix).
  *
  * Lifecycle of encoders vs output:
- *   start() → create encoders → attach → obs_output_start
- *   stop()  → obs_output_force_stop → release encoders (lazy-joins reconnect
- *             thread separately, see above)
- *   shutdown_blocking() → force_stop → join reconnect thread → release
+ *   start()             → create encoders → attach → obs_output_start
+ *   stop()               → disconnect signals → detach session under
+ *                           m_mutex → enqueue {join reconnect thread →
+ *                           obs_output_force_stop → release encoders →
+ *                           obs_output_release} on the ControllerReaper
+ *   shutdown_blocking()  → force_stop → join reconnect thread → release
  *             encoders → obs_output_release (the actual, indefinitely
  *             blocking sync point — see shutdown_blocking() doc below)
  *
@@ -94,9 +102,15 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  * independent ref and releases its own, not because of any synchronization
  * with the output's internal state.
  */
-class OutputController {
+class OutputController : public std::enable_shared_from_this<OutputController> {
 public:
-	explicit OutputController(const Endpoint &ep);
+	/**
+	 * `reaper` must outlive this controller (EndpointRegistry, which owns
+	 * both, guarantees this — see EndpointRegistry's constructor).  stop()
+	 * hands detached-session teardown jobs to it instead of blocking the
+	 * calling thread.
+	 */
+	OutputController(const Endpoint &ep, ControllerReaper &reaper);
 	~OutputController();
 
 	/* Non-copyable, non-movable */
@@ -109,19 +123,23 @@ public:
 	 * Creates encoders, creates output, starts streaming.
 	 * Returns false immediately if encoder creation fails.
 	 *
-	 * Joins a previous reconnect thread first if one is still around (see
-	 * the "Lazy-join rule" above) — this can block the calling (Qt UI)
-	 * thread briefly, but only for the bounded reconnect stop-flag poll,
-	 * never indefinitely.
+	 * Joins a previous reconnect thread first if one is still around (this
+	 * only happens when start() reclaims a controller that is currently
+	 * Reconnecting without having gone through stop() first) — this can
+	 * block the calling (Qt UI) thread briefly, but only for the bounded
+	 * reconnect stop-flag poll, never indefinitely.
 	 */
 	bool start();
 
 	/**
 	 * Request the RTMP output to stop.
-	 * Non-blocking: force-stops the output and releases encoders, but never
-	 * joins m_reconnect_thread (see the "Lazy-join rule" above).  If
-	 * currently reconnecting, flags the reconnect loop to abort; the thread
-	 * itself is joined lazily by a later start() or by shutdown_blocking().
+	 *
+	 * Non-blocking and race-free by construction: detaches the session
+	 * (disconnects the output's signal handlers, then extracts m_output,
+	 * m_video_enc, m_audio_enc and m_reconnect_thread under m_mutex) and
+	 * hands teardown off as one job to the ControllerReaper.  It never
+	 * blocks and never joins on the calling thread — see the class doc
+	 * comment's "Detach-and-reaper rule".
 	 */
 	void stop();
 
@@ -189,6 +207,23 @@ private:
 	static void on_stop_signal(void *data, calldata_t *cd);
 
 	void handle_stop(int error_code);
+
+	/**
+	 * reconnect_thread_func — exponential backoff reconnect loop.
+	 *
+	 * Session-validity guard (fix-round 1, 2026-07-07): captures the
+	 * obs_output_t* this thread was spawned for once, at entry.  Before
+	 * creating encoders, and again immediately before obs_output_start(),
+	 * re-checks under m_mutex that m_stop_reconnect is still false AND
+	 * m_output still equals the captured pointer.  If either check fails —
+	 * meaning stop() has since detached this session, or start() has since
+	 * replaced it — the thread releases any not-yet-attached, self-created
+	 * encoders and returns without touching shared state further; the
+	 * ControllerReaper (via stop()'s detached job) owns cleanup of the
+	 * captured output from that point on.  This closes the race where this
+	 * thread could otherwise call obs_output_start() after a user-issued
+	 * stop() already ran.
+	 */
 	void reconnect_thread_func();
 
 	/** Assumes m_mutex is already held by the caller. */
@@ -197,6 +232,7 @@ private:
 
 	Endpoint            m_endpoint;
 	EncoderFactory      m_factory;
+	ControllerReaper   &m_reaper;
 
 	mutable std::mutex  m_mutex;
 	OutputState         m_state    {OutputState::Idle};

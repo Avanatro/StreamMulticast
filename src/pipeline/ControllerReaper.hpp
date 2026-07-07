@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -32,14 +33,21 @@ class OutputController;
  *
  * Fix: EndpointRegistry extracts the OutputController shared_ptr from its map
  * under its own lock, releases that lock, then hands the controller to this
- * reaper.  A single dedicated worker thread drains a FIFO queue, calling
- * OutputController::shutdown_blocking() (and, if that was the last
- * reference, running ~OutputController) for each one — off the Qt thread.
+ * reaper.  A single dedicated worker thread drains a FIFO queue of jobs — off
+ * the Qt thread.
  *
- * Deliberately NOT a generic thread pool: one thread, one job type
- * (shutdown_blocking() on a queued controller), FIFO order, no futures, no
- * cancellation beyond process shutdown.  If a second job type is ever
- * needed, that is a new component, not a reason to generalize this one.
+ * Job model (fix-round 1, 2026-07-07): the queue holds `std::function<void()>`
+ * jobs, not just controllers.  This lets `OutputController::stop()` (see its
+ * doc comment) also detach a live session (output + encoders + reconnect
+ * thread) onto this same reaper instead of blocking the caller — it is no
+ * longer only "the place ~OutputController's teardown runs".  The original
+ * controller-queue use is kept as a convenience overload:
+ * `enqueue(shared_ptr<OutputController>)` just wraps
+ * `[c = std::move(controller)] { c->shutdown_blocking(); }` and enqueues that.
+ *
+ * Deliberately NOT a generic thread pool: one thread, FIFO order, no futures,
+ * no cancellation beyond process shutdown.  If parallelism is ever needed,
+ * that is a new component, not a reason to generalize this one.
  *
  * Shutdown discipline: shutdown() signals the worker, drains the queue, and
  * then BLOCK-JOINS the worker thread.  It must never detach — a detached
@@ -57,15 +65,24 @@ public:
 	ControllerReaper &operator=(const ControllerReaper &) = delete;
 
 	/**
-	 * Enqueue a controller for asynchronous shutdown_blocking() + release.
-	 * Safe to call from the Qt UI thread — this only ever takes a short
-	 * lock, never blocks on the controller's own teardown.
+	 * Enqueue an arbitrary teardown job for the worker thread to run
+	 * asynchronously (FIFO order relative to every other queued job, whether
+	 * it arrived via this overload or the controller convenience overload
+	 * below).  Safe to call from the Qt UI thread — this only ever takes a
+	 * short lock, never blocks on the job itself.
 	 *
 	 * If called after shutdown() has already been requested (a stray
-	 * remove()/update() racing the tail end of obs_module_unload), the
-	 * teardown runs synchronously on the calling thread instead of being
-	 * silently dropped — by that point in the plugin's lifecycle everything
-	 * is already tearing down, so this is an acceptable, rare fallback.
+	 * caller racing the tail end of obs_module_unload), the job runs
+	 * synchronously on the calling thread instead of being silently dropped
+	 * — by that point in the plugin's lifecycle everything is already
+	 * tearing down, so this is an acceptable, rare fallback.
+	 */
+	void enqueue(std::function<void()> job);
+
+	/**
+	 * Convenience overload, kept for the original teardown use: enqueue a
+	 * controller for asynchronous shutdown_blocking() + release.  Equivalent
+	 * to `enqueue([c = std::move(controller)] { c->shutdown_blocking(); })`.
 	 */
 	void enqueue(std::shared_ptr<OutputController> controller);
 
@@ -80,11 +97,11 @@ public:
 private:
 	void worker_loop();
 
-	std::mutex                                    m_mutex;
-	std::condition_variable                       m_cv;
-	std::deque<std::shared_ptr<OutputController>> m_queue;
-	bool                                           m_shutting_down {false};
-	std::thread                                   m_worker;
+	std::mutex                         m_mutex;
+	std::condition_variable            m_cv;
+	std::deque<std::function<void()>>  m_queue;
+	bool                                m_shutting_down {false};
+	std::thread                        m_worker;
 };
 
 } // namespace smulti
