@@ -177,8 +177,9 @@ void HealthTab::setup_ui()
 
 	layout->addWidget(m_table, 1 /* stretch */);
 
-	/* Footer — cross-sell link to Stream Health Doctor
-	 * Plausible tracking via UTM param in the URL. */
+	/* Footer — cross-sell link to Stream Health Doctor plus a discreet
+	 * Avanatro credit linking to the homepage.
+	 * Plausible tracking via UTM param in the URLs. */
 	m_footer = new QLabel(this);
 	m_footer->setOpenExternalLinks(true);
 	m_footer->setAlignment(Qt::AlignCenter);
@@ -186,7 +187,11 @@ void HealthTab::setup_ui()
 		QStringLiteral(
 		    "<small><a href='https://tools.avanatro.com/stream-health/"
 		    "?utm_source=streammulticast&utm_medium=dock_footer'>"
-		    "Detailed Diagnostics &rarr; Stream Health Doctor</a></small>"
+		    "Detailed Diagnostics &rarr; Stream Health Doctor</a>"
+		    "&nbsp;&nbsp;&middot;&nbsp;&nbsp;"
+		    "<span style='color:gray'>by <a href='https://avanatro.com/"
+		    "?utm_source=streammulticast&utm_medium=dock_footer'>Avanatro</a>"
+		    "</span></small>"
 		)
 	);
 	layout->addWidget(m_footer);
