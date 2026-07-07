@@ -26,11 +26,13 @@ class ConfigTab;
  *   Tab 1 — "Configure" (ConfigTab — Endpoint-Karten)
  *
  * Registered via obs_frontend_add_dock_by_id("avanatro_streammulticast", ...).
- * The dock is parented to OBS's QMainWindow after registration.
- *
- * AVANATRO-VERIFY: obs_frontend_add_dock_by_id — after calling this, Qt takes
- * ownership of the widget.  Do NOT delete MultistreamDock manually;
- * OBS/Qt will do it on shutdown.  Confirm this in OBS 31.x source.
+ * The dock is parented to OBS's QMainWindow ONLY on the success path of that
+ * call — OBSStudioAPI::obs_frontend_add_dock_by_id() returns false BEFORE
+ * calling setWidget() when the dock id is already registered, in which case
+ * the caller (plugin-main.cpp) still owns this object and is responsible for
+ * deleting it.  On success, Qt takes ownership and plugin-main.cpp must not
+ * delete it — it explicitly unregisters it instead, via
+ * obs_frontend_remove_dock(), in obs_module_unload().
  */
 class MultistreamDock : public QWidget {
 	Q_OBJECT

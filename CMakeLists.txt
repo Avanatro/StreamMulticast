@@ -79,6 +79,7 @@ target_sources(
     # Pipeline layer
     src/pipeline/EncoderFactory.cpp
     src/pipeline/OutputController.cpp
+    src/pipeline/ControllerReaper.cpp
     src/pipeline/HealthSampler.cpp
 
     # UI layer
