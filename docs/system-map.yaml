@@ -164,21 +164,56 @@ nodes:
         behavior: "Unavailable GPU backend falls back to x264 with a log line."
         verification: []
     status: building
-  - id: video-framing
+  - id: canvas-selection
     lane: pipeline
-    goal: "Each output encodes the intended frame shape (source, vertical, or a chosen OBS canvas)."
-    owns: [output.video-framing]
-    needs: [endpoint-model, encoder-factory]
+    goal: "Each endpoint encodes from the canvas it selected or refuses to start with a reason."
+    owns: [output.canvas-selection]
+    needs: [endpoint-model]
     code:
-      - src/pipeline/OutputController.cpp
+      - src/core/CanvasResolve.hpp
+      - src/core/CanvasResolve.cpp
+      - tests/test_canvas_resolve.cpp
     works_when:
-      - id: video-framing.vertical-letterbox
-        behavior: "Vertical letterbox endpoint encodes 1080x1920 (UNVERIFIED: libobs ignores obs_output_set_video_conversion for encoded outputs)."
-        verification: []
-      - id: video-framing.canvas-select
-        behavior: "planned: endpoint can encode from a chosen OBS canvas."
-        verification: []
-    status: unknown
+      - id: canvas-selection.resolve
+        behavior: "A canvas ref resolves: empty or main -> main; uuid first, then name; unknown ref or canvas without video mix -> refused with a reason."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_empty_ref_is_main
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_uuid_hit
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_uuid_miss_name_hit
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_both_miss_refused
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_without_video_refused
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_ref_to_main_canvas_is_main
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
+            checked_at: 2026-10-19
+    status: building
   - id: controller-reaper
     lane: pipeline
     goal: "Blocking output teardown never runs on the UI thread."
@@ -196,7 +231,7 @@ nodes:
     lane: pipeline
     goal: "One endpoint streams, reconnects with backoff and stops without blocking the UI."
     owns: [output.state-machine, output.reconnect-policy, output.libobs-objects]
-    needs: [encoder-factory, video-framing, controller-reaper]
+    needs: [encoder-factory, canvas-selection, controller-reaper]
     code:
       - src/pipeline/OutputController.hpp
       - src/pipeline/OutputController.cpp
