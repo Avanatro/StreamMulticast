@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 struct obs_data;
 typedef struct obs_data obs_data_t;
@@ -38,6 +39,30 @@ bool scale_ref_needs_repair(Vec2d ref);
  * number of items rewritten; 0 when the canvas size is zero or nothing needs repair (idempotent).
  */
 size_t repair_scene_scale_refs(obs_data_t *scene_settings, uint32_t canvas_w, uint32_t canvas_h);
+
+/** True when an item scale makes it invisible: a component is zero or not finite (a negative flip is valid). */
+bool item_scale_needs_repair(Vec2d scale);
+
+/**
+ * The repaired value for the scale libobs loads from one saved item (`scale_rel` in relative mode, i.e.
+ * pos_rel + scale_rel + scale_ref saved; `scale` in absolute mode), or nullopt when that scale is usable or
+ * the canvas size is zero. Does not modify `item_data`.
+ * - bounds_type != NONE: {1,1} (the bounds give the size; a zero scale makes the bounds math NaN).
+ * - bounds_type == NONE: recomputed from the other saved representation with the canvas height:
+ *   relative mode from the absolute `scale` (scale_rel = scale * scale_ref.y / canvas_h, inverse of libobs
+ *   item_canvas_scale), absolute mode from `scale_rel` (scale = scale_rel * canvas_h / scale_ref.y); a
+ *   scale_ref that needs repair counts as the canvas size, nested scenes are never rescaled. Without a
+ *   usable alternative: {1,1} (native size, visible instead of invisible).
+ */
+std::optional<Vec2d> repaired_item_scale(obs_data_t *item_data, uint32_t canvas_w, uint32_t canvas_h,
+					 bool nested_scene);
+
+/**
+ * Writes repaired_item_scale into every saved item of `scene_settings["items"]` (treated as not nested:
+ * the saved data does not name the source type). Returns the number of items rewritten; idempotent.
+ * Run after repair_scene_scale_refs so the scale_ref used by the recompute is already valid.
+ */
+size_t repair_scene_item_scales(obs_data_t *scene_settings, uint32_t canvas_w, uint32_t canvas_h);
 
 /** The relative transform of one saved scene item, as libobs scene_save writes it. */
 struct RelativeItemTransform {

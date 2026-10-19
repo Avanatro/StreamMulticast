@@ -107,8 +107,10 @@ bool hold_item_source(obs_scene_t *, obs_sceneitem_t *item, void *param)
 
 /**
  * Items whose saved scale_ref is unusable ({0,0}: scenes imported by the TASK-13 build, copied in a canvas
- * without video) get the canvas base size as scale_ref; the scene then reloads its items from the patched
- * settings (libobs scene_load reads scale_ref). Idempotent: a scene without a broken ref is not reloaded.
+ * without video) get the canvas base size as scale_ref; items whose saved scale is {0,0} or not finite
+ * (seen live on a copied Webcam item) get a usable scale (repair_scene_item_scales: {1,1} when bounded,
+ * else recomputed). The scene then reloads its items from the patched settings (libobs scene_load reads
+ * scale_ref and the scale). Idempotent: a scene without anything to repair is not reloaded.
  * UI thread only; refs are taken and released here.
  */
 void repair_scale_refs(obs_canvas_t *canvas)
@@ -127,8 +129,10 @@ void repair_scale_refs(obs_canvas_t *canvas)
 			continue;
 		obs_source_save(scene_src); // writes the current items into the settings (same object as below)
 		obs_data_t *settings = obs_source_get_settings(scene_src);
+		/* scale_ref first: the scale recompute divides by it. */
 		const size_t repaired = repair_scene_scale_refs(settings, ovi.base_width, ovi.base_height);
-		if (repaired > 0) {
+		const size_t scales = repair_scene_item_scales(settings, ovi.base_width, ovi.base_height);
+		if (repaired > 0 || scales > 0) {
 			/* scene_load removes every item before re-adding it: keep the sources alive meanwhile (a
 			 * source used only by this scene would otherwise be destroyed and its item lost), as the OBS
 			 * frontend undo does. */
@@ -137,8 +141,9 @@ void repair_scale_refs(obs_canvas_t *canvas)
 			obs_source_load(scene_src);
 			for (obs_source_t *s : held)
 				obs_source_release(s);
-			obs_log(LOG_INFO, "owned canvas: repaired scale_ref of %zu item(s) in scene '%s' (%ux%u)", repaired,
-				obs_source_get_name(scene_src), ovi.base_width, ovi.base_height);
+			obs_log(LOG_INFO,
+				"owned canvas: repaired scale_ref of %zu item(s) and scale of %zu item(s) in scene '%s' (%ux%u)",
+				repaired, scales, obs_source_get_name(scene_src), ovi.base_width, ovi.base_height);
 		}
 		obs_data_release(settings);
 	}

@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <limits>
+#include <optional>
 
 using smulti::AbsoluteItemTransform;
 using smulti::read_relative_transform;
@@ -222,4 +223,133 @@ SMULTI_TEST(layout_import_reads_saved_relative_item)
 	EXPECT_TRUE(!read_relative_transform(abs_item, unused));
 	EXPECT_TRUE(!read_relative_transform(nullptr, unused));
 	obs_data_release(abs_item);
+}
+
+/* ---- item scale repair (TASK-27): stored scale {0,0} or non-finite ------------------------------- */
+
+namespace {
+
+/** One saved item. relative: pos_rel/scale_rel/scale_ref keys (libobs relative mode); else absolute mode
+ * ("scale" is what libobs loads). `alt` is the other representation (absolute "scale" in relative mode,
+ * "scale_rel" in absolute mode); alt.x < -100 means "not saved". */
+obs_data_t *saved_item(bool relative, Vec2d stored, int bounds_type, Vec2d alt, Vec2d ref)
+{
+	obs_data_t *it = obs_data_create();
+	obs_data_set_string(it, "name", "Webcam");
+	obs_data_set_int(it, "bounds_type", bounds_type);
+	set_vec(it, "scale_ref", ref.x, ref.y);
+	if (relative) {
+		set_vec(it, "pos_rel", 0.1, -0.2);
+		set_vec(it, "scale_rel", stored.x, stored.y);
+		if (alt.x > -100.0)
+			set_vec(it, "scale", alt.x, alt.y);
+	} else {
+		set_vec(it, "pos", 60.0, 1100.0);
+		set_vec(it, "scale", stored.x, stored.y);
+		if (alt.x > -100.0)
+			set_vec(it, "scale_rel", alt.x, alt.y);
+	}
+	return it;
+}
+
+obs_data_t *scene_of(obs_data_t *item)
+{
+	obs_data_t *scene = obs_data_create();
+	obs_data_array_t *items = obs_data_array_create();
+	obs_data_array_push_back(items, item);
+	obs_data_release(item); // the array holds its own ref
+	obs_data_set_array(scene, "items", items);
+	obs_data_array_release(items);
+	return scene;
+}
+
+Vec2d first_item_vec(obs_data_t *scene, const char *name)
+{
+	obs_data_array_t *items = obs_data_get_array(scene, "items");
+	obs_data_t *it = obs_data_array_item(items, 0);
+	Vec2d v = get_vec(it, name);
+	obs_data_release(it);
+	obs_data_array_release(items);
+	return v;
+}
+
+constexpr Vec2d kNoAlt{-1000.0, -1000.0};
+constexpr int kBoundsNone = 0;
+constexpr int kBoundsScaleInner = 2;
+
+} // namespace
+
+SMULTI_TEST(canvas_scale_repair_needs_repair_cases)
+{
+	const double inf = std::numeric_limits<double>::infinity();
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+	EXPECT_TRUE(smulti::item_scale_needs_repair({0.0, 0.0}));
+	EXPECT_TRUE(smulti::item_scale_needs_repair({1.0, 0.0}));
+	EXPECT_TRUE(smulti::item_scale_needs_repair({inf, 1.0}));
+	EXPECT_TRUE(smulti::item_scale_needs_repair({1.0, nan}));
+	EXPECT_TRUE(!smulti::item_scale_needs_repair({1.0, 1.0}));
+	EXPECT_TRUE(!smulti::item_scale_needs_repair({-1.0, 0.5})); // a flip is a valid scale
+}
+
+SMULTI_TEST(canvas_scale_repair_bounded_zero_scale_becomes_one)
+{
+	obs_data_t *scene = scene_of(saved_item(true, {0.0, 0.0}, kBoundsScaleInner, {0.0, 0.0}, {1080, 1920}));
+	EXPECT_EQ(smulti::repair_scene_item_scales(scene, 1080, 1920), static_cast<size_t>(1));
+	const Vec2d s = first_item_vec(scene, "scale_rel");
+	EXPECT_TRUE(near(s.x, 1.0) && near(s.y, 1.0));
+	obs_data_release(scene);
+}
+
+SMULTI_TEST(canvas_scale_repair_unbounded_relative_recomputes_from_absolute)
+{
+	/* scale_ref 540x960 on a 1920-high canvas: libobs shows scale_rel * 1920/960, so an absolute 1.0 is a
+	 * relative 0.5 (inverse of item_canvas_scale). */
+	obs_data_t *item = saved_item(true, {0.0, 0.0}, kBoundsNone, {1.0, 1.0}, {540, 960});
+	const std::optional<Vec2d> v = smulti::repaired_item_scale(item, 1080, 1920, false);
+	EXPECT_TRUE(v.has_value());
+	EXPECT_TRUE(v && near(v->x, 0.5) && near(v->y, 0.5));
+	/* nested scenes are never rescaled by libobs */
+	const std::optional<Vec2d> n = smulti::repaired_item_scale(item, 1080, 1920, true);
+	EXPECT_TRUE(n && near(n->x, 1.0) && near(n->y, 1.0));
+	obs_data_release(item);
+}
+
+SMULTI_TEST(canvas_scale_repair_unbounded_absolute_recomputes_from_scale_rel)
+{
+	/* absolute mode: "scale" is loaded; recompute it from scale_rel and the canvas size. */
+	obs_data_t *scene = scene_of(saved_item(false, {0.0, 0.0}, kBoundsNone, {0.25, 0.25}, {1080, 960}));
+	EXPECT_EQ(smulti::repair_scene_item_scales(scene, 1080, 1920), static_cast<size_t>(1));
+	const Vec2d s = first_item_vec(scene, "scale");
+	EXPECT_TRUE(near(s.x, 0.5) && near(s.y, 0.5));
+	obs_data_release(scene);
+}
+
+SMULTI_TEST(canvas_scale_repair_without_usable_alternative_falls_back_to_one)
+{
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+	obs_data_t *a = saved_item(true, {nan, nan}, kBoundsNone, {0.0, 0.0}, {0, 0}); // broken ref too
+	const std::optional<Vec2d> va = smulti::repaired_item_scale(a, 1080, 1920, false);
+	EXPECT_TRUE(va && near(va->x, 1.0) && near(va->y, 1.0));
+	obs_data_release(a);
+
+	obs_data_t *b = saved_item(true, {0.0, 0.0}, kBoundsNone, kNoAlt, {1080, 1920});
+	const std::optional<Vec2d> vb = smulti::repaired_item_scale(b, 1080, 1920, false);
+	EXPECT_TRUE(vb && near(vb->x, 1.0) && near(vb->y, 1.0));
+	obs_data_release(b);
+}
+
+SMULTI_TEST(canvas_scale_repair_keeps_usable_and_is_idempotent)
+{
+	obs_data_t *keep = saved_item(true, {-1.0, 0.5}, kBoundsNone, {-1.0, 0.5}, {1080, 1920});
+	EXPECT_TRUE(!smulti::repaired_item_scale(keep, 1080, 1920, false).has_value());
+	obs_data_release(keep);
+
+	obs_data_t *scene = scene_of(saved_item(true, {0.0, 0.0}, kBoundsScaleInner, kNoAlt, {1080, 1920}));
+	EXPECT_EQ(smulti::repair_scene_item_scales(scene, 1080, 1920), static_cast<size_t>(1));
+	EXPECT_EQ(smulti::repair_scene_item_scales(scene, 1080, 1920), static_cast<size_t>(0));
+	/* a zero canvas never repairs */
+	obs_data_t *other = scene_of(saved_item(true, {0.0, 0.0}, kBoundsNone, kNoAlt, {1080, 1920}));
+	EXPECT_EQ(smulti::repair_scene_item_scales(other, 0, 0), static_cast<size_t>(0));
+	obs_data_release(other);
+	obs_data_release(scene);
 }

@@ -25,6 +25,7 @@ GPLv2 — see LICENSE for full text.
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -191,6 +192,7 @@ struct ItemCopy {
 	size_t copied = 0;
 	size_t failed = 0;
 	size_t without_saved_transform = 0;
+	size_t scale_repaired = 0; ///< items whose copied scale was {0,0} or not finite
 };
 
 /** The saved entry of the item with this id, or nullptr (caller releases). */
@@ -233,9 +235,17 @@ void copy_item(ItemCopy *ctx, obs_sceneitem_t *src_item)
 	obs_sceneitem_get_info2(src_item, &info); // rot, alignment, bounds type/alignment, crop_to_bounds
 	obs_data_t *saved = saved_item_by_id(ctx->saved_items, obs_sceneitem_get_id(src_item));
 	RelativeItemTransform rel;
+	const char *source_id = obs_source_get_id(source);
+	const bool nested_scene = source_id && std::strcmp(source_id, "scene") == 0;
+	/* Never copy an invisible scale: same repair as OwnedCanvas::ensure (the original is only read). */
+	const std::optional<Vec2d> fixed_scale =
+		saved ? repaired_item_scale(saved, ctx->canvas_w, ctx->canvas_h, nested_scene) : std::nullopt;
+	if (fixed_scale)
+		++ctx->scale_repaired;
 	if (saved && read_relative_transform(saved, rel)) {
-		const char *id = obs_source_get_id(source);
-		rel.nested_scene = id && std::strcmp(id, "scene") == 0;
+		rel.nested_scene = nested_scene;
+		if (fixed_scale)
+			rel.scale_rel = *fixed_scale;
 		const AbsoluteItemTransform abs = relative_to_absolute(rel, ctx->canvas_w, ctx->canvas_h);
 		vec2_set(&info.pos, static_cast<float>(abs.pos.x), static_cast<float>(abs.pos.y));
 		vec2_set(&info.scale, static_cast<float>(abs.scale.x), static_cast<float>(abs.scale.y));
@@ -243,6 +253,12 @@ void copy_item(ItemCopy *ctx, obs_sceneitem_t *src_item)
 	} else {
 		/* Absolute-coordinate mode (get_info2 returns the raw values) or no saved entry. */
 		++ctx->without_saved_transform;
+		if (fixed_scale) {
+			vec2_set(&info.scale, static_cast<float>(fixed_scale->x), static_cast<float>(fixed_scale->y));
+		} else if (!saved && item_scale_needs_repair({info.scale.x, info.scale.y})) {
+			vec2_set(&info.scale, 1.0f, 1.0f); // no saved data to recompute from: native size
+			++ctx->scale_repaired;
+		}
 	}
 	obs_data_release(saved);
 	obs_sceneitem_set_info2(dst_item, &info);
@@ -417,6 +433,9 @@ ImportOutcome import_scene(OwnedCanvas &owned, const ImportSelection &sel)
 		if (ctx.without_saved_transform > 0)
 			obs_log(LOG_INFO, "import: %zu item(s) of \"%s\" copied with absolute transform values",
 				ctx.without_saved_transform, sel.scene_name.c_str());
+		if (ctx.scale_repaired > 0)
+			obs_log(LOG_INFO, "import: repaired the scale of %zu item(s) of \"%s\" ({0,0} or not finite)",
+				ctx.scale_repaired, sel.scene_name.c_str());
 		if (non_finite > 0)
 			obs_log(LOG_WARNING, "import: %zu item(s) of \"%s\" have a non-finite scale", non_finite,
 				result.final_name.c_str());

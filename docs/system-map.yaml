@@ -415,6 +415,48 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: start OBS with the four V scenes imported by the TASK-13 build; the log shows one 'repaired scale_ref' line per scene, the V preview shows the items, a second start logs no repair (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-26)"
             result: pending
+      - id: owned-vertical-canvas.zero-scale-repair
+        behavior: "ensure() also repairs saved items whose loaded scale (scale_rel in relative mode, scale in absolute mode) is {0,0} or not finite, after the scale_ref repair and in the same reload: bounds_type != NONE -> {1,1}; bounds_type == NONE -> recomputed from the other saved representation and the canvas height (relative: scale_rel = scale * scale_ref.y / h; absolute: scale = scale_rel * h / scale_ref.y), {1,1} without a usable one. Usable scales (including negative flips) are untouched, idempotent, one log line per repaired scene naming both counts. The import copy path applies the same repaired_item_scale to the value it copies (the original is only read) and logs the count. Pure part: repaired_item_scale / repair_scene_item_scales (src/core/CanvasScaleRef); the OBS adapter is only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_needs_repair_cases
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_bounded_zero_scale_becomes_one
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_unbounded_relative_recomputes_from_absolute
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_unbounded_absolute_recomputes_from_scale_rel
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_without_usable_alternative_falls_back_to_one
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_repair_keeps_usable_and_is_idempotent
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_scale_repair_, local run 2026-10-19; failed to compile before the API existed, 6/6 failed against a stub, 6/6 passed after implementation (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: manual
+            reference: "OBS runtime check: start OBS with V Gaming whose Webcam item has scale {0,0}; the log shows 'repaired scale_ref of 0 item(s) and scale of 1 item(s) in scene 'V Gaming'', the webcam is visible in the V preview, a second start logs no repair (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-27)"
+            result: pending
       - id: owned-vertical-canvas.own-mix
         behavior: "The owned canvas has its own video mix (1080x1920, main fps) independent of whether Aitum Vertical is active; Aitum's canvas and the V scenes are never written."
         verification:
@@ -623,7 +665,7 @@ nodes:
             reference: "OBS runtime check: Fill on the webcam source fills 1080x1920 centred; numeric edits move the item; add, remove, reorder and visibility change the preview; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-12)"
             result: pending
       - id: ui-vertical-dock.import-scenes
-        behavior: "The Scenes tab has \"Import scenes from canvas...\": a modal dialog lists every canvas from snapshot_canvases except the main and the owned one, with their scenes (obs_canvas_enum_scenes) as checkboxes; scenes that contain a group are shown disabled (a group source cannot be shared with the original). Per selected scene import_scene() takes the refs, re-checks that the scene belongs to the chosen canvas and that the owned canvas has video, creates a new scene with a free name (\"Name\", \"Name (2)\", ...) directly in the owned canvas (obs_canvas_scene_create) and adds every item of the original bottom to top with obs_scene_add (sources shared, order kept), copying the item data like libobs duplicate_item_data: visibility, rot/alignment/bounds type+alignment/crop_to_bounds (get_info2), pos/scale/bounds from the original's saved relative values (relative_to_absolute, because get_info2 converts with the source canvas size, which is 0 when that canvas has no video), crop, scale filter, blending method and mode, show/hide transitions (private duplicates) with durations, lock and private settings; scene filters and scene private settings are copied too. The new items get the owned canvas size as scale_ref. No scene is created in or moved out of a foreign canvas; obs_scene_duplicate and obs_canvas_move_scene are not used (crash-20261019-1220, black-preview-20261019). The source canvas scene names are compared before and after (INV-6). Only compiled locally (plugin target built), not run in OBS."
+        behavior: "The Scenes tab has \"Import scenes from canvas...\": a modal dialog lists every canvas from snapshot_canvases except the main and the owned one, with their scenes (obs_canvas_enum_scenes) as checkboxes; scenes that contain a group are shown disabled (a group source cannot be shared with the original). Per selected scene import_scene() takes the refs, re-checks that the scene belongs to the chosen canvas and that the owned canvas has video, creates a new scene with a free name (\"Name\", \"Name (2)\", ...) directly in the owned canvas (obs_canvas_scene_create) and adds every item of the original bottom to top with obs_scene_add (sources shared, order kept), copying the item data like libobs duplicate_item_data: visibility, rot/alignment/bounds type+alignment/crop_to_bounds (get_info2), pos/scale/bounds from the original's saved relative values (relative_to_absolute, because get_info2 converts with the source canvas size, which is 0 when that canvas has no video), a copied scale of {0,0} or not finite is repaired like owned-vertical-canvas.zero-scale-repair (TASK-27), crop, scale filter, blending method and mode, show/hide transitions (private duplicates) with durations, lock and private settings; scene filters and scene private settings are copied too. The new items get the owned canvas size as scale_ref. No scene is created in or moved out of a foreign canvas; obs_scene_duplicate and obs_canvas_move_scene are not used (crash-20261019-1220, black-preview-20261019). The source canvas scene names are compared before and after (INV-6). Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: automated
             reference: tests/test_canvas_scale_ref.cpp
