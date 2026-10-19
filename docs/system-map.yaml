@@ -290,7 +290,10 @@ nodes:
       - src/pipeline/OwnedCanvas.cpp
       - src/pipeline/CanvasSceneNames.hpp
       - src/pipeline/CanvasSceneNames.cpp
+      - src/core/CanvasScaleRef.hpp
+      - src/core/CanvasScaleRef.cpp
       - tests/test_canvas_owned.cpp
+      - tests/test_canvas_scale_ref.cpp
     works_when:
       - id: owned-vertical-canvas.create-or-reuse
         behavior: "The canvas named StreamMulticast Vertical is matched by exact name: absent -> create, present with video -> reuse, present without video -> reuse and reset video; similar names never match."
@@ -354,6 +357,42 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: switch the main scene between Gaming, Just Chatting, Dev/Coding, BRB; the vertical preview follows with the V scene; restart OBS and the links persist (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
+            result: pending
+      - id: owned-vertical-canvas.scale-ref-repair
+        behavior: "ensure() rebases every saved item of an owned-canvas scene whose scale_ref is unusable (zero, negative or not finite, e.g. {0,0} from the TASK-13 import) to the canvas base size: obs_source_save, repair_scene_scale_refs on settings.items, then obs_source_load with every item source held by a ref during the reload. Valid refs and items without scale_ref are untouched, a scene without a broken ref is not reloaded (idempotent), one log line per repaired scene. The decision is the pure repair_scene_scale_refs (src/core/CanvasScaleRef); the OBS adapter is only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_ref_repair_needs_repair_cases
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_ref_repair_rewrites_zero_refs_to_canvas_size
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_ref_repair_is_idempotent
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_ref_repair_keeps_valid_refs
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: canvas_scale_ref_repair_ignores_items_without_ref_and_zero_canvas
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: manual
+            reference: "OBS runtime check: start OBS with the four V scenes imported by the TASK-13 build; the log shows one 'repaired scale_ref' line per scene, the V preview shows the items, a second start logs no repair (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-26)"
             result: pending
       - id: owned-vertical-canvas.own-mix
         behavior: "The owned canvas has its own video mix (1080x1920, main fps) independent of whether Aitum Vertical is active; Aitum's canvas and the V scenes are never written."
@@ -563,10 +602,34 @@ nodes:
             reference: "OBS runtime check: Fill on the webcam source fills 1080x1920 centred; numeric edits move the item; add, remove, reorder and visibility change the preview; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-12)"
             result: pending
       - id: ui-vertical-dock.import-scenes
-        behavior: "The Scenes tab has \"Import scenes from canvas...\": a modal dialog lists every canvas from snapshot_canvases except the main and the owned one, with their scenes (obs_canvas_enum_scenes) as checkboxes; scenes that contain a group are shown disabled, because OBS_SCENE_DUP_REFS shares the group source and obs_canvas_move_scene would pull it out of the original canvas. Per selected scene import_scene() takes the refs, re-checks that the scene belongs to the chosen canvas, duplicates it with obs_scene_duplicate(OBS_SCENE_DUP_REFS) under a temporary unique name (libobs creates the copy in the SOURCE canvas and shares the child sources, nothing private is created), moves only the copy with obs_canvas_move_scene(copy, owned), verifies obs_source_get_canvas(copy) is the owned canvas (pointer and uuid), then renames it to a free name (\"Name\", \"Name (2)\", ...). On a failed move the stranded temporary name is reported and nothing is removed from the foreign canvas. The source canvas scene names are compared before and after (INV-6). The original scene is never passed to move, rename or remove. Only compiled locally (plugin target built), not run in OBS."
+        behavior: "The Scenes tab has \"Import scenes from canvas...\": a modal dialog lists every canvas from snapshot_canvases except the main and the owned one, with their scenes (obs_canvas_enum_scenes) as checkboxes; scenes that contain a group are shown disabled (a group source cannot be shared with the original). Per selected scene import_scene() takes the refs, re-checks that the scene belongs to the chosen canvas and that the owned canvas has video, creates a new scene with a free name (\"Name\", \"Name (2)\", ...) directly in the owned canvas (obs_canvas_scene_create) and adds every item of the original bottom to top with obs_scene_add (sources shared, order kept), copying the item data like libobs duplicate_item_data: visibility, rot/alignment/bounds type+alignment/crop_to_bounds (get_info2), pos/scale/bounds from the original's saved relative values (relative_to_absolute, because get_info2 converts with the source canvas size, which is 0 when that canvas has no video), crop, scale filter, blending method and mode, show/hide transitions (private duplicates) with durations, lock and private settings; scene filters and scene private settings are copied too. The new items get the owned canvas size as scale_ref. No scene is created in or moved out of a foreign canvas; obs_scene_duplicate and obs_canvas_move_scene are not used (crash-20261019-1220, black-preview-20261019). The source canvas scene names are compared before and after (INV-6). Only compiled locally (plugin target built), not run in OBS."
         verification:
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: layout_import_rel_to_abs_inverts_libobs_conversion
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: layout_import_scale_keeps_displayed_size_across_refs
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: layout_import_nested_scene_and_broken_ref_scale_unscaled
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_scale_ref.cpp
+            check: layout_import_reads_saved_relative_item
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'canvas_scale_ref_|layout_import_', local run 2026-10-19; 7/9 failed against a stub CanvasScaleRef.cpp, 9/9 passed after implementation (TASK-26)"
+            checked_at: 2026-10-19
           - kind: manual
-            reference: "OBS runtime check: import V Just Chatting from Aitum Vertical; the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source, Aitum still lists its four V scenes with unchanged names (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-13)"
+            reference: "OBS runtime check: import V Just Chatting from Aitum Vertical (Aitum disabled); the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source and its items are drawn, GetSceneItemList shows finite scales, Aitum still lists its four V scenes with unchanged names, and closing OBS right after the import writes no crash file (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-26)"
             result: pending
       - id: ui-vertical-dock.scene-link
         behavior: "The Links tab has a 'Follow main scene' checkbox and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings; follow_program_scene() runs at once on the checkbox toggle and when the edited row is the current program scene (other rows leave a manual Set active alone). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."

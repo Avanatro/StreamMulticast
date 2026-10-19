@@ -76,6 +76,7 @@ target_sources(
     src/core/OwnedCanvasPolicy.cpp
     src/core/LayoutMath.cpp
     src/core/SceneLink.cpp
+    src/core/CanvasScaleRef.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/LinkedStart.cpp

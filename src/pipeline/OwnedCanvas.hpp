@@ -48,7 +48,10 @@ public:
 	OwnedCanvas(const OwnedCanvas &) = delete;
 	OwnedCanvas &operator=(const OwnedCanvas &) = delete;
 
-	/** Create, reuse or reset the owned canvas, then make sure it has a scene. UI thread only. */
+	/**
+	 * Create, reuse or reset the owned canvas, repair items with an unusable scale_ref (rebased to the
+	 * canvas size, one log line per repaired scene), then make sure it has a scene. UI thread only.
+	 */
 	void ensure();
 
 	/** Scene collection is about to change: stop endpoints bound to the canvas, drop our reference. */

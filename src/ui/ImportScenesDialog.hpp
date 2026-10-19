@@ -31,7 +31,7 @@ struct ImportOutcome {
 	std::string final_name;      ///< name of the copy in the owned canvas (set when ok)
 	bool ok = false;
 	std::string message;         ///< human readable reason when not ok
-	std::string stranded;        ///< name of a copy that stayed in the source canvas (empty when none)
+	std::string stranded;        ///< kept for the caller; always empty since nothing is created in the source canvas
 	bool source_changed = false; ///< the source canvas scene names differ from before (INV-6 alarm)
 };
 
@@ -40,7 +40,8 @@ struct ImportOutcome {
  *
  * The dialog is modal and keeps no libobs reference: it reads canvases and scenes while filling the
  * list and stores only uuids and names. Scenes that contain groups are shown disabled, because a
- * group is shared by the copy and obs_canvas_move_scene would pull it out of the original canvas.
+ * group source cannot be shared between two scenes: adding it to the copy would pull it out of the
+ * original.
  */
 class ImportScenesDialog : public QDialog {
 	Q_OBJECT
@@ -61,10 +62,11 @@ private:
 /**
  * Copy one scene of another canvas into the owned canvas. UI thread only.
  *
- * The original is never moved, renamed or removed (INV-6): the scene is duplicated by reference
- * (OBS_SCENE_DUP_REFS, the copy lands in the SOURCE canvas) under a temporary unique name, only the
- * copy is moved to the owned canvas, renamed to a free name there, and then verified. All references
- * are taken and released inside this call.
+ * The original is never moved, renamed or removed (INV-6). A new scene with a free name ("X", "X (2)",
+ * ...) is created directly in the owned canvas (obs_canvas_scene_create) and every item of the
+ * original is added by reference (obs_scene_add, sources shared) with its item data copied the way
+ * libobs duplicate_item_data does; the items get the owned canvas size as scale_ref. No scene is ever
+ * created in, or moved out of, a foreign canvas. All references are taken and released inside this call.
  */
 ImportOutcome import_scene(OwnedCanvas &owned, const ImportSelection &sel);
 

@@ -10,6 +10,7 @@ GPLv2 — see LICENSE for full text.
 #include "CanvasLookup.hpp"
 #include "CanvasSceneNames.hpp"
 #include "OutputController.hpp"
+#include "../core/CanvasScaleRef.hpp"
 #include "../core/EndpointRegistry.hpp"
 #include "../core/OwnedCanvasPolicy.hpp"
 #include "../plugin-support.h"
@@ -86,6 +87,63 @@ bool build_vertical_ovi(obs_video_info &ovi)
 	ovi.fps_num = v.fps_num;
 	ovi.fps_den = v.fps_den;
 	return true;
+}
+
+bool collect_scene_ref(void *param, obs_source_t *scene)
+{
+	obs_source_t *ref = obs_source_get_ref(scene);
+	if (ref)
+		static_cast<std::vector<obs_source_t *> *>(param)->push_back(ref);
+	return true;
+}
+
+bool hold_item_source(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	obs_source_t *ref = obs_source_get_ref(obs_sceneitem_get_source(item));
+	if (ref)
+		static_cast<std::vector<obs_source_t *> *>(param)->push_back(ref);
+	return true;
+}
+
+/**
+ * Items whose saved scale_ref is unusable ({0,0}: scenes imported by the TASK-13 build, copied in a canvas
+ * without video) get the canvas base size as scale_ref; the scene then reloads its items from the patched
+ * settings (libobs scene_load reads scale_ref). Idempotent: a scene without a broken ref is not reloaded.
+ * UI thread only; refs are taken and released here.
+ */
+void repair_scale_refs(obs_canvas_t *canvas)
+{
+	obs_video_info ovi = {};
+	if (!obs_canvas_get_video_info(canvas, &ovi) || ovi.base_width == 0 || ovi.base_height == 0)
+		return;
+
+	/* Collect first: obs_source_load must not run inside the canvas enumeration. */
+	std::vector<obs_source_t *> scenes;
+	obs_canvas_enum_scenes(canvas, collect_scene_ref, &scenes);
+
+	for (obs_source_t *scene_src : scenes) {
+		obs_scene_t *scene = obs_scene_from_source(scene_src);
+		if (!scene || obs_source_is_group(scene_src))
+			continue;
+		obs_source_save(scene_src); // writes the current items into the settings (same object as below)
+		obs_data_t *settings = obs_source_get_settings(scene_src);
+		const size_t repaired = repair_scene_scale_refs(settings, ovi.base_width, ovi.base_height);
+		if (repaired > 0) {
+			/* scene_load removes every item before re-adding it: keep the sources alive meanwhile (a
+			 * source used only by this scene would otherwise be destroyed and its item lost), as the OBS
+			 * frontend undo does. */
+			std::vector<obs_source_t *> held;
+			obs_scene_enum_items(scene, hold_item_source, &held);
+			obs_source_load(scene_src);
+			for (obs_source_t *s : held)
+				obs_source_release(s);
+			obs_log(LOG_INFO, "owned canvas: repaired scale_ref of %zu item(s) in scene '%s' (%ux%u)", repaired,
+				obs_source_get_name(scene_src), ovi.base_width, ovi.base_height);
+		}
+		obs_data_release(settings);
+	}
+	for (obs_source_t *s : scenes)
+		obs_source_release(s);
 }
 
 } // anonymous namespace
@@ -191,8 +249,10 @@ void OwnedCanvas::ensure()
 	}
 
 	remember(canvas);
-	if (obs_canvas_has_video(canvas))
+	if (obs_canvas_has_video(canvas)) {
+		repair_scale_refs(canvas);
 		ensure_active_scene(canvas);
+	}
 	obs_canvas_release(canvas);
 }
 
