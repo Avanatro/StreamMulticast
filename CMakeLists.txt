@@ -83,6 +83,7 @@ target_sources(
     src/core/TikTokBridgeImport.cpp
 
     # Pipeline layer
+    src/pipeline/CanvasLookup.cpp
     src/pipeline/EncoderFactory.cpp
     src/pipeline/OutputController.cpp
     src/pipeline/ControllerReaper.cpp

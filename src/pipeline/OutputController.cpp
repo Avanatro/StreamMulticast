@@ -7,6 +7,8 @@ GPLv2 — see LICENSE for full text.
 
 #include "OutputController.hpp"
 #include "ControllerReaper.hpp"
+#include "CanvasLookup.hpp"
+#include "../core/CanvasResolve.hpp"
 #include "../plugin-support.h"
 
 #include <obs.h>
@@ -112,6 +114,12 @@ OutputState OutputController::state() const
 	return m_state;
 }
 
+std::string OutputController::bound_canvas_uuid() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_canvas ? m_canvas_uuid : std::string();
+}
+
 bool OutputController::is_running() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
@@ -143,6 +151,127 @@ std::chrono::steady_clock::time_point OutputController::connected_since() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_connected_since;
+}
+
+/* -----------------------------------------------------------------------
+ * Canvas binding helpers
+ * ----------------------------------------------------------------------- */
+OutputController::ResolvedVideo OutputController::resolve_video() const
+{
+	ResolvedVideo r;
+
+	const CanvasResolution res =
+		resolve_canvas(m_endpoint.canvas_uuid, m_endpoint.canvas_name, snapshot_canvases());
+
+	if (res.kind == CanvasResolution::Kind::Refused) {
+		r.reason = res.reason;
+		return r;
+	}
+
+	if (res.kind == CanvasResolution::Kind::Main) {
+		r.video = obs_get_video();
+		if (!r.video) {
+			r.reason = "Main video pipeline is not available";
+			return r;
+		}
+		r.ok = true;
+		return r;
+	}
+
+	/* Canvas: take a strong ref now.  The snapshot is only a name/uuid
+	 * list, the ref is what keeps the video_t alive. */
+	obs_canvas_t *canvas = acquire_canvas(res.uuid);
+	if (!canvas || obs_canvas_removed(canvas)) {
+		if (canvas)
+			obs_canvas_release(canvas);
+		r.reason = "Canvas '" + res.name + "' is no longer available";
+		return r;
+	}
+
+	video_t *video = obs_canvas_get_video(canvas);
+	if (!video) {
+		obs_canvas_release(canvas);
+		r.reason = "Canvas '" + res.name + "' has no video output";
+		return r;
+	}
+
+	r.ok     = true;
+	r.video  = video;
+	r.canvas = canvas;
+	r.uuid   = res.uuid;
+	r.name   = res.name;
+	return r;
+}
+
+void OutputController::connect_canvas_signals(obs_canvas_t *canvas)
+{
+	if (!canvas)
+		return;
+	signal_handler_t *sh = obs_canvas_get_signal_handler(canvas);
+	signal_handler_connect(sh, "remove",  on_canvas_gone, this);
+	signal_handler_connect(sh, "destroy", on_canvas_gone, this);
+}
+
+void OutputController::disconnect_canvas_signals(obs_canvas_t *canvas)
+{
+	if (!canvas)
+		return;
+	/* Outside m_mutex, same AB-BA reasoning as the output signals in stop():
+	 * libobs holds the signal's mutex across the whole callback loop and
+	 * on_canvas_gone() ends up in stop(), which locks m_mutex. */
+	signal_handler_t *sh = obs_canvas_get_signal_handler(canvas);
+	signal_handler_disconnect(sh, "remove",  on_canvas_gone, this);
+	signal_handler_disconnect(sh, "destroy", on_canvas_gone, this);
+}
+
+void OutputController::adopt_canvas(ResolvedVideo &rv)
+{
+	obs_canvas_t *old;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		old           = m_canvas;
+		m_canvas      = rv.canvas;
+		m_canvas_uuid = rv.uuid;
+		m_canvas_name = rv.name;
+	}
+	if (old && old != rv.canvas)
+		disconnect_canvas_signals(old); // the new canvas keeps its own connection
+	if (old)
+		obs_canvas_release(old); // the old ref, or the extra ref when old == new
+	rv.canvas = nullptr; // ownership moved to m_canvas
+}
+
+void OutputController::discard_canvas_candidate(ResolvedVideo &rv)
+{
+	if (!rv.canvas)
+		return;
+	obs_canvas_t *current;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		current = m_canvas;
+	}
+	if (rv.canvas != current)
+		disconnect_canvas_signals(rv.canvas);
+	obs_canvas_release(rv.canvas);
+	rv.canvas = nullptr;
+}
+
+void OutputController::on_canvas_gone(void *data, calldata_t * /*cd*/)
+{
+	auto *self = static_cast<OutputController *>(data);
+
+	std::string canvas_name;
+	{
+		std::lock_guard<std::mutex> lock(self->m_mutex);
+		canvas_name        = self->m_canvas_name;
+		self->m_last_error = "Canvas '" + canvas_name + "' was removed";
+	}
+	obs_log(LOG_WARNING, "OutputController [%s]: canvas '%s' removed, stopping endpoint",
+	        self->m_endpoint.name.c_str(), canvas_name.c_str());
+
+	/* Same non-blocking path as a user stop; stop() flags m_stop_reconnect,
+	 * so a reconnect loop in flight never retries into the dead canvas. */
+	self->stop();
 }
 
 /* -----------------------------------------------------------------------
@@ -236,6 +365,18 @@ bool OutputController::start()
 		stale_reconnect_thread.join();
 	m_stop_reconnect.store(false);
 
+	/* Resolve the canvas first: a refused endpoint must not create an output
+	 * or encoders at all. */
+	ResolvedVideo rv = resolve_video();
+	if (!rv.ok) {
+		obs_log(LOG_WARNING, "OutputController [%s]: not starting — %s",
+		        m_endpoint.name.c_str(), rv.reason.c_str());
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_state      = OutputState::FailedHard;
+		m_last_error = rv.reason;
+		return false;
+	}
+
 	obs_output_t *output;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -250,12 +391,13 @@ bool OutputController::start()
 	}
 
 	if (!output) {
+		discard_canvas_candidate(rv);
 		set_state(OutputState::FailedHard);
 		return false;
 	}
 
 	/* Create and attach encoders */
-	obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti");
+	obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video);
 	obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
 
 	if (!video_enc || !audio_enc) {
@@ -265,61 +407,41 @@ bool OutputController::start()
 			obs_encoder_release(video_enc);
 		if (audio_enc)
 			obs_encoder_release(audio_enc);
+		discard_canvas_candidate(rv);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_state      = OutputState::FailedHard;
 		m_last_error = "Encoder unavailable — check backend settings";
 		return false;
 	}
 
+	/* Watch the canvas BEFORE publishing the ref: signals are connected
+	 * outside m_mutex.  A removal that landed before the connect would have
+	 * been missed, so re-check the flag afterwards. */
+	connect_canvas_signals(rv.canvas);
+	if (rv.canvas && obs_canvas_removed(rv.canvas)) {
+		obs_log(LOG_WARNING, "OutputController [%s]: canvas '%s' removed during start",
+		        m_endpoint.name.c_str(), rv.name.c_str());
+		obs_encoder_release(video_enc);
+		obs_encoder_release(audio_enc);
+		const std::string removed_name = rv.name;
+		discard_canvas_candidate(rv);
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_state      = OutputState::FailedHard;
+		m_last_error = "Canvas '" + removed_name + "' was removed";
+		return false;
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		/* A previously hard-stopped session may still own encoders. */
+		do_release_encoders_locked();
 		m_video_enc = video_enc;
 		m_audio_enc = audio_enc;
 	}
+	adopt_canvas(rv);
 
 	obs_output_set_video_encoder(output, video_enc);
 	obs_output_set_audio_encoder(output, audio_enc, 0 /* track index */);
-
-	/* -------------------------------------------------------------------
-	 * v1.0.5 — Per-Output Orientation (Vertical-Letterbox path)
-	 *
-	 * For Vertical1080x1920Letterbox we tell the output's video pipeline to
-	 * convert frames to a 1080×1920 target.  OBS's internal scaler letterboxes
-	 * the 16:9 main canvas inside the 9:16 frame (black bars top+bottom).
-	 *
-	 * Center-Crop (Vertical1080x1920CenterCrop) is reserved for v1.1 — it
-	 * requires a per-output obs_view_t with custom render code that crops the
-	 * centre 9:16 slice instead of letterboxing.  Disabled in the UI for now.
-	 *
-	 * SourceMatch: no conversion call — output uses the OBS main canvas as-is.
-	 * ------------------------------------------------------------------- */
-	if (m_endpoint.orientation == OutputOrientation::Vertical1080x1920Letterbox) {
-		struct video_scale_info scale = {};
-		scale.format     = VIDEO_FORMAT_NV12;     /* common encoder input format */
-		scale.width      = 1080;
-		scale.height     = 1920;
-		scale.range      = VIDEO_RANGE_DEFAULT;
-		scale.colorspace = VIDEO_CS_DEFAULT;
-		obs_output_set_video_conversion(output, &scale);
-		obs_log(LOG_INFO,
-		        "OutputController [%s]: orientation=Vertical1080x1920 (Letterbox), "
-		        "video conversion enabled (1080×1920)",
-		        m_endpoint.name.c_str());
-	}
-	else if (m_endpoint.orientation == OutputOrientation::Vertical1080x1920CenterCrop) {
-		/* Should not happen — UI disables this option.  Defensive fallback to letterbox. */
-		obs_log(LOG_WARNING,
-		        "OutputController [%s]: Vertical1080x1920CenterCrop is v1.1, "
-		        "falling back to letterbox.", m_endpoint.name.c_str());
-		struct video_scale_info scale = {};
-		scale.format     = VIDEO_FORMAT_NV12;
-		scale.width      = 1080;
-		scale.height     = 1920;
-		scale.range      = VIDEO_RANGE_DEFAULT;
-		scale.colorspace = VIDEO_CS_DEFAULT;
-		obs_output_set_video_conversion(output, &scale);
-	}
-	/* SourceMatch: no conversion, output uses OBS main canvas directly. */
 
 	bool started = obs_output_start(output);
 	if (!started) {
@@ -354,12 +476,18 @@ void OutputController::stop()
 	m_stop_reconnect.store(true);
 
 	obs_output_t *output_for_signals;
+	obs_canvas_t *canvas_for_signals;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_state == OutputState::Idle && !m_output)
-			return; // nothing to do
+		if (m_state == OutputState::Idle && !m_output && !m_canvas)
+			return; // nothing to do (idempotent)
 		output_for_signals = m_output;
+		canvas_for_signals = m_canvas;
 	}
+
+	/* Same lock-order rule for the canvas "remove"/"destroy" signals.  The
+	 * canvas is still pinned by m_canvas, so its handler is valid here. */
+	disconnect_canvas_signals(canvas_for_signals);
 
 	/* Disconnect the output's "start"/"stop" signal handlers BEFORE
 	 * re-taking m_mutex below, and deliberately OUTSIDE any lock on it.
@@ -391,6 +519,7 @@ void OutputController::stop()
 	obs_output_t  *output_to_release;
 	obs_encoder_t *video_to_release;
 	obs_encoder_t *audio_to_release;
+	obs_canvas_t  *canvas_to_release;
 	std::thread    reconnect_to_join;
 
 	{
@@ -399,7 +528,7 @@ void OutputController::stop()
 		/* Re-check under the lock: another stop() call, or handle_stop()'s
 		 * hard-fail path, may have already detached/idled the session while
 		 * we were disconnecting signals above. */
-		if (m_state == OutputState::Idle && !m_output)
+		if (m_state == OutputState::Idle && !m_output && !m_canvas)
 			return;
 
 		obs_log(LOG_INFO, "OutputController [%s]: stopping", m_endpoint.name.c_str());
@@ -411,14 +540,24 @@ void OutputController::stop()
 		output_to_release = m_output;
 		video_to_release  = m_video_enc;
 		audio_to_release  = m_audio_enc;
+		canvas_to_release = m_canvas;
 		reconnect_to_join = std::move(m_reconnect_thread);
 
 		m_output          = nullptr;
 		m_video_enc       = nullptr;
 		m_audio_enc       = nullptr;
+		m_canvas          = nullptr;
+		m_canvas_uuid.clear();
+		m_canvas_name.clear();
 		m_state           = OutputState::Idle;
 		m_connected_since = std::chrono::steady_clock::time_point{};
 	}
+
+	/* Defensive: if a different canvas was adopted between the disconnect above
+	 * and the detach (reconnect re-resolve), drop its connection too, so no
+	 * callback can outlive this session. */
+	if (canvas_to_release && canvas_to_release != canvas_for_signals)
+		disconnect_canvas_signals(canvas_to_release);
 
 	/* Hand the detached session to the ControllerReaper as one job.  `self`
 	 * pins this controller alive until the job runs: reconnect_thread_func()
@@ -435,7 +574,7 @@ void OutputController::stop()
 	auto self               = shared_from_this();
 	auto reconnect_to_join_p = std::make_shared<std::thread>(std::move(reconnect_to_join));
 	m_reaper.enqueue([self, output_to_release, video_to_release, audio_to_release,
-	                  reconnect = std::move(reconnect_to_join_p)]() {
+	                  canvas_to_release, reconnect = std::move(reconnect_to_join_p)]() {
 		if (reconnect->joinable())
 			reconnect->join();
 
@@ -456,6 +595,10 @@ void OutputController::stop()
 
 		if (output_to_release)
 			obs_output_release(output_to_release);
+
+		/* Last: the canvas ref is what keeps the encoders' video_t valid. */
+		if (canvas_to_release)
+			obs_canvas_release(canvas_to_release);
 	});
 }
 
@@ -485,10 +628,15 @@ void OutputController::shutdown_blocking()
 	 * on the same obs_output_t (UB).  By nulling m_output before force_stop, the
 	 * guard is guaranteed to observe the detach and bail out. */
 	obs_output_t *output_for_signals;
+	obs_canvas_t *canvas_for_signals;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		output_for_signals = m_output;
+		canvas_for_signals = m_canvas;
 	}
+
+	/* Canvas signals first, also outside m_mutex (see stop()). */
+	disconnect_canvas_signals(canvas_for_signals);
 
 	/* Disconnect the "start"/"stop" signal handlers OUTSIDE m_mutex — same
 	 * AB-BA lock-order rationale documented in stop() above (libobs holds its
@@ -506,12 +654,14 @@ void OutputController::shutdown_blocking()
 	obs_output_t  *output_to_release;
 	obs_encoder_t *video_to_release;
 	obs_encoder_t *audio_to_release;
+	obs_canvas_t  *canvas_to_release;
 	std::thread    reconnect_to_join;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		output_to_release = m_output;
 		video_to_release  = m_video_enc;
 		audio_to_release  = m_audio_enc;
+		canvas_to_release = m_canvas;
 		reconnect_to_join = std::move(m_reconnect_thread);
 
 		/* Null m_output BEFORE the (potentially long) blocking release call
@@ -522,8 +672,14 @@ void OutputController::shutdown_blocking()
 		m_output    = nullptr;
 		m_video_enc = nullptr;
 		m_audio_enc = nullptr;
+		m_canvas    = nullptr;
+		m_canvas_uuid.clear();
+		m_canvas_name.clear();
 		m_state     = OutputState::Idle;
 	}
+
+	if (canvas_to_release && canvas_to_release != canvas_for_signals)
+		disconnect_canvas_signals(canvas_to_release); // see stop()
 
 	/* Join the reconnect thread — this is the one place that is allowed to
 	 * block on it unconditionally, because shutdown_blocking() only ever
@@ -556,6 +712,10 @@ void OutputController::shutdown_blocking()
 		 * exists. */
 		obs_output_release(output_to_release);
 	}
+
+	/* Last: the canvas ref is what keeps the encoders' video_t valid. */
+	if (canvas_to_release)
+		obs_canvas_release(canvas_to_release);
 }
 
 /* -----------------------------------------------------------------------
@@ -765,7 +925,23 @@ void OutputController::reconnect_thread_func()
 				return;
 		}
 
-		obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti");
+		/* Re-resolve the canvas on EVERY attempt: it may have been removed or
+		 * lost its video since the last one.  A refusal ends the loop — never
+		 * reconnect into a dead canvas. */
+		ResolvedVideo rv = resolve_video();
+		if (!rv.ok) {
+			obs_log(LOG_WARNING,
+			        "OutputController [%s]: reconnect aborted — %s",
+			        m_endpoint.name.c_str(), rv.reason.c_str());
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_output == captured_output) {
+				m_state      = OutputState::FailedHard;
+				m_last_error = rv.reason;
+			}
+			return;
+		}
+
+		obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video);
 		obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
 
 		if (!video_enc || !audio_enc) {
@@ -775,8 +951,12 @@ void OutputController::reconnect_thread_func()
 				obs_encoder_release(video_enc);
 			if (audio_enc)
 				obs_encoder_release(audio_enc);
+			discard_canvas_candidate(rv);
 			continue;
 		}
+
+		/* Watch the (possibly new) canvas before publishing, outside m_mutex. */
+		connect_canvas_signals(rv.canvas);
 
 		/* Session-validity guard #2 — immediately before obs_output_start().
 		 * This is the exact race Finding A.2 described: without this check,
@@ -785,16 +965,22 @@ void OutputController::reconnect_thread_func()
 		 * handed to the ControllerReaper.  If invalid, release the
 		 * just-created, not-yet-attached encoders and exit without touching
 		 * shared state further — the reaper owns the captured output now. */
+		bool session_valid;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			if (m_stop_reconnect.load() || m_output != captured_output) {
-				obs_encoder_release(video_enc);
-				obs_encoder_release(audio_enc);
-				return;
+			session_valid = !m_stop_reconnect.load() && m_output == captured_output;
+			if (session_valid) {
+				m_video_enc = video_enc;
+				m_audio_enc = audio_enc;
 			}
-			m_video_enc = video_enc;
-			m_audio_enc = audio_enc;
 		}
+		if (!session_valid) {
+			obs_encoder_release(video_enc);
+			obs_encoder_release(audio_enc);
+			discard_canvas_candidate(rv);
+			return;
+		}
+		adopt_canvas(rv);
 
 		obs_output_set_video_encoder(captured_output, video_enc);
 		obs_output_set_audio_encoder(captured_output, audio_enc, 0);

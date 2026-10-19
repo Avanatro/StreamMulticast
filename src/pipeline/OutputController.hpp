@@ -27,6 +27,8 @@ struct obs_encoder;
 typedef struct obs_encoder obs_encoder_t;
 struct calldata;
 typedef struct calldata calldata_t;
+struct obs_canvas;
+typedef struct obs_canvas obs_canvas_t;
 
 namespace smulti {
 
@@ -85,8 +87,18 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  * stop() had already run (see reconnect_thread_func()'s session-validity
  * guard below for the other half of that fix).
  *
+ * Canvas binding: start() and every reconnect attempt snapshot the canvases,
+ * run the pure resolve_canvas() and either encode from the resolved canvas's
+ * own video_t (strong canvas ref held in m_canvas while the session lives) or
+ * refuse with a reason (FailedHard, no encoders, no further reconnects).  The
+ * ref is the only thing that keeps the canvas's video_t valid, so it is
+ * released LAST (after the encoders and the output).  "remove"/"destroy" on the
+ * canvas stop the endpoint through the normal non-blocking stop() path.
+ * Per-output scaling requests are NOT used: libobs ignores them for encoded
+ * outputs, so the canvas itself decides the encoded size.
+ *
  * Lifecycle of encoders vs output:
- *   start()             → create encoders → attach → obs_output_start
+ *   start()             → resolve canvas → create encoders → attach → obs_output_start
  *   stop()               → disconnect signals → detach session under
  *                           m_mutex → enqueue {join reconnect thread →
  *                           obs_output_force_stop → release encoders →
@@ -140,6 +152,9 @@ public:
 	 * hands teardown off as one job to the ControllerReaper.  It never
 	 * blocks and never joins on the calling thread — see the class doc
 	 * comment's "Detach-and-reaper rule".
+	 *
+	 * Idempotent: a second call (or a call on an Idle controller) is a no-op.
+	 * Also invoked from the bound canvas's "remove"/"destroy" signal.
 	 */
 	void stop();
 
@@ -154,6 +169,12 @@ public:
 
 	/** Endpoint ID this controller manages */
 	const std::string &endpoint_id() const { return m_endpoint.id; }
+
+	/**
+	 * Uuid of the canvas this controller currently holds a strong ref on, or
+	 * empty when it encodes from the main canvas or has no live session.
+	 */
+	std::string bound_canvas_uuid() const;
 
 	/**
 	 * SampleData — the small set of stat fields HealthSampler needs, read
@@ -206,6 +227,39 @@ private:
 	static void on_start_signal(void *data, calldata_t *cd);
 	static void on_stop_signal(void *data, calldata_t *cd);
 
+	/** Canvas "remove"/"destroy" callback — stops the endpoint, no reconnect. */
+	static void on_canvas_gone(void *data, calldata_t *cd);
+
+	/**
+	 * Outcome of resolving the endpoint's canvas reference.  When `ok` and
+	 * `canvas` is non-null the struct owns one strong canvas ref.
+	 */
+	struct ResolvedVideo {
+		bool           ok     {false};
+		video_t       *video  {nullptr};
+		obs_canvas_t  *canvas {nullptr}; // null for the main canvas
+		std::string    uuid;
+		std::string    name;
+		std::string    reason; // set when !ok
+	};
+
+	/** Snapshot canvases, resolve, acquire.  Callable from any thread. */
+	ResolvedVideo resolve_video() const;
+
+	/** Connect/disconnect the canvas "remove"/"destroy" signals. */
+	void connect_canvas_signals(obs_canvas_t *canvas);
+	void disconnect_canvas_signals(obs_canvas_t *canvas);
+
+	/**
+	 * Publish `rv` as the session's canvas (call with m_mutex NOT held).
+	 * The caller connected the signals beforehand.  Releases the previously
+	 * bound canvas, or the extra ref when it is the same canvas.
+	 */
+	void adopt_canvas(ResolvedVideo &rv);
+
+	/** Drop an unadopted candidate (call with m_mutex NOT held). */
+	void discard_canvas_candidate(ResolvedVideo &rv);
+
 	void handle_stop(int error_code);
 
 	/**
@@ -242,6 +296,11 @@ private:
 	obs_output_t       *m_output   {nullptr};
 	obs_encoder_t      *m_video_enc{nullptr};
 	obs_encoder_t      *m_audio_enc{nullptr};
+
+	/** Strong canvas ref while a session on a non-main canvas lives. */
+	obs_canvas_t       *m_canvas   {nullptr};
+	std::string         m_canvas_uuid;
+	std::string         m_canvas_name;
 
 	std::chrono::steady_clock::time_point m_connected_since{};
 

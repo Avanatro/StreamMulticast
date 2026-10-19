@@ -122,8 +122,14 @@ std::vector<EncoderBackend> EncoderFactory::available_backends()
  * Using 4-arg form here (no mixer index) for broadest compatibility.
  * ----------------------------------------------------------------------- */
 obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
-                                                     const std::string &name_hint) const
+                                                     const std::string &name_hint,
+                                                     video_t *video) const
 {
+	if (!video) {
+		obs_log(LOG_ERROR, "EncoderFactory: create_video_encoder called without a video pipeline");
+		return nullptr;
+	}
+
 	/* Resolve actual type ID with fallback */
 	std::string type_id = encoder_type_id(ep.encoder_backend);
 
@@ -195,11 +201,10 @@ obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
 		return nullptr;
 	}
 
-	/* Attach to the main OBS video output (obs_get_video())
-	 * AVANATRO-VERIFY: obs_encoder_set_video — confirm this must be called
-	 * before obs_output_set_video_encoder, or whether set_video_encoder
-	 * does it internally.  Pattern from OBS source: set_video before attach. */
-	obs_encoder_set_video(enc, obs_get_video());
+	/* Attach the encoder to the caller's video pipeline: the main one or the
+	 * selected canvas's own.  Encoded outputs ignore any per-output scaling
+	 * request, so the canvas the frames come from decides the encoded size. */
+	obs_encoder_set_video(enc, video);
 
 	obs_log(LOG_INFO, "EncoderFactory: created video encoder '%s' (type=%s, bitrate=%d kbps)",
 	        encoder_name.c_str(), type_id.c_str(), ep.video_bitrate_kbps);

@@ -172,6 +172,8 @@ nodes:
     code:
       - src/core/CanvasResolve.hpp
       - src/core/CanvasResolve.cpp
+      - src/pipeline/CanvasLookup.hpp
+      - src/pipeline/CanvasLookup.cpp
       - tests/test_canvas_resolve.cpp
     works_when:
       - id: canvas-selection.resolve
@@ -213,6 +215,18 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
             checked_at: 2026-10-19
+      - id: canvas-selection.encoder-uses-canvas
+        behavior: "start() and every reconnect attempt resolve the endpoint's canvas and attach the video encoder to that canvas's own video_t (main canvas: obs_get_video()); a refused ref ends in FailedHard with the reason and no encoders. No per-output framing conversion is requested (libobs ignores it for encoded outputs). The resolver is covered by the canvas_resolve cases; the OBS adapter (CanvasLookup, encoder attach) is only compiled, not run."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_resolve.cpp
+            check: canvas_resolve_uuid_hit
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; covers the resolver only; plugin target compiled with cmake --build build_tests --target streammulticast (TASK-6)"
+            checked_at: 2026-10-19
+          - kind: manual
+            reference: "OBS runtime check: TikTok endpoint bound to the vertical canvas must encode 1080x1920 (not run in this session)"
+            result: pending
     status: building
   - id: owned-vertical-canvas
     lane: pipeline
@@ -298,6 +312,12 @@ nodes:
       - id: output-lifecycle.stop-nonblocking
         behavior: "stop() returns without calling blocking libobs functions."
         verification: []
+      - id: output-lifecycle.canvas-removed-stop
+        behavior: "The controller holds a strong ref on its canvas while live and stops the endpoint (non-blocking stop path, no reconnect) when the canvas emits remove or destroy; the ref is released after encoders and output. stop() is idempotent. Not covered by an automated check."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: remove the vertical canvas (or switch scene collection) while an endpoint streams on it; the endpoint must stop, the log must show \"canvas '<name>' removed, stopping endpoint\", OBS must not crash and no reconnect may start (not run in this session)"
+            result: pending
     status: building
   - id: endpoint-registry
     lane: core

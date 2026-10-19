@@ -15,6 +15,8 @@ GPLv2 — see LICENSE for full text.
 // libobs types forward-declared to avoid pulling in obs.h in every translation unit
 struct obs_encoder;
 typedef struct obs_encoder obs_encoder_t;
+struct video_output;
+typedef struct video_output video_t;
 
 namespace smulti {
 
@@ -41,6 +43,12 @@ public:
 	/**
 	 * Create a video encoder for the given endpoint settings.
 	 *
+	 * `video` is the video pipeline the encoder reads frames from: the main
+	 * one (obs_get_video()) or a canvas's own (obs_canvas_get_video()).  It
+	 * must be non-null (null logs an error and returns nullptr), and the
+	 * caller must keep the owning canvas alive for as long as the encoder
+	 * is in use.
+	 *
 	 * Returns nullptr if the requested encoder backend is unavailable
 	 * (e.g., NVENC on a machine without NVIDIA GPU) or if creation fails.
 	 *
@@ -52,7 +60,8 @@ public:
 	 * OutputController each hold an independent ref and release their own.
 	 */
 	obs_encoder_t *create_video_encoder(const Endpoint &ep,
-	                                    const std::string &name_hint) const;
+	                                    const std::string &name_hint,
+	                                    video_t *video) const;
 
 	/**
 	 * Create an AAC audio encoder for the given endpoint.
