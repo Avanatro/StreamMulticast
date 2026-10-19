@@ -224,6 +224,13 @@ static void on_video_reset(void *, calldata_t *)
 		obs_queue_task(OBS_TASK_UI, ensure_owned_canvas_task, nullptr, false);
 }
 
+/* Synchronous config write; safe to repeat. Atomic (temp file + rename) inside ConfigStore. */
+static void flush_config()
+{
+	if (g_config_store && g_registry)
+		g_config_store->save(g_registry->all());
+}
+
 static void on_save_load(obs_data_t *data, bool saving, void *)
 {
 	if (g_owned_canvas)
@@ -240,6 +247,9 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		return;
 
 	if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+		/* First shutdown signal OBS gives us. Flush the config now: obs_module_unload comes
+		 * after OBSBasic::ClearSceneData, which has crashed OBS on exit (2026-10-19). */
+		flush_config();
 		cancel_pending_follow();
 		disconnect_transition_start();
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
@@ -294,6 +304,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
 		/* Graceful shutdown — stop all outputs before OBS tears down */
 		obs_log(LOG_INFO, "OBS exit — stopping all StreamMulticast outputs");
+		flush_config();
 		for (auto &ep : g_registry->all()) {
 			auto ctrl = g_registry->controller_for(ep.id);
 			if (ctrl && ctrl->is_running())

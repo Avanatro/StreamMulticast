@@ -6,6 +6,8 @@
 
 #include <obs-data.h>
 
+#include <vector>
+
 using smulti::Endpoint;
 using smulti::OutputOrientation;
 
@@ -80,4 +82,46 @@ SMULTI_TEST(canvas_migrate_is_idempotent)
 	EXPECT_TRUE(smulti::migrate_legacy_orientation(ep));
 	EXPECT_TRUE(!smulti::migrate_legacy_orientation(ep));
 	EXPECT_EQ(ep.canvas_name, std::string("StreamMulticast Vertical"));
+}
+
+// A load that migrated anything must be written back; otherwise the old schema
+// stays on disk until a later save that may never run (OBS can crash on exit
+// before obs_module_unload).
+SMULTI_TEST(canvas_migrate_marks_config_dirty)
+{
+	std::vector<Endpoint> eps;
+	eps.push_back(Endpoint::make_default("Tiktok"));
+	eps.back().orientation = OutputOrientation::Vertical1080x1920Letterbox;
+	eps.push_back(Endpoint::make_default("Plain"));
+
+	const auto res = smulti::migrate_config(1, 2, eps);
+
+	EXPECT_TRUE(res.needs_save);
+	EXPECT_EQ(res.migrated.size(), static_cast<size_t>(1));
+	EXPECT_EQ(res.migrated[0].name, std::string("Tiktok"));
+	EXPECT_EQ(res.migrated[0].old_orientation, static_cast<int>(OutputOrientation::Vertical1080x1920Letterbox));
+	EXPECT_TRUE(eps[0].orientation == OutputOrientation::SourceMatch);
+	EXPECT_EQ(eps[0].canvas_name, std::string("StreamMulticast Vertical"));
+}
+
+SMULTI_TEST(canvas_migrate_old_schema_without_changes_still_needs_save)
+{
+	std::vector<Endpoint> eps;
+	eps.push_back(Endpoint::make_default("Plain"));
+
+	const auto res = smulti::migrate_config(1, 2, eps);
+
+	EXPECT_TRUE(res.needs_save);
+	EXPECT_EQ(res.migrated.size(), static_cast<size_t>(0));
+}
+
+SMULTI_TEST(canvas_migrate_current_schema_stays_clean)
+{
+	std::vector<Endpoint> eps;
+	eps.push_back(Endpoint::make_default("Plain"));
+
+	const auto res = smulti::migrate_config(2, 2, eps);
+
+	EXPECT_TRUE(!res.needs_save);
+	EXPECT_EQ(res.migrated.size(), static_cast<size_t>(0));
 }

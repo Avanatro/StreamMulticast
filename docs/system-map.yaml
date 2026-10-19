@@ -82,13 +82,19 @@ nodes:
         behavior: "Saved config.json loads back to an equal endpoint list; legacy schema versions are migrated."
         verification: []
       - id: config-persistence.legacy-orientation-migration
-        behavior: "Schema 1 -> 2: orientation 1/2 becomes canvas_name 'StreamMulticast Vertical' with orientation SourceMatch, one LOG_WARNING per migrated endpoint (name only). The pure migration is tested; the ConfigStore load path and the log line are not covered by an automated check."
+        behavior: "Schema 1 -> 2: orientation 1/2 becomes canvas_name 'StreamMulticast Vertical' with orientation SourceMatch, one LOG_WARNING per migrated endpoint (name only). The pure migration and the write-back decision are tested; a migrated config is written back atomically right after load (and on SCRIPTING_SHUTDOWN/EXIT/unload); the ConfigStore file I/O and the log line are not covered by an automated check."
         verification:
           - kind: automated
             reference: tests/test_canvas_endpoint.cpp
             check: canvas_migrate_letterbox_to_vertical_canvas
             result: passed
             run: "ctest --test-dir build_tests -C Release -R canvas_, local run 2026-10-19; failed before implementation (build error), passed after (TASK-3)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_endpoint.cpp
+            check: canvas_migrate_marks_config_dirty
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_migrat, local run 2026-10-19; failed before implementation (build error, missing migrate_config), passed after (TASK-24)"
             checked_at: 2026-10-19
     status: building
   - id: platform-server-table

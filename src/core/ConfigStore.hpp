@@ -45,7 +45,8 @@ public:
 	ConfigStore &operator=(const ConfigStore &) = delete;
 
 	/**
-	 * Load configuration from disk.
+	 * Load configuration from disk. A config of an older schema is migrated and
+	 * written back immediately (atomically), so the migration runs only once.
 	 * Returns true on success, false if the file doesn't exist (first run)
 	 * or is corrupt (resets to empty).  Always safe to call from main thread
 	 * before the save thread is started.
@@ -84,10 +85,10 @@ private:
 	bool write_to_disk(const std::vector<Endpoint> &endpoints, const std::string &path);
 
 	/** Low-level read — deserialises JSON from path into endpoint list */
-	bool read_from_disk(const std::string &path, std::vector<Endpoint> &out);
+	bool read_from_disk(const std::string &path, std::vector<Endpoint> &out, bool &needs_write_back);
 
-	/** Migrate schema from older versions */
-	void migrate(int from_version, std::vector<Endpoint> &endpoints);
+	/** Migrate schema from older versions; returns true when the result must be written back */
+	bool migrate(int from_version, std::vector<Endpoint> &endpoints);
 
 	mutable std::mutex       m_mutex;
 	std::string              m_config_path;

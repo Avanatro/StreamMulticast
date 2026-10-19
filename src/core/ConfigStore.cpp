@@ -86,7 +86,8 @@ bool ConfigStore::load()
 	}
 
 	std::vector<Endpoint> loaded;
-	if (!read_from_disk(m_config_path, loaded)) {
+	bool needs_write_back = false;
+	if (!read_from_disk(m_config_path, loaded, needs_write_back)) {
 		obs_log(LOG_INFO, "ConfigStore: config.json not found or corrupt — starting fresh");
 		m_endpoints.clear();
 		return false;
@@ -95,6 +96,18 @@ bool ConfigStore::load()
 	m_endpoints = std::move(loaded);
 	obs_log(LOG_INFO, "ConfigStore: loaded %zu endpoints from %s",
 	        m_endpoints.size(), m_config_path.c_str());
+
+	/* A migrated config is written back right now (temp file + rename, the old file stays as
+	 * .bak). Waiting for the next save is not enough: that is obs_module_unload, which never
+	 * runs when OBS crashes while closing (seen 2026-10-19), leaving schema 1 on disk and
+	 * re-running the migration on every start. */
+	if (needs_write_back) {
+		if (write_to_disk(m_endpoints, m_config_path))
+			obs_log(LOG_INFO, "ConfigStore: migrated config written back as schema v%d",
+			        CURRENT_SCHEMA_VERSION);
+		else
+			obs_log(LOG_WARNING, "ConfigStore: could not write the migrated config back");
+	}
 	return true;
 }
 
@@ -221,8 +234,9 @@ bool ConfigStore::write_to_disk(const std::vector<Endpoint> &endpoints, const st
 /* -----------------------------------------------------------------------
  * read_from_disk — deserialise endpoint list from JSON
  * ----------------------------------------------------------------------- */
-bool ConfigStore::read_from_disk(const std::string &path, std::vector<Endpoint> &out)
+bool ConfigStore::read_from_disk(const std::string &path, std::vector<Endpoint> &out, bool &needs_write_back)
 {
+	needs_write_back = false;
 	if (path.empty() || !std::filesystem::exists(path))
 		return false;
 
@@ -253,32 +267,28 @@ bool ConfigStore::read_from_disk(const std::string &path, std::vector<Endpoint> 
 	obs_data_array_release(arr);
 
 	if (schema_version < CURRENT_SCHEMA_VERSION)
-		migrate(schema_version, out);
+		needs_write_back = migrate(schema_version, out);
 
 	obs_data_release(root);
 	return true;
 }
 
 /* -----------------------------------------------------------------------
- * migrate — for future schema changes
+ * migrate — logs and applies the pure schema migration.
+ * Returns true when the migrated list must be written back to disk.
  * ----------------------------------------------------------------------- */
-void ConfigStore::migrate(int from_version, std::vector<Endpoint> &endpoints)
+bool ConfigStore::migrate(int from_version, std::vector<Endpoint> &endpoints)
 {
 	obs_log(LOG_INFO, "ConfigStore: migrating config from schema v%d to v%d",
 	        from_version, CURRENT_SCHEMA_VERSION);
 
-	/* v1 -> v2: framing modes 1/2 were removed in favour of a canvas reference.
-	 * Names only in the log (never keys or URLs). The migrated list is written
-	 * back on the next save/unload. */
-	if (from_version < 2) {
-		for (auto &ep : endpoints) {
-			const int old_mode = static_cast<int>(ep.orientation);
-			if (migrate_legacy_orientation(ep))
-				obs_log(LOG_WARNING,
-				        "ConfigStore: endpoint '%s' used removed framing mode %d, migrated to canvas '%s'",
-				        ep.name.c_str(), old_mode, kOwnedVerticalCanvasName);
-		}
-	}
+	/* Names only in the log (never keys or URLs). */
+	const ConfigMigrationResult res = migrate_config(from_version, CURRENT_SCHEMA_VERSION, endpoints);
+	for (const auto &m : res.migrated)
+		obs_log(LOG_WARNING,
+		        "ConfigStore: endpoint '%s' used removed framing mode %d, migrated to canvas '%s'",
+		        m.name.c_str(), m.old_orientation, kOwnedVerticalCanvasName);
+	return res.needs_save;
 }
 
 } // namespace smulti
