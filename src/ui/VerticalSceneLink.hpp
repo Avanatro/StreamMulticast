@@ -64,6 +64,7 @@ private:
 	QCheckBox *m_follow = nullptr;
 	QComboBox *m_transition = nullptr;
 	QLineEdit *m_stinger_path = nullptr;
+	QLabel *m_stinger_for = nullptr; ///< which 16:9 stinger the chosen vertical file belongs to
 	QTableWidget *m_table = nullptr;
 	QLabel *m_status = nullptr;
 	bool m_refreshing = false;

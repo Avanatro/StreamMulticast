@@ -57,7 +57,7 @@ static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created afte
 static std::unique_ptr<smulti::VerticalRecorder> g_vertical_recorder; /* shut down before g_owned_canvas goes, destroyed after the dock */
 /* UI-thread context for calls posted from libobs threads (vertical recorder "stop" signal, hotkey).
  * Deleted in unload only after every poster is disconnected; deleting it drops pending posts. */
-static QObject *                                 g_ui_context = nullptr;
+static std::atomic<QObject *>                    g_ui_context{nullptr};
 #ifdef SMULTI_STREAMLABS_TIKTOK
 /* Optional Streamlabs TikTok key provider. Posts results through post_to_ui, so it is shut down
  * (worker joined, open session ended) before g_ui_context is deleted. */
@@ -76,7 +76,7 @@ static constexpr const char *kVerticalDockId = "avanatro_streammulticast_vertica
 /* Any thread: run `fn` on the UI thread (dropped when the context is already gone). */
 static void post_to_ui(std::function<void()> fn)
 {
-	QObject *context = g_ui_context;
+	QObject *context = g_ui_context.load();
 	if (context)
 		QMetaObject::invokeMethod(context, std::move(fn), Qt::QueuedConnection);
 }
@@ -200,6 +200,8 @@ static void on_transition_start(void *, calldata_t *cd)
 
 	const char *id = obs_source_get_id(transition);
 	const char *name = obs_source_get_name(transition);
+	const char *uuid = obs_source_get_uuid(transition);
+	start.uuid = uuid ? uuid : "";
 	start.id = id ? id : "";
 	start.name = name ? name : "";
 	obs_data_t *settings = obs_source_get_settings(transition);
@@ -322,9 +324,10 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
-		/* The vertical transition holds vertical scene refs: let go before the frontend clears the scenes. */
+		/* The vertical transitions hold vertical scene refs: let go before the frontend clears the scenes,
+		 * and never re-create one during the teardown (ClearSceneData emits TRANSITION_CHANGED). */
 		if (g_owned_canvas)
-			g_owned_canvas->release_transition();
+			g_owned_canvas->shutdown_transitions();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
 		ensure_owned_canvas_and_follow(true);
 	} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
@@ -430,7 +433,7 @@ bool obs_module_load()
 	g_owned_canvas = std::make_unique<smulti::OwnedCanvas>();
 
 	/* 3c. Vertical recording of the owned canvas; its teardown jobs run on the reaper. */
-	g_ui_context = new QObject(); // UI thread
+	g_ui_context.store(new QObject()); // UI thread
 #ifdef SMULTI_STREAMLABS_TIKTOK
 	g_streamlabs = std::make_unique<smulti::StreamlabsClient>(post_to_ui);
 	smulti::set_streamlabs_client(g_streamlabs.get());
@@ -550,8 +553,11 @@ void obs_module_unload()
 	smulti::set_streamlabs_client(nullptr);
 	g_streamlabs.reset();
 #endif
-	delete g_ui_context;
-	g_ui_context = nullptr;
+	/* Disconnect every libobs callback that posts (vertical transition stop/update, canvas signals) before the
+	 * context goes, so no other thread can still be inside post_to_ui with it. */
+	if (g_owned_canvas)
+		g_owned_canvas->release();
+	delete g_ui_context.exchange(nullptr);
 
 	/* Destroy the preview display first: its draw callback uses g_owned_canvas. */
 	shutdown_vertical_preview();

@@ -68,6 +68,46 @@ std::vector<std::string> main_scene_names()
 	return out;
 }
 
+/**
+ * The 16:9 file of the stinger a chosen vertical video belongs to: the custom transition when it is a
+ * stinger, else the current frontend transition when it is one, else the first stinger. "" when none.
+ * Releases every ref it takes.
+ */
+std::string target_stinger_file(const smulti::VerticalTransitionSettings &settings)
+{
+	auto stinger_path = [](obs_source_t *tr) -> std::string {
+		const char *id = tr ? obs_source_get_id(tr) : nullptr;
+		if (!id || std::string(id) != smulti::kStingerTransitionId)
+			return {};
+		obs_data_t *s = obs_source_get_settings(tr);
+		const char *p = s ? obs_data_get_string(s, "path") : nullptr;
+		std::string out = p ? p : "";
+		obs_data_release(s);
+		return out;
+	};
+	std::string custom, first;
+	obs_frontend_source_list list = {};
+	obs_frontend_get_transitions(&list);
+	for (size_t i = 0; i < list.sources.num; ++i) {
+		obs_source_t *tr = list.sources.array[i];
+		const std::string path = stinger_path(tr);
+		if (path.empty())
+			continue;
+		if (first.empty())
+			first = path;
+		const char *name = obs_source_get_name(tr);
+		if (settings.mode == smulti::VerticalTransitionMode::Custom && name && settings.custom_name == name)
+			custom = path;
+	}
+	obs_frontend_source_list_free(&list);
+	if (!custom.empty())
+		return custom;
+	obs_source_t *current = obs_frontend_get_current_transition();
+	std::string out = stinger_path(current);
+	obs_source_release(current);
+	return out.empty() ? first : out;
+}
+
 /** Names of the frontend transitions. Releases every ref it takes. */
 std::vector<std::string> frontend_transition_names()
 {
@@ -112,11 +152,15 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	m_stinger_path->setClearButtonEnabled(true);
 	m_stinger_path->setToolTip(tr("Video for a stinger transition on the vertical canvas. Empty (auto): "
 				      "\"<stinger>-vertical.<ext>\" or \"stinger-vertical.<ext>\" next to the main stinger "
-				      "file; without one the 16:9 stinger is used."));
+				      "file (same extension); without one the vertical canvas fades instead of stretching the "
+				      "16:9 video. A chosen file applies only to the stinger shown below."));
 	auto *browse = new QPushButton(tr("Browse..."), this);
 	stinger_row->addWidget(m_stinger_path, 1);
 	stinger_row->addWidget(browse);
 	form->addRow(tr("Vertical stinger video:"), stinger_row);
+	m_stinger_for = new QLabel(this);
+	m_stinger_for->setWordWrap(true);
+	form->addRow(QString(), m_stinger_for);
 	layout->addLayout(form);
 
 	m_table = new QTableWidget(0, 2, this);
@@ -203,6 +247,10 @@ void VerticalSceneLink::refresh()
 	m_transition->setCurrentIndex(transition_index);
 	m_transition->blockSignals(false);
 	m_stinger_path->setText(QString::fromStdString(transition.stinger_path));
+	m_stinger_for->setText(transition.stinger_path.empty() || transition.stinger_source.empty()
+				       ? QString()
+				       : tr("For the stinger %1").arg(QString::fromStdString(transition.stinger_source)));
+	m_stinger_for->setVisible(!m_stinger_for->text().isEmpty());
 
 	m_table->setRowCount(0);
 	m_table->setRowCount(static_cast<int>(mains.size()));
@@ -301,8 +349,10 @@ void VerticalSceneLink::on_stinger_path_changed()
 	if (path == settings.stinger_path)
 		return;
 	settings.stinger_path = path; // "" = auto
+	settings.stinger_source = path.empty() ? std::string() : target_stinger_file(settings);
 	m_canvas.set_transition_settings(settings);
 	m_canvas.prepare_transition();
+	refresh(); // shows which stinger it applies to
 }
 
 void VerticalSceneLink::on_browse_stinger()

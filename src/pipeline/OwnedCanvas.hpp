@@ -10,10 +10,12 @@ GPLv2 — see LICENSE for full text.
 #include "../core/SceneLink.hpp"
 #include "../core/VerticalTransition.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // libobs forward declarations
 struct obs_canvas;
@@ -26,6 +28,8 @@ struct obs_source;
 typedef struct obs_source obs_source_t;
 struct obs_weak_canvas;
 typedef struct obs_weak_canvas obs_weak_canvas_t;
+struct obs_weak_source;
+typedef struct obs_weak_source obs_weak_source_t;
 
 namespace smulti {
 
@@ -42,6 +46,7 @@ enum class SceneSwitch {
  * to the UI thread as plain values: no libobs reference crosses the queue.
  */
 struct MainTransitionStart {
+	std::string uuid;          ///< the frontend transition's uuid (key of its prepared vertical transition)
 	std::string id;            ///< transition type id
 	std::string name;          ///< transition name (frontend)
 	std::string settings_json; ///< its settings
@@ -64,12 +69,18 @@ struct MainTransitionStart {
  * its lifetime; get_ref() hands out a strong reference per use.
  *
  * Channel 0 holds a plugin-owned private transition ("StreamMulticast Vertical Transition", canvas base
- * size, centre alignment) whose active child is the vertical scene (TASK-31). Every reader of "the active
- * vertical scene" goes through active_scene_ref() (the destination while a transition runs); every switch
- * goes through switch_scene() / follow_scene() / on_main_transition_start(). The transition reference is
- * UI-thread state: created in ensure(), recreated when the type changes (new one first, active scene copied,
- * channel 0 set, old one released), released after channel 0 is cleared by release_transition() (canvas
- * removal, collection change, scripting shutdown, exit, unload) — always on the UI thread.
+ * size, centre alignment, muted) whose active child is the vertical scene (TASK-31). Every reader of "the
+ * active vertical scene" goes through active_scene_ref() (the destination while a transition runs); every
+ * switch goes through switch_scene() / follow_scene() / on_main_transition_start().
+ *
+ * Transitions are PREPARED ahead of use (fix round 1): one vertical transition per frontend transition,
+ * keyed by its uuid, created and refreshed on ensure(), TRANSITION_LIST_CHANGED / TRANSITION_CHANGED, each
+ * frontend transition's "update" signal and after each vertical run. A stinger loads its media
+ * asynchronously, so the start path never creates or updates one: it only puts the prepared transition on
+ * channel 0 and starts it; with nothing prepared it fades (the base transition) for that one switch.
+ * All transition references are UI-thread state, released after channel 0 is cleared by
+ * release_transition() (canvas removal, collection change, exit, unload; shutdown_transitions() at
+ * scripting shutdown also stops any later re-creation).
  */
 class OwnedCanvas {
 public:
@@ -149,13 +160,16 @@ public:
 	void on_main_transition_start(const MainTransitionStart &start);
 
 	/**
-	 * Bring the vertical transition to the type and settings it will use next (current frontend transition,
-	 * or the custom one), so a stinger is loaded before it plays. Skipped while it runs. UI thread only.
+	 * Create or refresh the prepared vertical transition of every frontend transition (type and settings),
+	 * so a stinger is loaded before it plays; a running one is refreshed after it stops. UI thread only.
 	 */
 	void prepare_transition();
 
-	/** Clear channel 0 (while the canvas lives) and release the transition. UI thread only, idempotent. */
+	/** Clear channel 0 (while the canvas lives) and release every vertical transition. UI thread, idempotent. */
 	void release_transition();
+
+	/** Scripting shutdown: release_transition() and never create a transition again. UI thread. */
+	void shutdown_transitions();
 
 	/** Vertical transition settings (mutex guarded, any thread). Persisted by the next save callback. */
 	VerticalTransitionSettings transition_settings() const;
@@ -169,19 +183,40 @@ public:
 	void set_ui_poster(UiPoster post) { m_post = std::move(post); }
 
 private:
+	/** Prepared vertical transition of one frontend transition. */
+	struct Prepared {
+		std::string uuid;                     ///< frontend transition uuid
+		std::string name;                     ///< frontend transition name (custom mode lookup)
+		obs_weak_source_t *frontend = nullptr; ///< for disconnecting its "update" signal
+		VerticalTransitionPlan plan;          ///< what this frontend transition means on the vertical canvas
+		obs_source_t *wrapper = nullptr;      ///< own transition (null: instant or the base fade)
+		std::string wrapper_id;
+		std::string applied_json; ///< settings applied to `wrapper`
+		bool warned = false;      ///< fade-fallback warning logged
+	};
+
 	void remember(obs_canvas_t *canvas);
-	void disconnect_rename(obs_weak_canvas_t *weak);
+	void disconnect_canvas_signals(obs_weak_canvas_t *weak);
 	static void on_canvas_rename(void *param, calldata_t *cd);
+	static void on_canvas_source_remove(void *param, calldata_t *cd);
+	void repair_removed_scene();
 	void ensure_active_scene(obs_canvas_t *canvas);
-	void prepare_transition_on(obs_canvas_t *canvas);
-	VerticalTransitionPlan plan_for(const TransitionDesc &main) const;
-	VerticalTransitionPlan plan_for_current_transition() const;
-	obs_source_t *ensure_transition(obs_canvas_t *canvas, const std::string &id);
-	obs_source_t *configure_transition(obs_canvas_t *canvas, const VerticalTransitionPlan &plan);
-	bool apply_plan(obs_canvas_t *canvas, const VerticalTransitionPlan &plan, obs_source_t *scene);
 	bool is_owned(obs_canvas_t *canvas) const;
-	void drop_transition_ref(obs_source_t *transition);
+
+	void refresh_prepared_on(obs_canvas_t *canvas);
+	obs_source_t *create_wrapper(obs_canvas_t *canvas, const std::string &id);
+	void destroy_wrapper(obs_source_t *wrapper);
+	void retire_wrapper(obs_canvas_t *canvas, obs_source_t *wrapper);
+	bool is_own_wrapper(obs_source_t *source) const;
+	obs_source_t *ensure_base(obs_canvas_t *canvas);
+	obs_source_t *channel_wrapper(obs_canvas_t *canvas);
+	void install(obs_canvas_t *canvas, obs_source_t *wrapper);
+	const Prepared *find_prepared(const std::string &uuid, const std::string &name) const;
+	void start_switch(obs_canvas_t *canvas, obs_source_t *scene, const Prepared *entry, bool instant,
+			  uint32_t main_duration_ms);
+	void queue_refresh();
 	static void on_transition_stop(void *param, calldata_t *cd);
+	static void on_frontend_update(void *param, calldata_t *cd);
 
 	mutable std::mutex m_mutex;
 	obs_weak_canvas_t *m_weak = nullptr;
@@ -191,11 +226,13 @@ private:
 	VerticalTransitionSettings m_transition_settings; ///< loaded from / saved to the collection (m_mutex)
 
 	/* UI thread only. */
-	obs_source_t *m_transition = nullptr; ///< strong ref, also on channel 0 of the owned canvas
-	std::string m_transition_id;
-	std::string m_applied_json; ///< settings last applied to m_transition (avoids reloading a stinger)
+	std::vector<Prepared> m_prepared;
+	obs_source_t *m_base = nullptr; ///< fade: first content of channel 0, fallback and fade-fallback plans
 	std::function<void()> m_active_listener;
-	UiPoster m_post; ///< written once at load; read by on_transition_stop (graphics thread)
+
+	UiPoster m_post; ///< written once at load; read by the signal callbacks (any thread)
+	std::atomic<bool> m_shutting_down{false};
+	std::atomic<bool> m_refresh_queued{false};
 };
 
 } // namespace smulti

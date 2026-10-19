@@ -16,6 +16,7 @@ namespace {
 constexpr const char *kModeFollow = "follow";
 constexpr const char *kModeCut = "cut";
 constexpr const char *kModeCustom = "custom";
+constexpr int64_t kMatteLayoutSeparateFile = 2; // transition-stinger.c MATTE_LAYOUT_SEPARATE_FILE
 
 /** Splits "<dir><sep>" + "<stem>" + "<.ext>" (ext includes the dot, may be empty). */
 struct PathParts {
@@ -90,6 +91,7 @@ void vertical_transition_save(obs_data_t *data, const VerticalTransitionSettings
 	obs_data_set_string(data, kVerticalTransitionModeKey, vertical_transition_mode_name(settings.mode));
 	obs_data_set_string(data, kVerticalTransitionCustomKey, settings.custom_name.c_str());
 	obs_data_set_string(data, kVerticalStingerPathKey, settings.stinger_path.c_str());
+	obs_data_set_string(data, kVerticalStingerSourceKey, settings.stinger_source.c_str());
 }
 
 VerticalTransitionSettings vertical_transition_load(obs_data_t *data)
@@ -100,14 +102,16 @@ VerticalTransitionSettings vertical_transition_load(obs_data_t *data)
 	out.mode = parse_vertical_transition_mode(get_string(data, kVerticalTransitionModeKey));
 	out.custom_name = get_string(data, kVerticalTransitionCustomKey);
 	out.stinger_path = get_string(data, kVerticalStingerPathKey);
+	out.stinger_source = get_string(data, kVerticalStingerSourceKey);
 	return out;
 }
 
-std::string vertical_stinger_file(const std::string &path, const std::string &configured, const FileExists &exists)
+std::string vertical_stinger_file(const std::string &path, const std::string &configured,
+				  const std::string &configured_for, const FileExists &exists)
 {
 	if (!exists)
 		return {};
-	if (!configured.empty() && exists(configured))
+	if (!configured.empty() && configured_for == path && exists(configured))
 		return configured;
 	const std::string suffixed = suffixed_vertical_file(path, exists);
 	if (!suffixed.empty())
@@ -138,16 +142,30 @@ VerticalTransitionPlan decide_vertical_transition(const VerticalTransitionSettin
 
 	if (source.id == kStingerTransitionId) {
 		const std::string path = get_string(copy, "path");
-		const std::string vertical = vertical_stinger_file(path, settings.stinger_path, exists);
-		if (!vertical.empty())
-			obs_data_set_string(copy, "path", vertical.c_str());
-		else
-			plan.scale_aspect = true; // keep the 16:9 file
-		if (obs_data_get_bool(copy, "track_matte_enabled")) {
+		std::string vertical = vertical_stinger_file(path, settings.stinger_path, settings.stinger_source, exists);
+		const bool separate_matte = obs_data_get_bool(copy, "track_matte_enabled") &&
+					    obs_data_get_int(copy, "track_matte_layout") == kMatteLayoutSeparateFile;
+		if (!vertical.empty() && separate_matte) {
 			const std::string matte = suffixed_vertical_file(get_string(copy, "track_matte_path"), exists);
-			if (!matte.empty())
+			if (matte.empty())
+				vertical.clear(); // a 16:9 mask over the vertical video would be wrong
+			else
 				obs_data_set_string(copy, "track_matte_path", matte.c_str());
 		}
+		if (vertical.empty()) {
+			/* OBS stretches a stinger video to the transition size: never show the 16:9 one. */
+			const int64_t point = obs_data_get_int(copy, "transition_point");
+			const bool point_in_ms = obs_data_get_int(copy, "tp_type") == 0 && point > 0;
+			obs_data_release(copy);
+			plan.instant = false;
+			plan.fade_fallback = true;
+			plan.id = kFadeTransitionId;
+			plan.settings_json = "{}";
+			plan.duration_ms = point_in_ms ? static_cast<uint32_t>(point) : source.duration_ms;
+			return plan;
+		}
+		obs_data_set_string(copy, "path", vertical.c_str());
+		obs_data_set_int(copy, "audio_monitoring", 0); // OBS_MONITORING_TYPE_NONE: the main stinger monitors
 	}
 
 	const char *json = obs_data_get_json(copy);

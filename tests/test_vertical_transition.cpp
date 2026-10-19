@@ -67,7 +67,7 @@ SMULTI_TEST(vertical_transition_follow_copies_type_and_duration)
 	EXPECT_EQ(plan.id, std::string("fade_transition"));
 	EXPECT_EQ(plan.duration_ms, 450u);
 	EXPECT_EQ(plan_int(plan, "some_key"), 7);
-	EXPECT_EQ(plan.scale_aspect, false);
+	EXPECT_EQ(plan.fade_fallback, false);
 	/* the main settings are only read */
 	EXPECT_EQ(obs_data_get_int(fade, "some_key"), 7);
 	obs_data_release(fade);
@@ -105,17 +105,29 @@ SMULTI_TEST(vertical_transition_stinger_uses_vertical_file)
 	obs_data_t *st = stinger_settings("E:/Stream/Avanatro/stinger.webm");
 	TransitionDesc main{"obs_stinger_transition", "Stinger", st, 300};
 
+	obs_data_set_int(st, "audio_monitoring", 2); // OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT on the main stinger
 	VerticalTransitionSettings s;
 	s.stinger_path = "E:/Stream/Other/my-vertical.webm";
+	s.stinger_source = "E:/Stream/Avanatro/stinger.webm"; // configured for this stinger
 	const VerticalTransitionPlan plan = smulti::decide_vertical_transition(
 		s, main, nullptr, exists_in({"E:/Stream/Other/my-vertical.webm", "E:/Stream/Avanatro/stinger-vertical.webm"}));
 	EXPECT_EQ(plan.instant, false);
 	EXPECT_EQ(plan.id, std::string("obs_stinger_transition"));
 	EXPECT_EQ(plan_string(plan, "path"), std::string("E:/Stream/Other/my-vertical.webm"));
 	EXPECT_EQ(plan_int(plan, "transition_point"), 640);
-	EXPECT_EQ(plan.scale_aspect, false);
-	/* the main stinger keeps its 16:9 file */
+	EXPECT_EQ(plan_int(plan, "audio_monitoring"), 0); // the vertical stinger never monitors
+	EXPECT_EQ(plan.fade_fallback, false);
+	/* the main stinger keeps its 16:9 file and its monitoring */
 	EXPECT_EQ(std::string(obs_data_get_string(st, "path")), std::string("E:/Stream/Avanatro/stinger.webm"));
+	EXPECT_EQ(obs_data_get_int(st, "audio_monitoring"), 2);
+
+	/* a file configured for ANOTHER stinger does not apply to this one: the auto rule does */
+	VerticalTransitionSettings other = s;
+	other.stinger_source = "E:/Stream/Other/intro.webm";
+	const VerticalTransitionPlan p3 = smulti::decide_vertical_transition(
+		other, main, nullptr,
+		exists_in({"E:/Stream/Other/my-vertical.webm", "E:/Stream/Avanatro/stinger-vertical.webm"}));
+	EXPECT_EQ(plan_string(p3, "path"), std::string("E:/Stream/Avanatro/stinger-vertical.webm"));
 
 	/* a configured file that does not exist falls back to the auto rule */
 	s.stinger_path = "E:/missing.webm";
@@ -128,21 +140,22 @@ SMULTI_TEST(vertical_transition_stinger_uses_vertical_file)
 SMULTI_TEST(vertical_transition_stinger_autodetect_suffix)
 {
 	/* "<stem>-vertical.<ext>" wins over "stinger-vertical.<ext>" */
-	EXPECT_EQ(smulti::vertical_stinger_file("E:\\Stream\\intro.mov", "",
+	EXPECT_EQ(smulti::vertical_stinger_file("E:\\Stream\\intro.mov", "", "",
 						exists_in({"E:\\Stream\\intro-vertical.mov", "E:\\Stream\\stinger-vertical.mov"})),
 		  std::string("E:\\Stream\\intro-vertical.mov"));
-	EXPECT_EQ(smulti::vertical_stinger_file("E:\\Stream\\intro.mov", "", exists_in({"E:\\Stream\\stinger-vertical.mov"})),
+	EXPECT_EQ(smulti::vertical_stinger_file("E:\\Stream\\intro.mov", "", "", exists_in({"E:\\Stream\\stinger-vertical.mov"})),
 		  std::string("E:\\Stream\\stinger-vertical.mov"));
-	EXPECT_EQ(smulti::vertical_stinger_file("E:/Stream/Avanatro/stinger.webm", "",
+	EXPECT_EQ(smulti::vertical_stinger_file("E:/Stream/Avanatro/stinger.webm", "", "",
 						exists_in({"E:/Stream/Avanatro/stinger-vertical.webm"})),
 		  std::string("E:/Stream/Avanatro/stinger-vertical.webm"));
-	EXPECT_EQ(smulti::vertical_stinger_file("E:/a/b.c/clip", "", exists_in({"E:/a/b.c/clip-vertical"})),
+	EXPECT_EQ(smulti::vertical_stinger_file("E:/a/b.c/clip", "", "", exists_in({"E:/a/b.c/clip-vertical"})),
 		  std::string("E:/a/b.c/clip-vertical"));
-	EXPECT_EQ(smulti::vertical_stinger_file("", "", kNothingExists), std::string(""));
+	EXPECT_EQ(smulti::vertical_stinger_file("", "", "", kNothingExists), std::string(""));
 
 	/* track matte: "<stem>-vertical" rule, only when track matte is enabled */
 	obs_data_t *st = stinger_settings("E:/S/stinger.webm");
 	obs_data_set_bool(st, "track_matte_enabled", true);
+	obs_data_set_int(st, "track_matte_layout", 2); // MATTE_LAYOUT_SEPARATE_FILE
 	obs_data_set_string(st, "track_matte_path", "E:/S/matte.webm");
 	TransitionDesc main{"obs_stinger_transition", "Stinger", st, 300};
 	VerticalTransitionSettings s;
@@ -150,6 +163,17 @@ SMULTI_TEST(vertical_transition_stinger_autodetect_suffix)
 	VerticalTransitionPlan plan = smulti::decide_vertical_transition(s, main, nullptr, files);
 	EXPECT_EQ(plan_string(plan, "path"), std::string("E:/S/stinger-vertical.webm"));
 	EXPECT_EQ(plan_string(plan, "track_matte_path"), std::string("E:/S/matte-vertical.webm"));
+
+	/* vertical video but no vertical separate-file matte: a 16:9 mask would be wrong -> fade fallback */
+	plan = smulti::decide_vertical_transition(s, main, nullptr, exists_in({"E:/S/stinger-vertical.webm"}));
+	EXPECT_EQ(plan.fade_fallback, true);
+	EXPECT_EQ(plan.id, std::string("fade_transition"));
+
+	/* a packed matte (layout horizontal) lives inside the vertical video itself: no separate file needed */
+	obs_data_set_int(st, "track_matte_layout", 0);
+	plan = smulti::decide_vertical_transition(s, main, nullptr, exists_in({"E:/S/stinger-vertical.webm"}));
+	EXPECT_EQ(plan.fade_fallback, false);
+	EXPECT_EQ(plan_string(plan, "path"), std::string("E:/S/stinger-vertical.webm"));
 
 	obs_data_set_bool(st, "track_matte_enabled", false);
 	plan = smulti::decide_vertical_transition(s, main, nullptr, files);
@@ -162,11 +186,20 @@ SMULTI_TEST(vertical_transition_stinger_fallback_aspect)
 	obs_data_t *st = stinger_settings("E:/Stream/Avanatro/stinger.webm");
 	TransitionDesc main{"obs_stinger_transition", "Stinger", st, 300};
 	VerticalTransitionSettings s;
-	const VerticalTransitionPlan plan = smulti::decide_vertical_transition(s, main, nullptr, kNothingExists);
+	/* No vertical file: never stretch the 16:9 video; fade over the stinger's transition point instead
+	 * (owner ruling R2, TASK-31 fix round 1). */
+	VerticalTransitionPlan plan = smulti::decide_vertical_transition(s, main, nullptr, kNothingExists);
 	EXPECT_EQ(plan.instant, false);
-	EXPECT_EQ(plan_string(plan, "path"), std::string("E:/Stream/Avanatro/stinger.webm"));
-	EXPECT_EQ(plan.scale_aspect, true);
-	EXPECT_EQ(plan_int(plan, "transition_point"), 640);
+	EXPECT_EQ(plan.fade_fallback, true);
+	EXPECT_EQ(plan.id, std::string("fade_transition"));
+	EXPECT_EQ(plan.duration_ms, 640u);
+	EXPECT_EQ(plan_string(plan, "path"), std::string(""));
+
+	/* transition point in frames: not convertible here -> the main duration */
+	obs_data_set_int(st, "tp_type", 1);
+	plan = smulti::decide_vertical_transition(s, main, nullptr, kNothingExists);
+	EXPECT_EQ(plan.fade_fallback, true);
+	EXPECT_EQ(plan.duration_ms, 300u);
 	obs_data_release(st);
 }
 
@@ -188,7 +221,7 @@ SMULTI_TEST(vertical_transition_custom_mode)
 	EXPECT_EQ(plan_int(plan, "marker"), 3);
 
 	/* custom transition not found -> follow main */
-	plan = smulti::decide_vertical_transition(s, main, nullptr, kNothingExists);
+	plan = smulti::decide_vertical_transition(s, main, nullptr, exists_in({"E:/S/stinger-vertical.webm"}));
 	EXPECT_EQ(plan.id, std::string("obs_stinger_transition"));
 
 	/* custom cut -> instant */
@@ -213,6 +246,7 @@ SMULTI_TEST(vertical_transition_mode_roundtrip)
 	s.mode = VerticalTransitionMode::Custom;
 	s.custom_name = "Slow fade";
 	s.stinger_path = "E:/S/v.webm";
+	s.stinger_source = "E:/S/stinger.webm";
 	obs_data_t *data = obs_data_create();
 	smulti::vertical_transition_save(data, s);
 	EXPECT_EQ(std::string(obs_data_get_string(data, smulti::kVerticalTransitionModeKey)), std::string("custom"));
@@ -221,6 +255,7 @@ SMULTI_TEST(vertical_transition_mode_roundtrip)
 	EXPECT_TRUE(back.mode == VerticalTransitionMode::Custom);
 	EXPECT_EQ(back.custom_name, std::string("Slow fade"));
 	EXPECT_EQ(back.stinger_path, std::string("E:/S/v.webm"));
+	EXPECT_EQ(back.stinger_source, std::string("E:/S/stinger.webm"));
 
 	/* missing keys -> defaults; the removed wait-for-stinger key is ignored */
 	obs_data_t *old = obs_data_create();
@@ -230,4 +265,30 @@ SMULTI_TEST(vertical_transition_mode_roundtrip)
 	EXPECT_TRUE(def.mode == VerticalTransitionMode::Follow);
 	EXPECT_TRUE(def.custom_name.empty());
 	EXPECT_TRUE(def.stinger_path.empty());
+}
+
+SMULTI_TEST(vertical_transition_stinger_copy_disables_monitoring)
+{
+	/* The copy is the vertical stinger's own settings: monitoring forced off (the main stinger already
+	 * monitors), every other key copied unchanged; the main settings are untouched. */
+	obs_data_t *st = stinger_settings("E:/S/stinger.webm");
+	obs_data_set_int(st, "audio_monitoring", 1);
+	obs_data_set_int(st, "audio_fade_style", 1);
+	obs_data_set_bool(st, "hw_decode", true);
+	TransitionDesc main{"obs_stinger_transition", "Stinger", st, 300};
+	VerticalTransitionSettings s;
+	const VerticalTransitionPlan plan =
+		smulti::decide_vertical_transition(s, main, nullptr, exists_in({"E:/S/stinger-vertical.webm"}));
+	EXPECT_EQ(plan_int(plan, "audio_monitoring"), 0);
+	EXPECT_EQ(plan_int(plan, "audio_fade_style"), 1);
+	EXPECT_EQ(plan_int(plan, "transition_point"), 640);
+	EXPECT_EQ(obs_data_get_int(st, "audio_monitoring"), 1);
+	obs_data_release(st);
+
+	/* non-stinger copies are left as they are */
+	obs_data_t *swipe = obs_data_create();
+	obs_data_set_int(swipe, "audio_monitoring", 1);
+	TransitionDesc f{"swipe_transition", "Swipe", swipe, 500};
+	EXPECT_EQ(plan_int(smulti::decide_vertical_transition(s, f, nullptr, kNothingExists), "audio_monitoring"), 1);
+	obs_data_release(swipe);
 }
