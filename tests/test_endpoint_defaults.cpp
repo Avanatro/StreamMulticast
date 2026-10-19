@@ -49,3 +49,25 @@ SMULTI_TEST(endpoint_present_false_is_kept_not_overridden_by_default)
 	EXPECT_EQ(out.enabled, false);
 	EXPECT_EQ(out.linked_to_main, false);
 }
+
+// Regression guards (lock current correct behaviour, not a known bug).
+SMULTI_TEST(endpoint_missing_name_deserializes_to_default_name)
+{
+	Endpoint def = Endpoint::make_default();
+	obs_data_t *data = Endpoint::make_default("x").serialize();
+	obs_data_erase(data, "name");
+	Endpoint out = Endpoint::deserialize(data);
+	obs_data_release(data);
+
+	EXPECT_EQ(out.name, def.name);
+}
+
+SMULTI_TEST(endpoint_missing_id_stays_empty)
+{
+	obs_data_t *data = Endpoint::make_default("x").serialize();
+	obs_data_erase(data, "id");
+	Endpoint out = Endpoint::deserialize(data);
+	obs_data_release(data);
+
+	EXPECT_TRUE(out.id.empty());
+}
