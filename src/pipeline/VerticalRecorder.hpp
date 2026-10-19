@@ -105,6 +105,13 @@ private:
 		obs_canvas_t *canvas = nullptr;
 	};
 
+	/**
+	 * One start attempt with `choice`. On success the session (with `canvas`, whose ref then belongs to it)
+	 * is published and recording; on failure everything it created is reaped, `canvas` stays the caller's
+	 * and `error` says why. UI thread.
+	 */
+	bool try_start(const RecordEncoderChoice &choice, obs_canvas_t *canvas, video_t *video, const std::string &file,
+		       bool with_main, std::string &error);
 	static void on_output_stop(void *data, calldata_t *cd);
 	void finish(std::uint64_t session, long long code);
 	Session detach_locked();

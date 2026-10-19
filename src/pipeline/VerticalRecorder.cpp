@@ -18,6 +18,8 @@ GPLv2 — see LICENSE for full text.
 #include <util/platform.h>
 
 #include <ctime>
+#include <optional>
+#include <set>
 #include <utility>
 
 namespace smulti {
@@ -221,15 +223,16 @@ bool VerticalRecorder::start(bool with_main)
 	}
 
 	/* Strong ref for the whole session: it keeps the canvas's video_t (the encoder's input) alive. */
-	Session s;
-	s.canvas = m_owned.get_ref();
-	if (!s.canvas) {
+	obs_canvas_t *canvas = m_owned.get_ref();
+	if (!canvas) {
 		fail("The vertical canvas is not available. Not recording.");
 		return false;
 	}
-	video_t *video = obs_canvas_get_video(s.canvas);
+	video_t *video = obs_canvas_get_video(canvas);
 	if (!video) {
-		reap(s, false);
+		Session only_canvas;
+		only_canvas.canvas = canvas;
+		reap(only_canvas, false);
 		fail("The vertical canvas has no video yet. Not recording.");
 		return false;
 	}
@@ -238,7 +241,40 @@ bool VerticalRecorder::start(bool with_main)
 		folder.folder, format_record_file_stem(kVerticalRecordFileStemFormat, local_now()),
 		[](const std::string &p) { return os_file_exists(p.c_str()); });
 
-	const RecordEncoderChoice choice = choose_vertical_record_encoder(EncoderFactory::available_encoder_types());
+	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
+	RecordEncoderChoice choice = choose_vertical_record_encoder(available);
+	std::string error;
+	bool started = try_start(choice, canvas, video, file, with_main, error);
+	if (!started) {
+		/* NVENC can be registered and still fail (session limit, init error): retry once with x264, so a
+		 * recording started together with the main one never silently produces no vertical file. */
+		const std::optional<RecordEncoderChoice> fallback = vertical_record_fallback_encoder(choice.type_id, available);
+		if (fallback) {
+			obs_log(LOG_WARNING, "vertical recording: %s with %s, retrying with %s %s %d", error.c_str(),
+				choice.type_id.c_str(), fallback->type_id.c_str(), fallback->rate_control.c_str(),
+				fallback->quality);
+			choice = *fallback;
+			started = try_start(choice, canvas, video, file, with_main, error);
+		}
+	}
+	if (!started) {
+		Session only_canvas; // try_start released everything it created; the canvas ref is still ours
+		only_canvas.canvas = canvas;
+		reap(only_canvas, false);
+		fail(error + ". Not recording.");
+		return false;
+	}
+
+	obs_log(LOG_INFO, "vertical recording: started \"%s\" (%s %s %d%s)", file.c_str(), choice.type_id.c_str(),
+		choice.rate_control.c_str(), choice.quality, with_main ? ", with the main recording" : "");
+	notify();
+	return true;
+}
+
+bool VerticalRecorder::try_start(const RecordEncoderChoice &choice, obs_canvas_t *canvas, video_t *video,
+				 const std::string &file, bool with_main, std::string &error)
+{
+	Session s; // without the canvas until the start succeeded: a failed attempt must not release it
 	s.video = m_factory.create_record_video_encoder(choice, std::string(kOutputName) + " video", video);
 	s.audio = m_factory.create_aac_encoder(std::string(kOutputName) + " audio", kAudioBitrateKbps, kMainMixTrack1);
 
@@ -249,7 +285,7 @@ bool VerticalRecorder::start(bool with_main)
 
 	if (!s.video || !s.audio || !s.output) {
 		reap(s, false);
-		fail("Could not create the recording encoders or output. Not recording.");
+		error = !s.video ? "Could not create the video encoder" : "Could not create the recording audio encoder or output";
 		return false;
 	}
 	obs_output_set_video_encoder(s.output, s.video);
@@ -260,6 +296,7 @@ bool VerticalRecorder::start(bool with_main)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_session = s;
+		m_session.canvas = canvas; // published with the session so a fast "stop" signal finds it complete
 		m_state = VerticalRecordState::Recording;
 		m_started_with_main = with_main;
 		m_remux_on_stop = remux;
@@ -270,21 +307,17 @@ bool VerticalRecorder::start(bool with_main)
 
 	if (!obs_output_start(s.output)) {
 		const char *err = obs_output_get_last_error(s.output);
-		const std::string reason = std::string("Could not start the recording") + (err ? std::string(": ") + err : "");
+		error = std::string("Could not start the recording") + (err ? std::string(": ") + err : "");
 		signal_handler_disconnect(obs_output_get_signal_handler(s.output), "stop", on_output_stop, this);
 		Session dead;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			dead = detach_locked();
 		}
+		dead.canvas = nullptr; // still owned by start(), which may retry with it
 		reap(dead, false);
-		fail(reason);
 		return false;
 	}
-
-	obs_log(LOG_INFO, "vertical recording: started \"%s\" (%s %s %d%s)", file.c_str(), choice.type_id.c_str(),
-		choice.rate_control.c_str(), choice.quality, with_main ? ", with the main recording" : "");
-	notify();
 	return true;
 }
 
@@ -492,10 +525,16 @@ void VerticalRecorder::remux_loop()
 			ok = media_remux_job_process(job, remux_progress, &m_remux_cancel);
 			media_remux_job_destroy(job);
 		}
-		if (ok)
+		if (ok) {
 			obs_log(LOG_INFO, "vertical recording: remuxed to \"%s\"", out.c_str());
-		else
-			obs_log(LOG_WARNING, "vertical recording: remux of \"%s\" failed or was cancelled", in.c_str());
+		} else if (m_remux_cancel.load()) {
+			/* Cancelled at shutdown: the MP4 is truncated, the MKV next to it is complete. */
+			const bool removed = os_unlink(out.c_str()) == 0;
+			obs_log(LOG_WARNING, "vertical recording: remux of \"%s\" cancelled, %s the partial \"%s\"",
+				in.c_str(), removed ? "deleted" : "could not delete", out.c_str());
+		} else {
+			obs_log(LOG_WARNING, "vertical recording: remux of \"%s\" failed", in.c_str());
+		}
 	}
 }
 

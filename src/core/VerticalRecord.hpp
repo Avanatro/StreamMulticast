@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <ctime>
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -38,7 +39,10 @@ void vertical_record_settings_save(obs_data_t *data, const VerticalRecordSetting
 /** Missing keys yield the defaults (record with main, default folder). */
 VerticalRecordSettings vertical_record_settings_load(obs_data_t *data);
 
-/** True for a path on drive C: ("C:..." or "\\?\C:...", any case). */
+/**
+ * True for a path on drive C:, any case: "C:...", the namespace forms "\\?\C:..." and "\\.\C:...", and the
+ * administrative share "\\<host>\C$\..." (also as "\\?\UNC\<host>\C$\...").
+ */
 bool path_is_on_drive_c(const std::string &path);
 
 struct VerticalRecordFolder {
@@ -80,5 +84,13 @@ struct RecordEncoderChoice {
  * x264 CRF 20. `available` is the set of registered encoder type ids.
  */
 RecordEncoderChoice choose_vertical_record_encoder(const std::set<std::string> &available);
+
+/**
+ * The encoder to retry with after `failed_type_id` failed at encoder create or output start (NVENC
+ * registered but unusable: session limit, init error): choose_vertical_record_encoder without any NVENC
+ * HEVC id, i.e. x264 CRF 20. nullopt when the failed encoder was not NVENC (nothing left to try).
+ */
+std::optional<RecordEncoderChoice> vertical_record_fallback_encoder(const std::string &failed_type_id,
+								    std::set<std::string> available);
 
 } // namespace smulti

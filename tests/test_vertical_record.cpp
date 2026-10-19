@@ -5,6 +5,7 @@
 #include <obs-data.h>
 
 #include <ctime>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -48,6 +49,16 @@ SMULTI_TEST(vertical_record_refuses_drive_c)
 	EXPECT_TRUE(smulti::path_is_on_drive_c("\\\\?\\C:\\Videos"));
 	EXPECT_TRUE(!smulti::path_is_on_drive_c("E:/Recordings"));
 	EXPECT_TRUE(!smulti::path_is_on_drive_c("\\\\nas\\share\\C:"));
+	/* device namespace and administrative C$ shares are drive C: too */
+	EXPECT_TRUE(smulti::path_is_on_drive_c("\\\\.\\C:\\Rec"));
+	EXPECT_TRUE(smulti::path_is_on_drive_c("\\\\?\\UNC\\host\\C$\\Rec"));
+	EXPECT_TRUE(smulti::path_is_on_drive_c("\\\\localhost\\C$\\Rec"));
+	EXPECT_TRUE(smulti::path_is_on_drive_c("//localhost/c$"));
+	EXPECT_TRUE(!smulti::path_is_on_drive_c("\\\\nas\\D$\\Rec"));
+	EXPECT_TRUE(!smulti::path_is_on_drive_c("\\\\nas\\C$x\\Rec"));
+	EXPECT_TRUE(!smulti::resolve_vertical_record_folder("", "\\\\localhost\\C$\\Rec").ok);
+	EXPECT_TRUE(!smulti::resolve_vertical_record_folder("", "\\\\.\\C:\\Rec").ok);
+	EXPECT_TRUE(smulti::resolve_vertical_record_folder("", "\\\\.\\E:\\Rec").ok);
 
 	VerticalRecordFolder d = smulti::resolve_vertical_record_folder("C:/Users/Avana/Videos", "");
 	EXPECT_TRUE(!d.ok);
@@ -109,6 +120,22 @@ SMULTI_TEST(vertical_record_encoder_falls_back_to_x264_crf)
 	EXPECT_EQ(c.quality_key, "crf");
 	EXPECT_EQ(c.quality, 20);
 	EXPECT_EQ(smulti::choose_vertical_record_encoder({}).type_id, "obs_x264");
+}
+
+SMULTI_TEST(vertical_record_encoder_fallback_after_nvenc_failure)
+{
+	const std::set<std::string> all = {"obs_x264", "jim_hevc_nvenc", "obs_nvenc_hevc_tex"};
+	/* NVENC registered but failed at create or start: retry once with x264 CRF 20 */
+	std::optional<RecordEncoderChoice> f = smulti::vertical_record_fallback_encoder("obs_nvenc_hevc_tex", all);
+	EXPECT_TRUE(f.has_value());
+	EXPECT_EQ(f ? f->type_id : std::string(), "obs_x264");
+	EXPECT_EQ(f ? f->rate_control : std::string(), "CRF");
+	EXPECT_EQ(f ? f->quality : 0, 20);
+	/* the compat id is NVENC too: never retried with the other NVENC id */
+	std::optional<RecordEncoderChoice> g = smulti::vertical_record_fallback_encoder("jim_hevc_nvenc", all);
+	EXPECT_EQ(g ? g->type_id : std::string(), "obs_x264");
+	/* x264 itself failed: nothing left to try */
+	EXPECT_TRUE(!smulti::vertical_record_fallback_encoder("obs_x264", all).has_value());
 }
 
 SMULTI_TEST(vertical_record_settings_roundtrip_and_defaults)

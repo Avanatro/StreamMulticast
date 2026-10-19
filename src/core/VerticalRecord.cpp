@@ -16,6 +16,9 @@ namespace smulti {
 
 namespace {
 
+/** NVENC HEVC encoder ids in preference order (the new API id, then the compat id). */
+constexpr const char *kNvencHevcIds[] = {"obs_nvenc_hevc_tex", "jim_hevc_nvenc"};
+
 bool is_sep(char c)
 {
 	return c == '/' || c == '\\';
@@ -28,16 +31,43 @@ std::string trim_trailing_separators(std::string path)
 	return path;
 }
 
-/** Strips the Win32 long-path prefix "\\?\". */
-std::string without_long_prefix(const std::string &path)
+/**
+ * Strips the Win32 namespace prefixes "\\?\" and "\\.\" (either separator); "\\?\UNC\host\share" and
+ * "\\.\UNC\host\share" become "\\host\share".
+ */
+std::string without_namespace_prefix(const std::string &path)
 {
-	return path.rfind("\\\\?\\", 0) == 0 ? path.substr(4) : path;
+	const std::string &p = path;
+	if (p.size() < 4 || !is_sep(p[0]) || !is_sep(p[1]) || (p[2] != '?' && p[2] != '.') || !is_sep(p[3]))
+		return path;
+	const std::string rest = p.substr(4);
+	if (rest.size() >= 4 && std::toupper(static_cast<unsigned char>(rest[0])) == 'U' &&
+	    std::toupper(static_cast<unsigned char>(rest[1])) == 'N' &&
+	    std::toupper(static_cast<unsigned char>(rest[2])) == 'C' && is_sep(rest[3]))
+		return "\\\\" + rest.substr(4);
+	return rest;
 }
 
-/** Drive-letter path ("E:/..." or "\\?\E:\...") or UNC ("\\server\share"). */
+/** Share name of a UNC path "\\host\share\..." ("" when `p` is not UNC). */
+std::string unc_share(const std::string &p)
+{
+	if (p.size() < 3 || !is_sep(p[0]) || !is_sep(p[1]) || is_sep(p[2]))
+		return "";
+	size_t host_end = 2;
+	while (host_end < p.size() && !is_sep(p[host_end]))
+		++host_end;
+	if (host_end >= p.size())
+		return "";
+	size_t share_end = host_end + 1;
+	while (share_end < p.size() && !is_sep(p[share_end]))
+		++share_end;
+	return p.substr(host_end + 1, share_end - host_end - 1);
+}
+
+/** Drive-letter path ("E:/...", "\\?\E:\...", "\\.\E:\...") or UNC ("\\server\share"). */
 bool is_absolute(const std::string &path)
 {
-	const std::string p = without_long_prefix(path);
+	const std::string p = without_namespace_prefix(path);
 	if (p.size() >= 2 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':')
 		return p.size() == 2 || is_sep(p[2]);
 	return p.size() > 2 && is_sep(p[0]) && is_sep(p[1]) && !is_sep(p[2]);
@@ -74,8 +104,12 @@ VerticalRecordSettings vertical_record_settings_load(obs_data_t *data)
 
 bool path_is_on_drive_c(const std::string &path)
 {
-	const std::string p = without_long_prefix(path);
-	return p.size() >= 2 && (p[0] == 'C' || p[0] == 'c') && p[1] == ':';
+	const std::string p = without_namespace_prefix(path);
+	if (p.size() >= 2 && (p[0] == 'C' || p[0] == 'c') && p[1] == ':')
+		return true;
+	/* The administrative share of drive C ("\\host\C$\...", any host, localhost included). */
+	const std::string share = unc_share(p);
+	return share.size() == 2 && (share[0] == 'C' || share[0] == 'c') && share[1] == '$';
 }
 
 VerticalRecordFolder resolve_vertical_record_folder(const std::string &main_record_path, const std::string &configured)
@@ -162,10 +196,23 @@ std::string remux_target_path(const std::string &recorded_path)
 	return recorded_path.substr(0, dot) + ".mp4";
 }
 
+std::optional<RecordEncoderChoice> vertical_record_fallback_encoder(const std::string &failed_type_id,
+								    std::set<std::string> available)
+{
+	bool failed_was_nvenc = false;
+	for (const char *id : kNvencHevcIds) {
+		failed_was_nvenc = failed_was_nvenc || failed_type_id == id;
+		available.erase(id);
+	}
+	if (!failed_was_nvenc)
+		return std::nullopt;
+	return choose_vertical_record_encoder(available);
+}
+
 RecordEncoderChoice choose_vertical_record_encoder(const std::set<std::string> &available)
 {
 	RecordEncoderChoice c;
-	for (const char *id : {"obs_nvenc_hevc_tex", "jim_hevc_nvenc"}) {
+	for (const char *id : kNvencHevcIds) {
 		if (available.count(id)) {
 			c.type_id = id;
 			c.rate_control = "CQP";
