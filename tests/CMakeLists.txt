@@ -9,6 +9,7 @@ add_executable(
   streammulticast_tests
   main.cpp
   test_endpoint_roundtrip.cpp
+  test_endpoint_defaults.cpp
   ${CMAKE_SOURCE_DIR}/src/core/Endpoint.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)

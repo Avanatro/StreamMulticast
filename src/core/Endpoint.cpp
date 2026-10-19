@@ -102,22 +102,42 @@ Endpoint Endpoint::deserialize(obs_data_t *data)
 	if (!data)
 		return Endpoint{};
 
-	Endpoint ep;
-	ep.id                   = obs_data_get_string(data, "id");
-	ep.name                 = obs_data_get_string(data, "name");
-	ep.server_url           = obs_data_get_string(data, "server_url");
-	ep.stream_key           = obs_data_get_string(data, "stream_key");
-	ep.encoder_backend      = static_cast<EncoderBackend>(
-	                              static_cast<int>(obs_data_get_int(data, "encoder_backend")));
-	ep.video_bitrate_kbps   = static_cast<int>(obs_data_get_int(data, "video_bitrate"));
-	ep.keyframe_interval_sec = static_cast<int>(obs_data_get_int(data, "keyframe_interval"));
-	ep.audio_bitrate_kbps   = static_cast<int>(obs_data_get_int(data, "audio_bitrate"));
-	/* Default orientation=0=SourceMatch is also obs_data's int default for missing keys */
-	ep.orientation          = static_cast<OutputOrientation>(
-	                              static_cast<int>(obs_data_get_int(data, "orientation")));
-	ep.enabled              = obs_data_get_bool(data, "enabled");
-	ep.linked_to_main       = obs_data_get_bool(data, "linked_to_main");
-	ep.sort_order           = static_cast<int>(obs_data_get_int(data, "sort_order"));
+	/* Start from the documented defaults: a key absent from the persisted data
+	 * keeps its make_default() value instead of the obs_data zero value
+	 * (false / 0 / ""). Only keys the user (or a saved config) actually set
+	 * override the default. make_default() generates a fresh UUID; it is cleared
+	 * so an absent id still marks a parse error (see header). */
+	Endpoint ep = make_default();
+	ep.id.clear();
+
+	auto has = [data](const char *key) { return obs_data_has_user_value(data, key); };
+
+	if (has("id"))
+		ep.id = obs_data_get_string(data, "id");
+	if (has("name"))
+		ep.name = obs_data_get_string(data, "name");
+	if (has("server_url"))
+		ep.server_url = obs_data_get_string(data, "server_url");
+	if (has("stream_key"))
+		ep.stream_key = obs_data_get_string(data, "stream_key");
+	if (has("encoder_backend"))
+		ep.encoder_backend = static_cast<EncoderBackend>(
+			static_cast<int>(obs_data_get_int(data, "encoder_backend")));
+	if (has("video_bitrate"))
+		ep.video_bitrate_kbps = static_cast<int>(obs_data_get_int(data, "video_bitrate"));
+	if (has("keyframe_interval"))
+		ep.keyframe_interval_sec = static_cast<int>(obs_data_get_int(data, "keyframe_interval"));
+	if (has("audio_bitrate"))
+		ep.audio_bitrate_kbps = static_cast<int>(obs_data_get_int(data, "audio_bitrate"));
+	if (has("orientation"))
+		ep.orientation = static_cast<OutputOrientation>(
+			static_cast<int>(obs_data_get_int(data, "orientation")));
+	if (has("enabled"))
+		ep.enabled = obs_data_get_bool(data, "enabled");
+	if (has("linked_to_main"))
+		ep.linked_to_main = obs_data_get_bool(data, "linked_to_main");
+	if (has("sort_order"))
+		ep.sort_order = static_cast<int>(obs_data_get_int(data, "sort_order"));
 
 	/* Clamp bitrate to valid range */
 	if (ep.video_bitrate_kbps < 500)   ep.video_bitrate_kbps = 500;

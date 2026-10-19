@@ -31,10 +31,23 @@ nodes:
     code:
       - src/core/Endpoint.hpp
       - src/core/Endpoint.cpp
+      - tests/test_endpoint_defaults.cpp
     works_when:
       - id: endpoint-model.shape
         behavior: "Endpoint round-trips through obs_data without loss; missing keys get documented defaults."
-        verification: []
+        verification:
+          - kind: automated
+            reference: tests/test_endpoint_defaults.cpp
+            check: endpoint_missing_bools_deserialize_to_defaults
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed before the fix (enabled/linked_to_main read false), passed after (WU2 commit)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_endpoint_defaults.cpp
+            check: endpoint_missing_numbers_deserialize_to_defaults
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed before the fix, passed after (WU2 commit)"
+            checked_at: 2026-10-19
     status: building
   - id: config-persistence
     lane: foundation
