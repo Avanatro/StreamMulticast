@@ -341,6 +341,15 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19 (WU1 commit)"
             checked_at: 2026-10-19
+      - id: test-harness.per-case-selection
+        behavior: "ctest -R <prefix> selects individual cases: every SMULTI_TEST case is its own ctest test, registered at configure time from the test sources."
+        verification:
+          - kind: automated
+            reference: tests/TestRunner.hpp
+            check: run_one
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -N lists 36 tests (34 cases + streammulticast_tests + harness_unknown_case_fails); full ctest 36/36 passed; -R endpoint_roundtrip runs 1 test; local run 2026-10-19"
+            checked_at: 2026-10-19
     status: building
   - id: build-ci
     lane: foundation

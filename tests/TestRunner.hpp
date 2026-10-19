@@ -62,6 +62,33 @@ inline int run_all()
 	return failed_tests == 0 ? 0 : 1;
 }
 
+// Prints one registered case name per line.
+inline void list_all()
+{
+	for (auto &t : registry())
+		std::printf("%s\n", t.name.c_str());
+}
+
+// Runs a single case by name. Returns 0 pass, 1 fail, 2 unknown name.
+inline int run_one(const std::string &name)
+{
+	for (auto &t : registry()) {
+		if (t.name != name)
+			continue;
+		int before = failure_count();
+		std::printf("[ RUN  ] %s\n", t.name.c_str());
+		t.fn();
+		if (failure_count() != before) {
+			std::printf("[ FAIL ] %s\n", t.name.c_str());
+			return 1;
+		}
+		std::printf("[  OK  ] %s\n", t.name.c_str());
+		return 0;
+	}
+	std::printf("unknown case: %s\n", name.c_str());
+	return 2;
+}
+
 } // namespace smulti_test
 
 #define SMULTI_TEST(name)                                                                  \
