@@ -611,3 +611,52 @@ nodes:
             run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
             checked_at: 2026-10-19
     status: building
+  - id: release-staging
+    lane: foundation
+    goal: "A built plugin reaches the real OBS only through a staged, checksummed, backed-up and reversible install."
+    owns: [release.install-safety, release.config-migration]
+    needs: [config-persistence]
+    code:
+      - tools/install/install.ps1
+      - tools/install/rollback.ps1
+      - tools/install/stage.ps1
+      - tools/install/migrate-config.mjs
+      - tools/install/migrate-config.test.mjs
+    works_when:
+      - id: release-staging.install-safety
+        behavior: "install.ps1 refuses while OBS runs (exit 2), exits 3 with the elevated command when the install dir is not writable, rejects a checksum mismatch (exit 4), backs up dll, pdb, data dir and config before changing anything; rollback.ps1 restores the newest or a chosen backup exactly; stage.ps1 writes VERSION and SHA256SUMS. Tests use temp dirs only."
+        verification:
+          - kind: automated
+            reference: tools/install/migrate-config.test.mjs
+            check: install_refuses_while_obs_runs
+            result: passed
+            run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tools/install/migrate-config.test.mjs
+            check: install_backs_up_migrates_copies_and_rollback_restores
+            result: passed
+            run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tools/install/migrate-config.test.mjs
+            check: stage_writes_version_and_verifiable_sha256sums
+            result: passed
+            run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
+            checked_at: 2026-10-19
+      - id: release-staging.config-migration
+        behavior: "migrate-config.mjs unlinks endpoints from the main stream when their key equals the main or an Aitum output key, or their server equals an enabled Aitum output server or a non-auto main server; prints names only, never keys; --apply backs up first and refuses while OBS runs."
+        verification:
+          - kind: automated
+            reference: tools/install/migrate-config.test.mjs
+            check: migrate_same_server_different_key_is_duplicate
+            result: passed
+            run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tools/install/migrate-config.test.mjs
+            check: migrate_apply_backs_up_and_flips_only_linked_to_main
+            result: passed
+            run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
+            checked_at: 2026-10-19
+    status: building
