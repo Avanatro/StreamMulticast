@@ -28,6 +28,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/ControllerReaper.hpp"
 #include "pipeline/HealthSampler.hpp"
 #include "pipeline/OutputController.hpp"
+#include "pipeline/OwnedCanvas.hpp"
 #include "ui/MultistreamDock.hpp"
 
 #include <QMainWindow>
@@ -44,6 +45,7 @@ static std::unique_ptr<smulti::ControllerReaper>  g_reaper;
 static std::unique_ptr<smulti::ConfigStore>      g_config_store;
 static std::unique_ptr<smulti::EndpointRegistry> g_registry;
 static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
+static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
 
 /* -----------------------------------------------------------------------
@@ -55,7 +57,13 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	if (!g_registry)
 		return;
 
-	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+		if (g_owned_canvas)
+			g_owned_canvas->ensure();
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		if (g_owned_canvas)
+			g_owned_canvas->on_collection_changing(*g_registry);
+	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		obs_log(LOG_INFO, "OBS main stream started — triggering linked endpoints");
 		/* Skip endpoints that would stream to the same server+key as the main
 		 * stream or as an earlier endpoint. Log the endpoint name only,
@@ -89,6 +97,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			if (ctrl && ctrl->is_running())
 				ctrl->stop();
 		}
+		if (g_owned_canvas)
+			g_owned_canvas->release();
 		if (g_health_sampler)
 			g_health_sampler->stop();
 	}
@@ -113,6 +123,9 @@ bool obs_module_load()
 
 	/* 3. Boot endpoint registry — populates from config store */
 	g_registry = std::make_unique<smulti::EndpointRegistry>(*g_config_store, *g_reaper);
+
+	/* 3b. Owned vertical canvas adapter — needs the registry to stop bound endpoints. */
+	g_owned_canvas = std::make_unique<smulti::OwnedCanvas>();
 
 	/* 4. Boot health sampler — starts background 2-Hz polling thread */
 	g_health_sampler = std::make_unique<smulti::HealthSampler>(*g_registry);
@@ -181,6 +194,9 @@ void obs_module_unload()
 				ctrl->stop();
 		}
 	}
+
+	/* Drop the owned-canvas reference before the registry goes away. */
+	g_owned_canvas.reset();
 
 	/* Stop health sampler thread */
 	if (g_health_sampler) {

@@ -236,6 +236,8 @@ nodes:
     code:
       - src/core/OwnedCanvasPolicy.hpp
       - src/core/OwnedCanvasPolicy.cpp
+      - src/pipeline/OwnedCanvas.hpp
+      - src/pipeline/OwnedCanvas.cpp
       - tests/test_canvas_owned.cpp
     works_when:
       - id: owned-vertical-canvas.create-or-reuse
@@ -283,6 +285,18 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
             checked_at: 2026-10-19
+      - id: owned-vertical-canvas.persisted-single-instance
+        behavior: "On FINISHED_LOADING and SCENE_COLLECTION_CHANGED the OBS adapter applies decide_owned_canvas: create via obs_frontend_add_canvas, or reuse an existing canvas of that name (resetting its video when it has none), never a second canvas. It adds an empty scene V Main on channel 0 when the canvas has no scene, and on SCENE_COLLECTION_CHANGING stops the endpoints bound to it. The adapter is only compiled and import-checked locally (plugin target built, dumpbin shows obs_frontend_add_canvas, obs_frontend_get_canvases, obs_canvas_scene_create, obs_canvas_reset_video), not run."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: restart OBS twice; GetCanvasList shows exactly one StreamMulticast Vertical (not run in this session)"
+            result: pending
+      - id: owned-vertical-canvas.own-mix
+        behavior: "The owned canvas has its own video mix (1080x1920, main fps) independent of whether Aitum Vertical is active; Aitum's canvas and the V scenes are never written."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: GetCanvasList video settings of StreamMulticast Vertical are non-null while Aitum Vertical is inactive (not run in this session)"
+            result: pending
     status: building
   - id: controller-reaper
     lane: pipeline
@@ -443,7 +457,7 @@ nodes:
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, main-stream-linking]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, main-stream-linking, owned-vertical-canvas]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h
