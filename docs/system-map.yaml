@@ -1,0 +1,285 @@
+schema_version: 1
+project: StreamMulticast
+
+# DRAFT: bootstrap map, owner review pending. No node is promoted to works.
+lanes:
+  foundation: "#3498db"
+  core: "#2ecc71"
+  pipeline: "#f39c12"
+  ui: "#9b59b6"
+  entry: "#e74c3c"
+
+rules:
+  - "Draft map from a read-only audit on 2026-10-19; unverified claims are marked UNVERIFIED in criteria."
+  - "Platform URLs live in one table only (currently violated: two tables)."
+
+ignore:
+  - ".deps/**"
+  - "build_x64/**"
+  - "build_x64_vs18/**"
+  - "build-aux/**"
+  - "cmake/**"
+  - "**/*.subagent"
+  - "*.subagent"
+
+nodes:
+  - id: endpoint-model
+    lane: foundation
+    goal: "An endpoint is a plain value with identity, connection, encoder and framing settings."
+    owns: [endpoint.fields-and-defaults, endpoint.uuid-identity]
+    needs: []
+    code:
+      - src/core/Endpoint.hpp
+      - src/core/Endpoint.cpp
+    works_when:
+      - id: endpoint-model.shape
+        behavior: "Endpoint round-trips through obs_data without loss; missing keys get documented defaults."
+        verification: []
+    status: building
+  - id: config-persistence
+    lane: foundation
+    goal: "Endpoint list survives restarts, debounced and crash-safe."
+    owns: [config.file-schema, config.schema-version]
+    needs: [endpoint-model]
+    code:
+      - src/core/ConfigStore.hpp
+      - src/core/ConfigStore.cpp
+    works_when:
+      - id: config-persistence.roundtrip
+        behavior: "Saved config.json loads back to an equal endpoint list; legacy schema versions are migrated."
+        verification: []
+    status: building
+  - id: platform-server-table
+    lane: foundation
+    goal: "One table maps platform names to ingest URLs."
+    owns: [platform.server-url-table]
+    needs: []
+    code:
+      - src/core/ObsServiceImport.cpp
+      - src/ui/EndpointDialog.cpp
+    works_when:
+      - id: platform-server-table.to-be-mapped
+        behavior: "unknown - to be mapped. Two independent tables exist today (ObsServiceImport.cpp:29 and EndpointDialog.cpp:31) with different YouTube and Kick URLs."
+        verification: []
+    status: unknown
+  - id: service-import
+    lane: core
+    goal: "Server and key can be imported from the active OBS profile or a TikTok bridge JSON."
+    owns: [import.obs-profile-reader, import.tiktok-bridge-reader]
+    needs: [platform-server-table]
+    code:
+      - src/core/ObsServiceImport.hpp
+      - src/core/ObsServiceImport.cpp
+      - src/core/TikTokBridgeImport.hpp
+      - src/core/TikTokBridgeImport.cpp
+    works_when:
+      - id: service-import.obs-profile
+        behavior: "Active-profile service.json yields server, key, service name or a readable error."
+        verification: []
+    status: building
+  - id: endpoint-validation
+    lane: core
+    goal: "Invalid or duplicate endpoints (empty fields, bad scheme, same ingest and key twice) are rejected or warned before start."
+    owns: [endpoint.validation-rules]
+    needs: [endpoint-model]
+    works_when:
+      - id: endpoint-validation.dup-target
+        behavior: "Two active endpoints, or one endpoint and the OBS main service, with identical server and key are flagged before streaming starts."
+        verification: []
+    status: planned
+  - id: encoder-factory
+    lane: pipeline
+    goal: "Each endpoint gets a video and audio encoder matching its settings, with safe fallback."
+    owns: [encoder.type-resolution, encoder.settings-mapping]
+    needs: [endpoint-model]
+    code:
+      - src/pipeline/EncoderFactory.hpp
+      - src/pipeline/EncoderFactory.cpp
+    works_when:
+      - id: encoder-factory.fallback
+        behavior: "Unavailable GPU backend falls back to x264 with a log line."
+        verification: []
+    status: building
+  - id: video-framing
+    lane: pipeline
+    goal: "Each output encodes the intended frame shape (source, vertical, or a chosen OBS canvas)."
+    owns: [output.video-framing]
+    needs: [endpoint-model, encoder-factory]
+    code:
+      - src/pipeline/OutputController.cpp
+    works_when:
+      - id: video-framing.vertical-letterbox
+        behavior: "Vertical letterbox endpoint encodes 1080x1920 (UNVERIFIED: libobs ignores obs_output_set_video_conversion for encoded outputs)."
+        verification: []
+      - id: video-framing.canvas-select
+        behavior: "planned: endpoint can encode from a chosen OBS canvas."
+        verification: []
+    status: unknown
+  - id: controller-reaper
+    lane: pipeline
+    goal: "Blocking output teardown never runs on the UI thread."
+    owns: [reaper.teardown-thread]
+    needs: []
+    code:
+      - src/pipeline/ControllerReaper.hpp
+      - src/pipeline/ControllerReaper.cpp
+    works_when:
+      - id: controller-reaper.drain
+        behavior: "Queued teardown jobs finish before module unload."
+        verification: []
+    status: building
+  - id: output-lifecycle
+    lane: pipeline
+    goal: "One endpoint streams, reconnects with backoff and stops without blocking the UI."
+    owns: [output.state-machine, output.reconnect-policy, output.libobs-objects]
+    needs: [encoder-factory, video-framing, controller-reaper]
+    code:
+      - src/pipeline/OutputController.hpp
+      - src/pipeline/OutputController.cpp
+    works_when:
+      - id: output-lifecycle.backoff
+        behavior: "reconnect_delay_seconds follows 1/2/5/10/30/60 and -1 after max attempts."
+        verification: []
+      - id: output-lifecycle.stop-nonblocking
+        behavior: "stop() returns without calling blocking libobs functions."
+        verification: []
+    status: building
+  - id: endpoint-registry
+    lane: core
+    goal: "The live endpoint list and its controllers stay consistent and observable."
+    owns: [registry.endpoint-list, registry.controller-map]
+    needs: [endpoint-model, config-persistence, output-lifecycle, controller-reaper]
+    code:
+      - src/core/EndpointRegistry.hpp
+      - src/core/EndpointRegistry.cpp
+    works_when:
+      - id: endpoint-registry.crud
+        behavior: "add, update, remove and reorder keep endpoints, controllers and persisted config in step."
+        verification: []
+    status: building
+  - id: health-sampling
+    lane: pipeline
+    goal: "Per-endpoint live bitrate, drops and state are sampled at 2 Hz."
+    owns: [health.snapshots]
+    needs: [endpoint-registry, output-lifecycle]
+    code:
+      - src/pipeline/HealthSampler.hpp
+      - src/pipeline/HealthSampler.cpp
+    works_when:
+      - id: health-sampling.rolling
+        behavior: "Actual bitrate is a rolling average reset on inactive transition."
+        verification: []
+    status: building
+  - id: main-stream-linking
+    lane: entry
+    goal: "Linked, enabled endpoints start and stop with the OBS main stream."
+    owns: [link.main-stream-trigger]
+    needs: [endpoint-registry]
+    code:
+      - src/plugin-main.cpp
+    works_when:
+      - id: main-stream-linking.linked-start
+        behavior: "Streaming-started event starts every linked and enabled endpoint (UNVERIFIED: the enabled flag is not checked)."
+        verification: []
+    status: building
+  - id: ui-endpoint-dialog
+    lane: ui
+    goal: "User edits one endpoint with import helpers and validation."
+    owns: [ui.endpoint-form]
+    needs: [endpoint-model, service-import, encoder-factory, platform-server-table]
+    code:
+      - src/ui/EndpointDialog.hpp
+      - src/ui/EndpointDialog.cpp
+    works_when:
+      - id: ui-endpoint-dialog.save-validation
+        behavior: "Save rejects empty name, server or key."
+        verification: []
+    status: building
+  - id: ui-config-tab
+    lane: ui
+    goal: "User sees, reorders, toggles and deletes endpoints."
+    owns: [ui.config-tab]
+    needs: [endpoint-registry, ui-endpoint-dialog]
+    code:
+      - src/ui/ConfigTab.hpp
+      - src/ui/ConfigTab.cpp
+    works_when:
+      - id: ui-config-tab.crud-ui
+        behavior: "Add, edit, toggle, delete and reorder reach the registry."
+        verification: []
+    status: building
+  - id: ui-health-tab
+    lane: ui
+    goal: "User sees live health per endpoint."
+    owns: [ui.health-tab]
+    needs: [health-sampling]
+    code:
+      - src/ui/HealthTab.hpp
+      - src/ui/HealthTab.cpp
+    works_when:
+      - id: ui-health-tab.grid
+        behavior: "Health grid updates incrementally each tick."
+        verification: []
+    status: building
+  - id: ui-dock
+    lane: ui
+    goal: "One OBS dock hosts the config and health tabs."
+    owns: [ui.dock]
+    needs: [ui-config-tab, ui-health-tab]
+    code:
+      - src/ui/MultistreamDock.hpp
+      - src/ui/MultistreamDock.cpp
+    works_when:
+      - id: ui-dock.dock
+        behavior: "Dock registers once and is removed on unload."
+        verification: []
+    status: building
+  - id: plugin-entry
+    lane: entry
+    goal: "Module load wires singletons in order and unload tears them down without blocking."
+    owns: [module.lifecycle-wiring]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, main-stream-linking]
+    code:
+      - src/plugin-main.cpp
+      - src/plugin-support.h
+      - src/plugin-support.c.in
+    works_when:
+      - id: plugin-entry.load-unload
+        behavior: "Load then unload leaves no running threads or dangling references."
+        verification: []
+    status: building
+  - id: test-harness
+    lane: foundation
+    goal: "Pure logic has automated tests runnable without OBS."
+    owns: [test.pure-logic-harness]
+    needs: []
+    code:
+      - tests/CMakeLists.txt
+      - tests/TestRunner.hpp
+      - tests/main.cpp
+      - tests/test_endpoint_roundtrip.cpp
+    works_when:
+      - id: test-harness.runs-without-obs
+        behavior: "ctest runs unit tests that link libobs util only (obs_data), without obs_startup, frontend API or Qt. Enabled with -DBUILD_TESTING=ON; the plugin build is unchanged."
+        verification:
+          - kind: automated
+            reference: tests/test_endpoint_roundtrip.cpp
+            check: endpoint_roundtrip_preserves_all_fields
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19 (WU1 commit)"
+            checked_at: 2026-10-19
+    status: building
+  - id: build-ci
+    lane: foundation
+    goal: "Windows plugin builds reproducibly against pinned libobs."
+    owns: [build.windows-ci]
+    needs: []
+    code:
+      - CMakeLists.txt
+      - buildspec.json
+      - .github/workflows/build-windows.yaml
+    works_when:
+      - id: build-ci.to-be-mapped
+        behavior: "unknown - to be mapped. Headers are pinned to 31.1.1, field use is OBS 32.1."
+        verification: []
+    status: unknown

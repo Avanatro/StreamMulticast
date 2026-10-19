@@ -75,3 +75,4 @@ build_x64/
 # Release-Artefakte gehören nur in den GitHub-Release, nicht ins Repo
 /release-stage/
 /*.zip
+build_tests/

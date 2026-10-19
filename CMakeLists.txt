@@ -103,3 +103,11 @@ install(
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+# Unit tests for pure logic (no OBS runtime). Off by default so the normal
+# plugin build and CI are unchanged.
+option(BUILD_TESTING "Build StreamMulticast unit tests" OFF)
+if(BUILD_TESTING)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
