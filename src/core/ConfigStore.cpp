@@ -102,11 +102,23 @@ bool ConfigStore::load()
 	 * runs when OBS crashes while closing (seen 2026-10-19), leaving schema 1 on disk and
 	 * re-running the migration on every start. */
 	if (needs_write_back) {
+		/* The migration is lossy (framing mode 1/2 is dropped), so keep the original once.
+		 * Never overwritten: later saves rotate config.json.bak, this copy stays. */
+		std::error_code ec;
+		std::filesystem::copy_file(m_config_path, m_config_path + ".v1.bak",
+		                           std::filesystem::copy_options::skip_existing, ec);
+		if (ec)
+			obs_log(LOG_WARNING, "ConfigStore: could not keep a copy of the old config: %s",
+			        ec.message().c_str());
+
 		if (write_to_disk(m_endpoints, m_config_path))
 			obs_log(LOG_INFO, "ConfigStore: migrated config written back as schema v%d",
 			        CURRENT_SCHEMA_VERSION);
-		else
+		else {
+			/* Stays dirty: the shutdown flush retries, otherwise the next start migrates again. */
+			m_change_gen.fetch_add(1);
 			obs_log(LOG_WARNING, "ConfigStore: could not write the migrated config back");
+		}
 	}
 	return true;
 }
@@ -124,7 +136,18 @@ bool ConfigStore::save(const std::vector<Endpoint> &endpoints)
 		return false;
 	}
 
-	return write_to_disk(endpoints, m_config_path);
+	const auto gen = m_change_gen.load();
+	const bool ok = write_to_disk(endpoints, m_config_path);
+	if (ok)
+		m_written_gen.store(gen);
+	return ok;
+}
+
+bool ConfigStore::save_if_dirty(const std::vector<Endpoint> &endpoints)
+{
+	if (m_change_gen.load() == m_written_gen.load())
+		return true;
+	return save(endpoints);
 }
 
 /* -----------------------------------------------------------------------
@@ -138,6 +161,7 @@ void ConfigStore::schedule_save(const std::vector<Endpoint> &endpoints)
 	std::lock_guard<std::mutex> lock(m_pending_mutex);
 	m_pending_endpoints   = endpoints;
 	m_last_change_request = std::chrono::steady_clock::now();
+	m_pending_gen         = m_change_gen.fetch_add(1) + 1;
 	m_save_pending.store(true);
 	/* The save_thread_func() will pick this up within SAVE_DEBOUNCE_MS */
 }
@@ -157,11 +181,13 @@ void ConfigStore::save_thread_func()
 
 		std::vector<Endpoint> to_save;
 		bool should_save = false;
+		unsigned long long gen_to_save = 0;
 		{
 			std::lock_guard<std::mutex> lock(m_pending_mutex);
 			auto elapsed = duration_cast<milliseconds>(steady_clock::now() - m_last_change_request);
 			if (elapsed.count() >= SAVE_DEBOUNCE_MS) {
 				to_save = m_pending_endpoints;
+				gen_to_save = m_pending_gen;
 				m_save_pending.store(false);
 				should_save = true;
 			}
@@ -177,8 +203,8 @@ void ConfigStore::save_thread_func()
 		if (should_save) {
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_endpoints = to_save;
-			if (!m_config_path.empty())
-				write_to_disk(to_save, m_config_path);
+			if (!m_config_path.empty() && write_to_disk(to_save, m_config_path))
+				m_written_gen.store(gen_to_save);
 		}
 	}
 
@@ -186,8 +212,8 @@ void ConfigStore::save_thread_func()
 	if (m_save_pending.load()) {
 		std::lock_guard<std::mutex> pending_lock(m_pending_mutex);
 		std::lock_guard<std::mutex> main_lock(m_mutex);
-		if (!m_config_path.empty())
-			write_to_disk(m_pending_endpoints, m_config_path);
+		if (!m_config_path.empty() && write_to_disk(m_pending_endpoints, m_config_path))
+			m_written_gen.store(m_pending_gen);
 	}
 }
 

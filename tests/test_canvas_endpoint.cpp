@@ -125,3 +125,17 @@ SMULTI_TEST(canvas_migrate_current_schema_stays_clean)
 	EXPECT_TRUE(!res.needs_save);
 	EXPECT_EQ(res.migrated.size(), static_cast<size_t>(0));
 }
+
+SMULTI_TEST(canvas_migrate_unversioned_config_needs_save)
+{
+	std::vector<Endpoint> eps;
+	eps.push_back(Endpoint::make_default("Old"));
+	eps.back().orientation = OutputOrientation::Vertical1080x1920CenterCrop;
+
+	/* A config without schema_version reads as 0. */
+	const auto res = smulti::migrate_config(0, 2, eps);
+
+	EXPECT_TRUE(res.needs_save);
+	EXPECT_EQ(res.migrated.size(), static_cast<size_t>(1));
+	EXPECT_EQ(eps[0].canvas_name, std::string("StreamMulticast Vertical"));
+}

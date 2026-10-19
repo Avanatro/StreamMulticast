@@ -60,6 +60,15 @@ public:
 	bool save(const std::vector<Endpoint> &endpoints);
 
 	/**
+	 * Synchronous save that does nothing when nothing changed since the last
+	 * successful write (generation counter bumped by schedule_save() and by a
+	 * failed migration write-back). Shutdown paths call this, so an unchanged
+	 * config is written at most once and .bak is not rotated repeatedly.
+	 * Returns true when the file is up to date afterwards.
+	 */
+	bool save_if_dirty(const std::vector<Endpoint> &endpoints);
+
+	/**
 	 * Schedule a debounced save (500 ms delay).  Cheap to call on every UI
 	 * change — the actual disk write happens at most once per 500 ms.
 	 *
@@ -101,10 +110,16 @@ private:
 	 * never elapse). */
 	std::atomic<bool>                    m_save_pending{false};
 	std::vector<Endpoint>                m_pending_endpoints;
+	unsigned long long                   m_pending_gen = 0;
 	std::chrono::steady_clock::time_point m_last_change_request{};
 	std::mutex                           m_pending_mutex;
 	std::thread                          m_save_thread;
 	std::atomic<bool>                    m_save_thread_running{false};
+
+	/* Dirty tracking: m_change_gen is bumped on every change request, m_written_gen holds
+	 * the generation covered by the last successful write. */
+	std::atomic<unsigned long long>      m_change_gen{0};
+	std::atomic<unsigned long long>      m_written_gen{0};
 
 	void save_thread_func();
 };

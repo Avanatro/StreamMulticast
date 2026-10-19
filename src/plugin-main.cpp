@@ -224,11 +224,12 @@ static void on_video_reset(void *, calldata_t *)
 		obs_queue_task(OBS_TASK_UI, ensure_owned_canvas_task, nullptr, false);
 }
 
-/* Synchronous config write; safe to repeat. Atomic (temp file + rename) inside ConfigStore. */
+/* Synchronous config write, only when something changed since the last write, so the three
+ * shutdown call sites write at most once. Atomic (temp file + rename) inside ConfigStore. */
 static void flush_config()
 {
 	if (g_config_store && g_registry)
-		g_config_store->save(g_registry->all());
+		g_config_store->save_if_dirty(g_registry->all());
 }
 
 static void on_save_load(obs_data_t *data, bool saving, void *)
@@ -458,9 +459,7 @@ void obs_module_unload()
 	}
 
 	/* Save config to disk */
-	if (g_config_store && g_registry) {
-		g_config_store->save(g_registry->all());
-	}
+	flush_config();
 
 	/* Dock must be explicitly removed: obs_frontend_add_dock_by_id() only
 	 * hands ownership to Qt on success (see obs_module_load) — if it failed,
