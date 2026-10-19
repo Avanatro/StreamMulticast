@@ -251,11 +251,21 @@ private:
 	void disconnect_canvas_signals(obs_canvas_t *canvas);
 
 	/**
-	 * Publish `rv` as the session's canvas (call with m_mutex NOT held).
-	 * The caller connected the signals beforehand.  Releases the previously
-	 * bound canvas, or the extra ref when it is the same canvas.
+	 * Publish `rv` as the session's canvas.  Call with m_mutex HELD, in the
+	 * same critical section that validates the session and stores the
+	 * encoders, so a concurrent stop() can never be followed by a late
+	 * publish.  The caller connected the signals beforehand.  Returns the
+	 * previously bound canvas (may equal rv.canvas); pass it to
+	 * release_replaced_canvas() after unlocking.
 	 */
-	void adopt_canvas(ResolvedVideo &rv);
+	obs_canvas_t *swap_canvas_locked(ResolvedVideo &rv);
+
+	/**
+	 * Finish a swap (call with m_mutex NOT held): disconnect `old` unless it
+	 * is `adopted` (same canvas keeps its connection), then release it — the
+	 * old ref, or the extra ref when old == adopted.
+	 */
+	void release_replaced_canvas(obs_canvas_t *old, obs_canvas_t *adopted);
 
 	/** Drop an unadopted candidate (call with m_mutex NOT held). */
 	void discard_canvas_candidate(ResolvedVideo &rv);

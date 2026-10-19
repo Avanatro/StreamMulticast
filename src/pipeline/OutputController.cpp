@@ -224,21 +224,23 @@ void OutputController::disconnect_canvas_signals(obs_canvas_t *canvas)
 	signal_handler_disconnect(sh, "destroy", on_canvas_gone, this);
 }
 
-void OutputController::adopt_canvas(ResolvedVideo &rv)
+obs_canvas_t *OutputController::swap_canvas_locked(ResolvedVideo &rv)
 {
-	obs_canvas_t *old;
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		old           = m_canvas;
-		m_canvas      = rv.canvas;
-		m_canvas_uuid = rv.uuid;
-		m_canvas_name = rv.name;
-	}
-	if (old && old != rv.canvas)
-		disconnect_canvas_signals(old); // the new canvas keeps its own connection
-	if (old)
-		obs_canvas_release(old); // the old ref, or the extra ref when old == new
+	obs_canvas_t *old = m_canvas;
+	m_canvas      = rv.canvas;
+	m_canvas_uuid = rv.uuid;
+	m_canvas_name = rv.name;
 	rv.canvas = nullptr; // ownership moved to m_canvas
+	return old;
+}
+
+void OutputController::release_replaced_canvas(obs_canvas_t *old, obs_canvas_t *adopted)
+{
+	if (!old)
+		return;
+	if (old != adopted)
+		disconnect_canvas_signals(old); // the new canvas keeps its own connection
+	obs_canvas_release(old);
 }
 
 void OutputController::discard_canvas_candidate(ResolvedVideo &rv)
@@ -260,6 +262,10 @@ void OutputController::on_canvas_gone(void *data, calldata_t * /*cd*/)
 {
 	auto *self = static_cast<OutputController *>(data);
 
+	/* Assumption: obs_canvas_remove callers (frontend, Aitum) run on the UI
+	 * thread, the same thread that calls start()/stop().  That is why this
+	 * callback needs no extra serialization against start(); everything else
+	 * it touches goes through m_mutex or the idempotent stop(). */
 	std::string canvas_name;
 	{
 		std::lock_guard<std::mutex> lock(self->m_mutex);
@@ -431,14 +437,17 @@ bool OutputController::start()
 		return false;
 	}
 
+	obs_canvas_t *adopted = rv.canvas;
+	obs_canvas_t *replaced;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		/* A previously hard-stopped session may still own encoders. */
 		do_release_encoders_locked();
 		m_video_enc = video_enc;
 		m_audio_enc = audio_enc;
+		replaced    = swap_canvas_locked(rv);
 	}
-	adopt_canvas(rv);
+	release_replaced_canvas(replaced, adopted);
 
 	obs_output_set_video_encoder(output, video_enc);
 	obs_output_set_audio_encoder(output, audio_enc, 0 /* track index */);
@@ -958,6 +967,24 @@ void OutputController::reconnect_thread_func()
 		/* Watch the (possibly new) canvas before publishing, outside m_mutex. */
 		connect_canvas_signals(rv.canvas);
 
+		/* A removal between resolve and connect would have been missed by the
+		 * signal: treat it as a refusal (never reconnect into a dead canvas). */
+		if (rv.canvas && obs_canvas_removed(rv.canvas)) {
+			obs_log(LOG_WARNING,
+			        "OutputController [%s]: reconnect aborted — canvas '%s' removed",
+			        m_endpoint.name.c_str(), rv.name.c_str());
+			obs_encoder_release(video_enc);
+			obs_encoder_release(audio_enc);
+			const std::string removed_name = rv.name;
+			discard_canvas_candidate(rv);
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_output == captured_output) {
+				m_state      = OutputState::FailedHard;
+				m_last_error = "Canvas '" + removed_name + "' was removed";
+			}
+			return;
+		}
+
 		/* Session-validity guard #2 — immediately before obs_output_start().
 		 * This is the exact race Finding A.2 described: without this check,
 		 * a stop() that ran during encoder creation above could otherwise be
@@ -966,12 +993,18 @@ void OutputController::reconnect_thread_func()
 		 * just-created, not-yet-attached encoders and exit without touching
 		 * shared state further — the reaper owns the captured output now. */
 		bool session_valid;
+		obs_canvas_t *adopted = rv.canvas;
+		obs_canvas_t *replaced = nullptr;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			session_valid = !m_stop_reconnect.load() && m_output == captured_output;
 			if (session_valid) {
 				m_video_enc = video_enc;
 				m_audio_enc = audio_enc;
+				/* Same critical section as the validity check: a stop()
+				 * can no longer detach in between and be followed by a
+				 * late canvas publish. */
+				replaced = swap_canvas_locked(rv);
 			}
 		}
 		if (!session_valid) {
@@ -980,7 +1013,7 @@ void OutputController::reconnect_thread_func()
 			discard_canvas_candidate(rv);
 			return;
 		}
-		adopt_canvas(rv);
+		release_replaced_canvas(replaced, adopted);
 
 		obs_output_set_video_encoder(captured_output, video_enc);
 		obs_output_set_audio_encoder(captured_output, audio_enc, 0);
