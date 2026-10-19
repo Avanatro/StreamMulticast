@@ -252,7 +252,8 @@ function makeInstall() {
 }
 
 function installArgs(src, inst, backupRoot, extra = [], processName = NOT_RUNNING) {
-  return ["-Source", src, "-InstallDir", inst.root, "-BackupRoot", backupRoot, "-ConfigDir", inst.cfgDir,
+  const checksum = fs.existsSync(path.join(src, "SHA256SUMS")) ? [] : ["-NoChecksum"];
+  return [...checksum, "-Source", src, "-InstallDir", inst.root, "-BackupRoot", backupRoot, "-ConfigDir", inst.cfgDir,
     "-ServiceFile", inst.svc, "-AitumFile", path.join(inst.root, "no-aitum.json"), "-ProcessName", processName, ...extra];
 }
 
@@ -426,4 +427,78 @@ test("stage.ps1 without -Sha uses git HEAD of the repo", () => {
   const r = ps("stage.ps1", ["-Build", build, "-OutRoot", out]);
   assert.equal(r.code, 0, r.out);
   assert.equal(fs.readFileSync(path.join(out, head, "VERSION"), "utf8").trim(), head);
+});
+
+test("migrate_apply_refuses_when_nothing_resolves", () => {
+  const f = fixture({ endpoints: [ep("A", K_MAIN)] });
+  const before = fs.readFileSync(f.config);
+  const bk = tmp("bk");
+  // no user.ini next to the config and no --service/--aitum
+  const r = spawnSync(process.execPath, [MIGRATE, "--apply", "--config", f.config, "--process-name", NOT_RUNNING, "--backup-root", bk], { encoding: "utf8" });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.deepEqual(fs.readFileSync(f.config), before);
+  assert.deepEqual(fs.readdirSync(bk), []);
+});
+
+test("install_requires_sha256sums_unless_nochecksum", () => {
+  const src = makeSource();
+  const inst = makeInstall();
+  const bk = tmp("bk");
+  const args = ["-Source", src, "-InstallDir", inst.root, "-BackupRoot", bk, "-ConfigDir", inst.cfgDir,
+    "-ServiceFile", inst.svc, "-AitumFile", path.join(inst.root, "no-aitum.json"), "-ProcessName", NOT_RUNNING];
+  const r = ps("install.ps1", args);
+  assert.equal(r.code, 4, r.out);
+  assert.equal(fs.readFileSync(path.join(inst.plug, "streammulticast.dll"), "utf8"), "OLD-DLL");
+  assert.deepEqual(fs.readdirSync(bk), []);
+});
+
+test("install_requires_dll_entry_in_sha256sums", () => {
+  const src = makeSource();
+  // valid line, but for another file only
+  fs.writeFileSync(path.join(src, "SHA256SUMS"), `${sha256(path.join(src, "streammulticast.pdb"))}  streammulticast.pdb
+`);
+  const inst = makeInstall();
+  const r = ps("install.ps1", installArgs(src, inst, tmp("bk")));
+  assert.equal(r.code, 4, r.out);
+  assert.match(r.out, /no entry for streammulticast\.dll/);
+});
+
+test("install_dry_run_writes_nothing_anywhere", () => {
+  const src = makeSource();
+  const inst = makeInstall();
+  const snapshot = () => {
+    const out = [];
+    const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); out.push(p + (e.isFile() ? ":" + fs.statSync(p).mtimeMs : "")); if (e.isDirectory()) walk(p); } };
+    walk(inst.root);
+    return out.sort();
+  };
+  const before = snapshot();
+  const r = ps("install.ps1", installArgs(src, inst, tmp("bk"), ["-DryRun"]));
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(snapshot(), before);
+  assert.ok(!/smulti-write-probe/.test(r.out));
+  const rb = ps("rollback.ps1", ["-From", (() => { const d = tmp("fakebk"); fs.writeFileSync(path.join(d, "MANIFEST.json"), JSON.stringify({ installDir: inst.root, configDir: inst.cfgDir, items: { dll: false, pdb: false, data: false, config: false } })); return d; })(), "-ProcessName", NOT_RUNNING, "-DryRun"]);
+  assert.equal(rb.code, 0, rb.out);
+  assert.deepEqual(snapshot(), before);
+});
+
+test("install_backup_covers_nested_data_dir", () => {
+  const src = makeSource();
+  const inst = makeInstall();
+  fs.mkdirSync(path.join(inst.data, "sub"), { recursive: true });
+  fs.writeFileSync(path.join(inst.data, "sub", "extra.ini"), "EXTRA=1\n");
+  const bk = tmp("bk");
+  assert.equal(ps("install.ps1", installArgs(src, inst, bk)).code, 0);
+  const b = path.join(bk, fs.readdirSync(bk)[0]);
+  assert.equal(fs.readFileSync(path.join(b, "data", "locale", "sub", "extra.ini"), "utf8"), "EXTRA=1\n");
+});
+
+test("elevated_command_uses_absolute_trimmed_paths", () => {
+  const src = makeSource();
+  const inst = makeInstall();
+  fs.rmSync(path.join(inst.root, "obs-plugins"), { recursive: true });
+  fs.writeFileSync(path.join(inst.root, "obs-plugins"), "file in the way");
+  const r = ps("install.ps1", installArgs(src, inst, tmp("bk")).map((a) => (a === src ? src + "\\" : a)));
+  assert.equal(r.code, 3, r.out);
+  assert.ok(!/\\"( |')/.test(r.out.split("Start-Process")[1] ?? ""), "no trailing backslash before a closing quote");
 });

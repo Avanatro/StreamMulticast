@@ -179,6 +179,11 @@ export function main(argv) {
   for (const d of decisions) console.log(describe(d));
   const toChange = decisions.filter((d) => d.action === "unlink");
 
+  if (o.apply && ctx.notes.length === 2 && !o.service && !o.aitum) {
+    console.error("error: neither the main service nor the aitum config could be resolved (is user.ini/profile missing?); pass --service/--aitum. Refusing to --apply.");
+    return 1;
+  }
+
   if (!o.apply) {
     console.log(toChange.length ? `would unlink ${toChange.length} endpoint(s); nothing written` : "nothing to change");
     return 0;

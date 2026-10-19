@@ -19,6 +19,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Source,
     [switch]$DryRun,
+    [switch]$NoChecksum,
     [string]$InstallDir = 'C:\Program Files\obs-studio',
     [string]$BackupRoot = 'E:\Backups',
     [string]$ConfigDir = (Join-Path $env:APPDATA 'obs-studio\plugin_config\streammulticast'),
@@ -56,17 +57,56 @@ function Test-DirWritable([string]$Dir) {
     }
 }
 
+function Test-IsAdmin {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Read-only access check for -DryRun: never creates, writes or deletes anything.
+function Test-WritableNoWrite([string]$Dir) {
+    if (Test-IsAdmin) { return $true }
+    $candidate = $null
+    if (Test-Path -LiteralPath $Dir -PathType Container) {
+        $candidate = Get-ChildItem -LiteralPath $Dir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if ($candidate) {
+        try {
+            $fs = [IO.File]::Open($candidate.FullName, 'Open', 'ReadWrite', 'ReadWrite')
+            $fs.Close()
+            return $true
+        } catch { return $false }
+    }
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($pf -and $Dir.StartsWith($pf, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    return $true
+}
+
+function Get-TreeHashes([string]$Root) {
+    $r = (Resolve-Path -LiteralPath $Root).Path.TrimEnd([char]92)
+    $out = @()
+    foreach ($f in (Get-ChildItem -LiteralPath $Root -Recurse -File | Sort-Object FullName)) {
+        $out += ($f.FullName.Substring($r.Length + 1) + '|' + (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash)
+    }
+    return $out
+}
+
+function Get-FullPathTrim([string]$p) {
+    $f = [IO.Path]::GetFullPath($p)
+    if ($f.Length -gt 3) { $f = $f.TrimEnd([char]92) }
+    return $f
+}
+
 function Get-ElevatedCommand {
+    $pathParams = @('Source', 'From', 'InstallDir', 'BackupRoot', 'ConfigDir', 'ServiceFile', 'AitumFile')
     $parts = @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
     foreach ($k in $BoundParams.Keys) {
         if ($k -eq 'DryRun') { continue }   # the elevated command is the real run
         $v = $BoundParams[$k]
-        if ($k -eq 'Source') { $v = $Source }
-        if ($k -eq 'From') { $v = $From }
-        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $parts += "-$k" } }
-        else { $parts += "-$k"; $parts += ('"' + $v + '"') }
+        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $parts += "-$k" }; continue }
+        if ($pathParams -contains $k) { $v = Get-FullPathTrim ([string]$v) }
+        $parts += "-$k"; $parts += ('"' + $v + '"')
     }
-    if (-not $BoundParams.ContainsKey('ConfigDir')) { $parts += '-ConfigDir'; $parts += ('"' + $ConfigDir + '"') }   # an elevated different account has another APPDATA
+    if (-not $BoundParams.ContainsKey('ConfigDir')) { $parts += '-ConfigDir'; $parts += ('"' + (Get-FullPathTrim $ConfigDir) + '"') }   # an elevated different account has another APPDATA
     $arg = ($parts -join ' ').Replace("'", "''")
     return "Start-Process powershell -Verb RunAs -ArgumentList '$arg'"
 }
@@ -89,19 +129,30 @@ try {
     $sums = Join-Path $Source 'SHA256SUMS'
     if (Test-Path -LiteralPath $sums -PathType Leaf) {
         $n = 0
+        $listed = @{}
         foreach ($line in (Get-Content -LiteralPath $sums)) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -notmatch '^([0-9a-fA-F]{64}) [ \*](.+)$') { Fail 4 "Malformed SHA256SUMS line in $sums" }
             $want = $Matches[1].ToLowerInvariant()
-            $file = Join-Path $Source ($Matches[2] -replace '/', '\')
+            $file = Join-Path $Source ($Matches[2] -replace '/', [string][char]92)
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Fail 4 "SHA256SUMS lists a missing file: $($Matches[2])" }
             $have = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($have -ne $want) { Fail 4 "Checksum mismatch: $($Matches[2])" }
+            $listed[$Matches[2].ToLowerInvariant()] = $true
             $n++
         }
+        if (-not $NoChecksum) {
+            foreach ($req in @('streammulticast.dll', 'streammulticast.pdb', 'migrate-config.mjs')) {
+                if ((Test-Path -LiteralPath (Join-Path $Source $req)) -and -not $listed.ContainsKey($req)) {
+                    Fail 4 "SHA256SUMS has no entry for $req (use -NoChecksum to skip verification)"
+                }
+            }
+        }
         Write-Host "SHA256SUMS verified ($n files)"
+    } elseif ($NoChecksum) {
+        Write-Host 'WARNING: -NoChecksum given, source checksums NOT verified'
     } else {
-        Write-Host 'WARNING: no SHA256SUMS in the source folder, checksums not verified'
+        Fail 4 'No SHA256SUMS in the source folder. Stage the build with stage.ps1, or pass -NoChecksum to skip verification.'
     }
     $versionFile = Join-Path $Source 'VERSION'
     if (Test-Path -LiteralPath $versionFile) { Write-Host ('Version: ' + (Get-Content -LiteralPath $versionFile -TotalCount 1)) }
@@ -132,13 +183,15 @@ try {
         Write-Host "  streammulticast.dll -> $plugDir"
         if (Test-Path -LiteralPath $srcPdb) { Write-Host "  streammulticast.pdb -> $plugDir" }
         if (Test-Path -LiteralPath $srcData) { Write-Host "  data\ -> $dataDir" }
-        if (-not (Test-DirWritable $plugDir) -or -not (Test-DirWritable $dataDir)) {
+        if (-not (Test-WritableNoWrite $plugDir) -or -not (Test-WritableNoWrite $dataDir)) {
             Write-Host 'NOTE: install dir is not writable from this session (needs elevation). Run:'
             Write-Host ('  ' + (Get-ElevatedCommand))
         }
         if ($haveConfig) {
             Write-Host 'Config migration preview:'
+            $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             & $node.Source $migrate --dry-run --config $cfgFile @migrateArgs
+            $ErrorActionPreference = $eap
             if ($LASTEXITCODE -ne 0) { Fail 1 "migrate-config dry run failed (exit $LASTEXITCODE)" }
         } else {
             Write-Host "No plugin config at $cfgFile (nothing to migrate)"
@@ -174,6 +227,11 @@ try {
         Copy-Item -LiteralPath $cfgFile -Destination (Join-Path $bkCfgDir 'config.json')
         $items.config = $true
     }
+    if ($items.data) {
+        $x = @(Get-TreeHashes $dataDir)
+        $y = @(Get-TreeHashes $bkData)
+        if ($x.Count -ne $y.Count -or (Compare-Object $x $y)) { Fail 1 "Backup verification failed for the data dir; nothing was changed" }
+    }
     foreach ($pair in @(@($curDll, $bkDll, $items.dll), @($curPdb, $bkPdb, $items.pdb), @($cfgFile, (Join-Path $bkCfgDir 'config.json'), $items.config))) {
         if ($pair[2]) {
             $a = (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash
@@ -194,8 +252,11 @@ try {
 
     # ---- config migration
     if ($haveConfig) {
+        $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & $node.Source $migrate --apply --config $cfgFile --backup-dir $backupDir @migrateArgs --process-name $ProcessName
-        if ($LASTEXITCODE -ne 0) { Fail 1 "migrate-config failed (exit $LASTEXITCODE); DLL not installed. Backup: $backupDir" }
+        $migrateExit = $LASTEXITCODE
+        $ErrorActionPreference = $eap
+        if ($migrateExit -ne 0) { Fail 1 "migrate-config failed (exit $migrateExit); DLL not installed. Backup: $backupDir" }
     }
 
     # ---- copy files (temp name + move, so a failed copy never leaves a half-written dll)
@@ -216,6 +277,7 @@ try {
             Copy-Item -Path (Join-Path $srcData '*') -Destination $dataDir -Recurse -Force
         }
     } catch {
+        Remove-Item -LiteralPath ($curDll + '.new'), ($curPdb + '.new') -Force -ErrorAction SilentlyContinue
         Write-Host "Install failed while copying: $($_.Exception.Message)"
         Write-Host "Restore with: powershell -NoProfile -File `"$(Join-Path $PSScriptRoot 'rollback.ps1')`" -From `"$backupDir`""
         exit 1

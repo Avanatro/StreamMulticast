@@ -49,15 +49,45 @@ function Test-DirWritable([string]$Dir) {
     }
 }
 
+function Test-IsAdmin {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Read-only access check for -DryRun: never creates, writes or deletes anything.
+function Test-WritableNoWrite([string]$Dir) {
+    if (Test-IsAdmin) { return $true }
+    $candidate = $null
+    if (Test-Path -LiteralPath $Dir -PathType Container) {
+        $candidate = Get-ChildItem -LiteralPath $Dir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
+    if ($candidate) {
+        try {
+            $fs = [IO.File]::Open($candidate.FullName, 'Open', 'ReadWrite', 'ReadWrite')
+            $fs.Close()
+            return $true
+        } catch { return $false }
+    }
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($pf -and $Dir.StartsWith($pf, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    return $true
+}
+
+function Get-FullPathTrim([string]$p) {
+    $f = [IO.Path]::GetFullPath($p)
+    if ($f.Length -gt 3) { $f = $f.TrimEnd([char]92) }
+    return $f
+}
+
 function Get-ElevatedCommand {
+    $pathParams = @('Source', 'From', 'InstallDir', 'BackupRoot', 'ConfigDir', 'ServiceFile', 'AitumFile')
     $parts = @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
     foreach ($k in $BoundParams.Keys) {
         if ($k -eq 'DryRun') { continue }   # the elevated command is the real run
         $v = $BoundParams[$k]
-        if ($k -eq 'Source') { $v = $Source }
-        if ($k -eq 'From') { $v = $From }
-        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $parts += "-$k" } }
-        else { $parts += "-$k"; $parts += ('"' + $v + '"') }
+        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $parts += "-$k" }; continue }
+        if ($pathParams -contains $k) { $v = Get-FullPathTrim ([string]$v) }
+        $parts += "-$k"; $parts += ('"' + $v + '"')
     }
     $arg = ($parts -join ' ').Replace("'", "''")
     return "Start-Process powershell -Verb RunAs -ArgumentList '$arg'"
@@ -115,7 +145,7 @@ try {
             elseif ($a.name -ne 'config') { Write-Host ("  remove  {0,-6} -> {1} (was not installed before)" -f $a.name, $a.target) }
             else { Write-Host '  config: no config in the backup, current config is left alone' }
         }
-        if (-not (Test-DirWritable $plugDir) -or -not (Test-DirWritable $dataDir)) {
+        if (-not (Test-WritableNoWrite $plugDir) -or -not (Test-WritableNoWrite $dataDir)) {
             Write-Host 'NOTE: install dir is not writable from this session (needs elevation). Run:'
             Write-Host ('  ' + (Get-ElevatedCommand))
         }
@@ -130,6 +160,7 @@ try {
         exit 3
     }
 
+    $snap = $null
     # ---- snapshot the current state first
     $snap = Join-Path $BackupRoot ('streammulticast-prerollback-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Path $snap -ErrorAction Stop | Out-Null
@@ -178,5 +209,11 @@ try {
     Write-Host "Restored from: $backup"
     exit 0
 } catch {
-    Fail 1 ("rollback.ps1 failed: " + $_.Exception.Message)
+    $msg = "rollback.ps1 failed: " + $_.Exception.Message
+    if ($curDll) { Remove-Item -LiteralPath ($curDll + '.new'), ($curPdb + '.new') -Force -ErrorAction SilentlyContinue }
+    if ($snap -and (Test-Path -LiteralPath $snap)) {
+        $msg += [Environment]::NewLine + "The restore may be partial. Undo with: powershell -NoProfile -File `"$PSCommandPath`" -From `"$snap`""
+        $msg += [Environment]::NewLine + "Original backup: $backup"
+    }
+    Fail 1 $msg
 }
