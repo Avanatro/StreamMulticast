@@ -12,6 +12,7 @@ GPLv2 — see LICENSE for full text.
 #include <util/platform.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 
 namespace smulti {
@@ -60,6 +61,58 @@ private:
 	{
 		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 	}
+	static int hex_value(char c)
+	{
+		if (c >= '0' && c <= '9')
+			return c - '0';
+		if (c >= 'a' && c <= 'f')
+			return c - 'a' + 10;
+		return c - 'A' + 10;
+	}
+	/* Four hex digits after "\u"; -1 when malformed. */
+	int unicode_escape()
+	{
+		int v = 0;
+		for (int k = 0; k < 4; ++k) {
+			if (m_i >= m_t.size() || !is_hex(m_t[m_i]))
+				return -1;
+			v = v * 16 + hex_value(m_t[m_i++]);
+		}
+		return v;
+	}
+	/* One UTF-8 sequence whose lead byte `c` was already consumed (c >= 0x80).
+	 * Rejects stray continuation bytes, overlong forms, surrogates and > U+10FFFF,
+	 * all of which make jansson fail and log the text near the error. */
+	bool utf8_tail(unsigned char c)
+	{
+		int extra;
+		unsigned int cp;
+		if (c >= 0xC2 && c <= 0xDF) {
+			extra = 1;
+			cp = c & 0x1F;
+		} else if (c >= 0xE0 && c <= 0xEF) {
+			extra = 2;
+			cp = c & 0x0F;
+		} else if (c >= 0xF0 && c <= 0xF4) {
+			extra = 3;
+			cp = c & 0x07;
+		} else {
+			return false; // continuation byte, overlong 2-byte lead (C0/C1) or F5..FF
+		}
+		for (int k = 0; k < extra; ++k) {
+			if (m_i >= m_t.size())
+				return false;
+			const unsigned char cc = static_cast<unsigned char>(m_t[m_i++]);
+			if ((cc & 0xC0) != 0x80)
+				return false;
+			cp = (cp << 6) | (cc & 0x3F);
+		}
+		if ((extra == 2 && cp < 0x800) || (extra == 3 && cp < 0x10000))
+			return false; // overlong
+		if (cp >= 0xD800 && cp <= 0xDFFF)
+			return false; // surrogate encoded in UTF-8
+		return cp <= 0x10FFFF;
+	}
 	bool string()
 	{
 		if (!peek('"'))
@@ -71,14 +124,30 @@ private:
 				return true;
 			if (c < 0x20)
 				return false;
+			if (c >= 0x80) {
+				if (!utf8_tail(c))
+					return false;
+				continue;
+			}
 			if (c == '\\') {
 				if (m_i >= m_t.size())
 					return false;
 				const char e = m_t[m_i++];
 				if (e == 'u') {
-					for (int k = 0; k < 4; ++k)
-						if (m_i >= m_t.size() || !is_hex(m_t[m_i++]))
+					const int v = unicode_escape();
+					if (v <= 0) // malformed, or \u0000 (jansson refuses NUL in strings)
+						return false;
+					if (v >= 0xDC00 && v <= 0xDFFF)
+						return false; // lone low surrogate
+					if (v >= 0xD800 && v <= 0xDBFF) {
+						/* a high surrogate must be followed by \u<low surrogate> */
+						if (m_i + 1 >= m_t.size() || m_t[m_i] != '\\' || m_t[m_i + 1] != 'u')
 							return false;
+						m_i += 2;
+						const int low = unicode_escape();
+						if (low < 0xDC00 || low > 0xDFFF)
+							return false;
+					}
 				} else if (e != '"' && e != '\\' && e != '/' && e != 'b' && e != 'f' && e != 'n' &&
 					   e != 'r' && e != 't') {
 					return false;
@@ -94,27 +163,47 @@ private:
 			++m_i;
 		return m_i > start;
 	}
+	/* Integers must fit int64 and reals must be finite: jansson logs the number otherwise. */
 	bool number()
 	{
-		if (peek('-'))
+		const size_t start = m_i;
+		const bool negative = peek('-');
+		if (negative)
 			++m_i;
+		const size_t int_start = m_i;
 		if (peek('0'))
 			++m_i;
 		else if (!digits())
 			return false;
+		const size_t int_len = m_i - int_start;
+		bool real = false;
 		if (peek('.')) {
+			real = true;
 			++m_i;
 			if (!digits())
 				return false;
 		}
 		if (peek('e') || peek('E')) {
+			real = true;
 			++m_i;
 			if (peek('+') || peek('-'))
 				++m_i;
 			if (!digits())
 				return false;
 		}
-		return true;
+		if (!real) {
+			if (int_len > 19)
+				return false;
+			if (int_len == 19) {
+				const char *limit = negative ? "9223372036854775808" : "9223372036854775807";
+				if (m_t.compare(int_start, 19, limit) > 0)
+					return false;
+			}
+			return true;
+		}
+		const std::string text = m_t.substr(start, m_i - start);
+		const double d = std::strtod(text.c_str(), nullptr);
+		return std::isfinite(d);
 	}
 	bool value(int depth)
 	{
@@ -131,10 +220,17 @@ private:
 				++m_i;
 				return true;
 			}
+			std::vector<std::string> keys;
 			for (;;) {
 				skip_ws();
+				const size_t key_start = m_i;
 				if (!string())
 					return false;
+				std::string key = m_t.substr(key_start, m_i - key_start);
+				for (const auto &k : keys)
+					if (k == key)
+						return false; // duplicate key: jansson (REJECT_DUPLICATES) would log it
+				keys.push_back(std::move(key));
 				skip_ws();
 				if (!peek(':'))
 					return false;
@@ -518,10 +614,16 @@ StreamlabsTokenImport streamlabs_import_generator_config_file(const std::string 
 {
 	if (path.empty())
 		return token_error("No config.json selected.");
+	/* size first, so a large file is never read into memory */
+	const int64_t size = os_get_file_size(path.c_str());
+	if (size > static_cast<int64_t>(kMaxConfigBytes))
+		return token_error("The selected file is too large for a generator config.json.");
 	char *raw = os_quick_read_utf8_file(path.c_str());
 	if (!raw)
 		return token_error("Could not read the selected config.json.");
 	std::string text(raw);
+	for (char *p = raw; *p; ++p)
+		*p = 0; // wipe the copy that holds the token before freeing it
 	bfree(raw);
 	if (text.size() > kMaxConfigBytes)
 		return token_error("The selected file is too large for a generator config.json.");
@@ -550,6 +652,125 @@ std::string streamlabs_redact(const std::string &text, const std::vector<std::st
 bool streamlabs_json_is_object(const std::string &text)
 {
 	return JsonSyntax(text).object_document();
+}
+
+/* -----------------------------------------------------------------------
+ * StreamlabsSessionBook
+ * ----------------------------------------------------------------------- */
+bool StreamlabsSessionBook::contains(const std::vector<std::string> &v, const std::string &id)
+{
+	for (const auto &x : v)
+		if (x == id)
+			return true;
+	return false;
+}
+
+void StreamlabsSessionBook::erase(std::vector<std::string> &v, const std::string &id)
+{
+	for (auto it = v.begin(); it != v.end();) {
+		if (*it == id)
+			it = v.erase(it);
+		else
+			++it;
+	}
+}
+
+std::string StreamlabsSessionBook::busy_with(const std::string &endpoint_id) const
+{
+	if (m_open_id.empty() || m_open_owner == endpoint_id)
+		return {};
+	return m_open_name.empty() ? std::string("another endpoint") : m_open_name;
+}
+
+StreamlabsSessionBook::StartClaim StreamlabsSessionBook::claim_for_start(const std::string &endpoint_id)
+{
+	StartClaim claim;
+	claim.busy_with = busy_with(endpoint_id);
+	if (!claim.busy_with.empty() || m_open_id.empty())
+		return claim;
+	claim.stale.push_back(m_open_id);
+	m_open_id.clear();
+	m_open_owner.clear();
+	m_open_name.clear();
+	return claim;
+}
+
+void StreamlabsSessionBook::on_started(const std::string &id, const std::string &owner, const std::string &owner_name)
+{
+	m_open_id = id;
+	m_open_owner = owner;
+	m_open_name = owner_name;
+}
+
+std::string StreamlabsSessionBook::release_owner(const std::string &endpoint_id)
+{
+	if (m_open_id.empty() || m_open_owner != endpoint_id)
+		return {};
+	std::string id = m_open_id;
+	m_open_id.clear();
+	m_open_owner.clear();
+	m_open_name.clear();
+	if (!contains(m_ending, id))
+		m_ending.push_back(id);
+	return id;
+}
+
+bool StreamlabsSessionBook::release_unadopted(const std::string &id)
+{
+	if (id.empty() || m_open_id != id)
+		return false;
+	m_open_id.clear();
+	m_open_owner.clear();
+	m_open_name.clear();
+	return begin_end(id);
+}
+
+bool StreamlabsSessionBook::begin_end(const std::string &id)
+{
+	if (id.empty() || contains(m_ending, id) || contains(m_ended, id))
+		return false;
+	erase(m_retry, id);
+	m_ending.push_back(id);
+	return true;
+}
+
+void StreamlabsSessionBook::finish_end(const std::string &id, EndOutcome outcome)
+{
+	erase(m_ending, id);
+	if (outcome == EndOutcome::Ended) {
+		erase(m_retry, id);
+		if (!contains(m_ended, id))
+			m_ended.push_back(id);
+	} else if (outcome == EndOutcome::Cancelled) {
+		if (!contains(m_retry, id))
+			m_retry.push_back(id);
+	}
+	/* Failed: neither ended nor retried here; a later start may try it again (session file). */
+}
+
+std::vector<std::string> StreamlabsSessionBook::take_for_shutdown()
+{
+	std::vector<std::string> ids;
+	auto add = [&](const std::string &id) {
+		if (!id.empty() && !contains(ids, id) && !contains(m_ended, id) && !contains(m_handed_out, id))
+			ids.push_back(id);
+	};
+	for (const auto &id : m_retry)
+		add(id);
+	for (const auto &id : m_ending)
+		add(id);
+	add(m_open_id);
+	m_open_id.clear();
+	m_open_owner.clear();
+	m_open_name.clear();
+	m_retry.clear();
+	/* The synchronous ends own them now: begin_end() refuses them, a second call skips them. */
+	for (const auto &id : ids) {
+		if (!contains(m_ending, id))
+			m_ending.push_back(id);
+		m_handed_out.push_back(id);
+	}
+	return ids;
 }
 
 } // namespace smulti

@@ -215,8 +215,14 @@ void StreamlabsClient::worker_loop()
 				return;
 			job = std::move(m_jobs.front());
 			m_jobs.pop_front();
+			m_job_running = true;
 		}
 		job();
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_job_running = false;
+		}
+		m_idle_cv.notify_all();
 	}
 }
 
@@ -248,10 +254,16 @@ void StreamlabsClient::shutdown_and_end_blocking()
 			return;
 		m_shut_down = true;
 		m_stopping = true;
-		m_jobs.clear(); // a dropped end keeps its id in m_closing_ids
+		m_jobs.clear(); // a dropped end keeps its id claimed in m_book (ended below)
 	}
 	m_alive->store(false);
 	m_cv.notify_all();
+	{
+		/* Let the job in flight finish (an end completes, a start reply lands in m_book);
+		 * cut it off only after the 5 s bound. */
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_idle_cv.wait_for(lock, std::chrono::milliseconds(kEndTimeoutMs), [this]() { return !m_job_running; });
+	}
 	m_worker_slot.cancel();
 	if (m_worker.joinable())
 		m_worker.join();
@@ -259,19 +271,16 @@ void StreamlabsClient::shutdown_and_end_blocking()
 	std::vector<std::string> ids;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		ids = m_closing_ids;
-		if (!m_open_id.empty())
-			ids.push_back(m_open_id);
-		m_closing_ids.clear();
-		m_open_id.clear();
-		m_open_owner.clear();
-		m_open_name.clear();
+		ids = m_book.take_for_shutdown();
 	}
 	if (ids.empty())
 		return;
 	auto token = load_token();
 	if (!token) {
 		obs_log(LOG_WARNING, "streamlabs tiktok: no token stored, open session cannot be ended");
+		std::lock_guard<std::mutex> lock(m_mutex);
+		for (const auto &id : ids)
+			m_book.finish_end(id, StreamlabsSessionBook::EndOutcome::Failed);
 		return;
 	}
 	for (const auto &id : ids)
@@ -339,12 +348,17 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 			close_handle(connect);
 			close_handle(session);
 			res.transport_error = transport_text(ERROR_WINHTTP_OPERATION_CANCELLED);
+			res.cancelled = true;
 			return res;
 		}
 		slot.request = request;
 	}
 
-	std::wstring headers = L"authorization: Bearer " + to_wide(token) + L"\r\n";
+	std::wstring token_w = to_wide(token);
+	std::wstring headers = L"authorization: Bearer ";
+	headers += token_w;
+	headers += L"\r\n";
+	wipe_wide(token_w);
 	std::string body;
 	if (!req.form.empty()) {
 		const std::string boundary = random_boundary();
@@ -394,8 +408,9 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 		if (slot.request == request) {
 			slot.request = nullptr;
 			close_handle(request); // not cancelled: ours to close
+		} else {
+			res.cancelled = true; // CancelSlot::cancel() already closed it
 		}
-		/* else: CancelSlot::cancel() already closed it */
 	}
 	close_handle(connect);
 	close_handle(session);
@@ -419,6 +434,13 @@ StreamlabsResult StreamlabsClient::end_now(const std::string &token, const std::
 	log_ended(r);
 	if (r.ok)
 		clear_session_file_if(session_id);
+	const auto outcome = r.ok ? StreamlabsSessionBook::EndOutcome::Ended
+				  : (http.cancelled ? StreamlabsSessionBook::EndOutcome::Cancelled
+						    : StreamlabsSessionBook::EndOutcome::Failed);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_book.finish_end(session_id, outcome);
+	}
 	return r;
 }
 
@@ -500,8 +522,7 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 	std::string other_owner_name;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (!m_open_owner.empty() && m_open_owner != endpoint_id)
-			other_owner_name = m_open_name;
+		other_owner_name = m_book.busy_with(endpoint_id);
 	}
 	if (!other_owner_name.empty()) {
 		fail_now("The Streamlabs TikTok session is already used by '" + other_owner_name + "'.",
@@ -518,19 +539,13 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 	enqueue([this, token, endpoint_id, endpoint_name, title, category_id, adopt]() {
 		/* 1. End what is still open for this endpoint, and a session left by a crash.
 		 * Another endpoint that started meanwhile keeps its session. */
-		std::vector<std::string> stale;
-		std::string busy_with;
+		StreamlabsSessionBook::StartClaim claim;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			if (!m_open_id.empty() && m_open_owner != endpoint_id)
-				busy_with = m_open_name.empty() ? std::string("another endpoint") : m_open_name;
-			else if (!m_open_id.empty()) {
-				stale.push_back(m_open_id);
-				m_open_id.clear();
-				m_open_owner.clear();
-				m_open_name.clear();
-			}
+			claim = m_book.claim_for_start(endpoint_id);
 		}
+		const std::string busy_with = claim.busy_with;
+		std::vector<std::string> stale = claim.stale;
 		if (!busy_with.empty()) {
 			StreamlabsResult busy;
 			busy.error_code = StreamlabsError::Rejected;
@@ -542,6 +557,13 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 		if (!from_file.empty() && std::find(stale.begin(), stale.end(), from_file) == stale.end())
 			stale.push_back(from_file);
 		for (const auto &id : stale) {
+			bool claimed;
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				claimed = m_book.begin_end(id); // false: already being ended or ended once
+			}
+			if (!claimed)
+				continue;
 			obs_log(LOG_INFO, "streamlabs tiktok: ending a previous session before a new start");
 			end_now(*token, id, m_worker_slot);
 		}
@@ -556,9 +578,7 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 		if (r.ok) {
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
-				m_open_id = r.id;
-				m_open_owner = endpoint_id;
-				m_open_name = endpoint_name;
+				m_book.on_started(r.id, endpoint_id, endpoint_name);
 			}
 			write_session_file(r.id);
 			obs_log(LOG_INFO, "streamlabs tiktok: session started for '%s'", endpoint_name.c_str());
@@ -568,14 +588,19 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 		}
 
 		/* 3. Hand over on the UI thread; an unclaimed session is ended again. */
-		post([this, adopt, r, endpoint_id]() mutable {
+		/* Not adopted (stopped or restarted meanwhile): end exactly this id, never the
+		 * endpoint's newer session. During shutdown the post is dropped and the id is
+		 * ended synchronously from m_book. */
+		const std::string started_id = r.ok ? r.id : std::string();
+		post([this, adopt, r, started_id]() mutable {
 			const bool adopted = adopt(r);
-			const bool started = r.ok;
 			streamlabs_vault::wipe(r.key);
 			streamlabs_vault::wipe(r.rtmp);
-			if (started && !adopted)
-				end_session(endpoint_id);
+			if (!started_id.empty() && !adopted)
+				end_unadopted(started_id);
 		});
+		streamlabs_vault::wipe(r.key);
+		streamlabs_vault::wipe(r.rtmp);
 	});
 }
 
@@ -584,26 +609,36 @@ void StreamlabsClient::end_session(const std::string &endpoint_id)
 	std::string id;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_shut_down || m_open_id.empty() || m_open_owner != endpoint_id)
+		if (m_shut_down)
 			return;
-		id = m_open_id;
-		m_open_id.clear();
-		m_open_owner.clear();
-		m_open_name.clear();
-		m_closing_ids.push_back(id);
+		id = m_book.release_owner(endpoint_id); // claimed: no other path ends it again
 	}
+	if (!id.empty())
+		enqueue_end(id);
+}
+
+void StreamlabsClient::end_unadopted(const std::string &session_id)
+{
+	bool claimed;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		claimed = !m_shut_down && m_book.release_unadopted(session_id);
+	}
+	if (claimed)
+		enqueue_end(session_id);
+}
+
+void StreamlabsClient::enqueue_end(const std::string &session_id)
+{
 	auto token = load_token();
 	if (!token) {
 		obs_log(LOG_WARNING, "streamlabs tiktok: no token stored, session cannot be ended");
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_closing_ids.erase(std::remove(m_closing_ids.begin(), m_closing_ids.end(), id), m_closing_ids.end());
+		m_book.finish_end(session_id, StreamlabsSessionBook::EndOutcome::Failed);
 		return; // the id stays in the session file and is ended before the next start
 	}
-	enqueue([this, token, id]() {
-		end_now(*token, id, m_worker_slot);
-		std::lock_guard<std::mutex> lock(m_mutex);
-		m_closing_ids.erase(std::remove(m_closing_ids.begin(), m_closing_ids.end(), id), m_closing_ids.end());
-	});
+	/* Dropped by a shutdown before it runs: the id stays claimed in m_book and is ended there. */
+	enqueue([this, token, session_id]() { end_now(*token, session_id, m_worker_slot); });
 }
 
 } // namespace smulti

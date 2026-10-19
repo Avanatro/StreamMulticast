@@ -31,13 +31,17 @@ namespace smulti {
  * queued before a start always runs first). Results are handed to the UI
  * thread through the `post_to_ui` function given at construction (queued
  * QMetaObject::invokeMethod in plugin-main). A shared alive flag drops every
- * result that arrives after shutdown_and_end_blocking(); that call cancels the
- * in-flight request, joins the worker and then ends any open session
- * synchronously (bounded to 5 s per session). It must run before the UI post
- * context is deleted.
+ * result that arrives after shutdown_and_end_blocking(). That call drops the
+ * queue, lets the in-flight job finish for up to 5 s (an end in flight then
+ * completes, a start reply that arrives is ended), cancels it only after that,
+ * joins the worker and ends every id the StreamlabsSessionBook still lists
+ * synchronously (bounded to 5 s each). It must run before the UI post context
+ * is deleted.
  *
- * Sessions: one Streamlabs account has one TikTok live session. The open
- * session id is kept in memory together with the endpoint that owns it and in
+ * Sessions: one Streamlabs account has one TikTok live session. Which id is
+ * open, being ended or ended is decided by StreamlabsSessionBook (pure, tested):
+ * an id is ended successfully at most once, and an unadopted start result ends
+ * exactly its own id. The open id is also kept in
  * obs_module_config_path("streamlabs_tiktok_session.txt") (id only, never the
  * key), so a session left open by a crash is ended before the next start.
  *
@@ -89,13 +93,19 @@ private:
 
 	struct HttpResult {
 		bool transport_ok = false;
+		bool cancelled = false; // the CancelSlot closed the request
 		int status = 0;
 		std::string body;
 		std::string transport_error; // sanitized
 	};
 
 	HttpResult perform(const StreamlabsRequest &req, const std::string &token, int timeout_ms, CancelSlot &slot);
+	/** End `session_id` (claimed in m_book by the caller) and settle it in m_book. */
 	StreamlabsResult end_now(const std::string &token, const std::string &session_id, CancelSlot &slot);
+	/** Queue the end of an id the caller already claimed in m_book. */
+	void enqueue_end(const std::string &session_id);
+	/** A start result nobody adopted: end exactly that id, if it is still the open one. */
+	void end_unadopted(const std::string &session_id);
 	void end_blocking_bounded(const std::string &token, const std::string &session_id);
 
 	void enqueue(std::function<void()> job);
@@ -110,13 +120,12 @@ private:
 	std::deque<std::function<void()>> m_jobs;
 	bool m_stopping = false;
 	bool m_shut_down = false;
+	bool m_job_running = false;          ///< the worker is inside a job
+	std::condition_variable m_idle_cv;   ///< signalled when a job finishes
 	std::thread m_worker;
 	CancelSlot m_worker_slot;
 
-	std::string m_open_id;    ///< open session id ("" = none)
-	std::string m_open_owner; ///< endpoint id that owns m_open_id
-	std::string m_open_name;  ///< endpoint name for log lines
-	std::vector<std::string> m_closing_ids; ///< end queued, not yet confirmed
+	StreamlabsSessionBook m_book; ///< guarded by m_mutex
 };
 
 /** Process-wide instance (set by plugin-main while loaded, nullptr otherwise). */

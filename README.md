@@ -137,6 +137,8 @@ Build with `-DSMULTI_STREAMLABS_TIKTOK=ON` to let a TikTok endpoint fetch its RT
 3. The status line shows `Connected as @user — can go live: yes/no`. Set a title and search a category (or keep *Other*).
 4. When the endpoint starts, the plugin starts a Streamlabs TikTok session, streams to the URL and key it returns (kept in memory for this session only) and ends the session when the endpoint stops, the main stream stops, the scene collection changes or OBS exits. A failed fetch only stops that endpoint and shows the error in the Health tab. A session left open by a crash is ended before the next start (only its id is kept, in `streamlabs_tiktok_session.txt`).
 
+Saving a change to a live Streamlabs TikTok endpoint restarts it, so the TikTok LIVE is ended and a new one starts.
+
 With the flag off (default) the plugin builds and behaves exactly as before; the TikTok Bridge import above stays the supported path.
 
 ---

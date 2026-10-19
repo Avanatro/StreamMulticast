@@ -988,7 +988,7 @@ nodes:
       - tests/fixtures/streamlabs_generator_config.json
     works_when:
       - id: streamlabs-tiktok.parse
-        behavior: "info/search/start/end requests use https://streamlabs.com/api/v5/slobs/tiktok (search query cut to 25 code points and url-encoded; start is multipart title, device_platform=win32, category=<game_mask_id or ''>, audience_type=0); start needs id, rtmp and key (any missing = MissingField error); info reads user.username, application_status.status, can_be_live (only JSON true); search always appends {Other, ''}; end needs success=true. Error messages never contain the token, key, rtmp URL or body; a body that is not one well-formed JSON object is rejected before the libobs parser can log a fragment of it. The generator config.json 'token' is accepted when non-empty, printable ASCII and at most 512 characters. One user agent constant (Streamlabs Desktop Electron)."
+        behavior: "info/search/start/end requests use https://streamlabs.com/api/v5/slobs/tiktok (search query cut to 25 code points and url-encoded; start is multipart title, device_platform=win32, category=<game_mask_id or ''>, audience_type=0); start needs id, rtmp and key (any missing = MissingField error); info reads user.username, application_status.status, can_be_live (only JSON true); search always appends {Other, ''}; end needs success=true. Error messages never contain the token, key, rtmp URL or body; a body that is not one well-formed JSON object (also invalid or overlong UTF-8, UTF-8 surrogates, \\u0000, lone surrogate escapes, integers outside int64, non-finite reals, duplicate keys) is rejected before the libobs parser can log a fragment of it. The generator config.json 'token' is accepted when non-empty, printable ASCII and at most 512 characters. One user agent constant (Streamlabs Desktop Electron)."
         verification:
           - kind: automated
             reference: tests/test_streamlabs_tiktok.cpp
@@ -1006,7 +1006,7 @@ nodes:
             reference: tests/test_streamlabs_tiktok.cpp
             check: streamlabs_tiktok_parse_start_error_message_has_no_secrets
             result: passed
-            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation; with the JSON pre-check removed the case failed (libobs logged the key fragment), restored 11/11 passed (TASK-28)"
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation; with the JSON pre-check removed the case failed (libobs logged the key fragment), restored 11/11 passed (TASK-28); fix round 1: 10 of 11 hostile shapes passed the old check and leaked via the libobs log, hardened check 16/16 passed"
             checked_at: 2026-10-19
           - kind: automated
             reference: tests/test_streamlabs_tiktok.cpp
@@ -1082,4 +1082,37 @@ nodes:
           - kind: manual
             reference: "OBS runtime check (ON build): go live, stop, quit OBS while live; the log has exactly one 'session started' and one 'session ended (success=true)' per session and no token or key; kill OBS while live, restart and go live: 'ending a previous session before a new start' appears first (not run in this session, TASK-28)"
             result: pending
+      - id: streamlabs-client.session-book
+        behavior: "StreamlabsSessionBook (pure core, used under the client mutex) decides which id is ended: an id is ended successfully at most once; a start result nobody adopted ends exactly its own id and only while it is still the open one (never a newer session of the endpoint); an end cut off at shutdown, a queued end dropped at shutdown and an open session nobody adopted are each ended once by the synchronous shutdown end. shutdown_and_end_blocking lets the in-flight job finish for up to 5 s before it cancels it."
+        verification:
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_session_unadopted_ends_only_that_id
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19 (TASK-28 fix round 1); failed to compile before StreamlabsSessionBook existed, 16/16 passed after"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_session_never_ends_twice
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19 (TASK-28 fix round 1); failed to compile before StreamlabsSessionBook existed, 16/16 passed after"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_session_cancelled_end_retried_at_shutdown
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19 (TASK-28 fix round 1); failed to compile before StreamlabsSessionBook existed, 16/16 passed after"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_session_start_reply_during_shutdown_is_ended
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19 (TASK-28 fix round 1); failed to compile before StreamlabsSessionBook existed, 16/16 passed after"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_session_busy_for_other_endpoint
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19 (TASK-28 fix round 1); failed to compile before StreamlabsSessionBook existed, 16/16 passed after"
+            checked_at: 2026-10-19
     status: building

@@ -114,7 +114,32 @@ SMULTI_TEST(streamlabs_tiktok_parse_start_error_message_has_no_secrets)
 	base_set_log_handler(capture_log, nullptr);
 	StreamlabsResult d = smulti::streamlabs_parse_start(200, R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR)");
 	StreamlabsResult e = smulti::streamlabs_parse_start(200, R"({"key":"FAKE-STREAM-KEY-123",})");
+	/* shapes that pass a plain syntax check but make jansson log "near '<token>'" (fix round 1) */
+	const std::string hostile[] = {
+		std::string(R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR)") + "\xff\xfe" + R"("})", // invalid UTF-8
+		std::string(R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR)") + "\xc0\xaf" + R"("})", // overlong
+		std::string(R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR)") + "\xed\xa0\x80" + R"("})", // UTF-8 surrogate
+		R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR\u0000X"})",                 // \u0000
+		R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR\ud800X"})",                 // lone high surrogate
+		R"({"id":"1","rtmp":"rtmp://x.test/a","key":"FAKE-STR\udc00X"})",                 // lone low surrogate
+		R"({"id":99999999999999999999,"rtmp":"rtmp://x.test/a","key":"FAKE-STR"})",       // integer overflow
+		R"({"id":-9223372036854775809,"rtmp":"rtmp://x.test/a","key":"FAKE-STR"})",       // integer underflow
+		R"({"id":1e999,"rtmp":"rtmp://x.test/a","key":"FAKE-STR"})",                      // real overflow
+		R"({"key":"FAKE-STR","key":"FAKE-STR2"})",                                        // duplicate key
+		std::string(R"({"key":"FAKE-STR)") + std::string(1, '\0') + R"("})",              // embedded NUL
+	};
+	for (const auto &body : hostile) {
+		StreamlabsResult h = smulti::streamlabs_parse_start(200, body);
+		EXPECT_TRUE(!h.ok);
+		EXPECT_EQ(h.error_code, StreamlabsError::BadResponse);
+		EXPECT_TRUE(!smulti::streamlabs_json_is_object(body));
+	}
 	base_set_log_handler(previous_handler, previous_param);
+	/* the hardened check still accepts valid text: UTF-8, escapes, a surrogate pair, int64 limits */
+	EXPECT_TRUE(smulti::streamlabs_json_is_object(
+		"{\"u\":\"\xc3\xa4\xe2\x82\xac\xf0\x9f\x98\x80\",\"e\":\"\\u00e4\\ud83d\\ude00\\n\","
+		"\"a\":9223372036854775807,\"b\":-9223372036854775808,\"c\":1.5e10,\"d\":[1,{\"x\":null}]}"));
+	EXPECT_TRUE(!smulti::streamlabs_json_is_object(R"({"a":9223372036854775808})"));
 	EXPECT_TRUE(!d.ok);
 	EXPECT_EQ(d.error_code, StreamlabsError::BadResponse);
 	EXPECT_TRUE(!contains(d.error_message, "FAKE-STR"));
@@ -315,4 +340,99 @@ SMULTI_TEST(streamlabs_tiktok_endpoint_key_provider_roundtrip)
 	Endpoint u = Endpoint::deserialize(unknown);
 	obs_data_release(unknown);
 	EXPECT_EQ(u.key_provider, "");
+}
+
+/* ---- session bookkeeping (fix round 1): which Streamlabs session id is ended, and when ---- */
+
+using smulti::StreamlabsSessionBook;
+using EndOutcome = smulti::StreamlabsSessionBook::EndOutcome;
+
+SMULTI_TEST(streamlabs_tiktok_session_unadopted_ends_only_that_id)
+{
+	/* Stop + Start while fetch #1 is on the wire; job #2 runs before adopt1 reaches the UI thread. */
+	StreamlabsSessionBook book;
+	book.on_started("S1", "ep", "Tiktok");                 // job #1 reply
+	auto claim = book.claim_for_start("ep");                // job #2: S1 is stale
+	EXPECT_TRUE(claim.busy_with.empty());
+	EXPECT_EQ(claim.stale.size(), static_cast<size_t>(1));
+	EXPECT_TRUE(book.begin_end("S1"));
+	book.finish_end("S1", EndOutcome::Ended);
+	book.on_started("S2", "ep", "Tiktok");                 // job #2 reply
+	EXPECT_TRUE(!book.release_unadopted("S1"));             // adopt1 refused: must not touch S2
+	EXPECT_EQ(book.open_id(), "S2");
+
+	/* Other order: adopt1 is refused first, then job #2 finds S1 again (session file). */
+	StreamlabsSessionBook other;
+	other.on_started("S1", "ep", "Tiktok");
+	EXPECT_TRUE(other.release_unadopted("S1"));             // queues the one end of S1
+	EXPECT_EQ(other.open_id(), "");
+	auto claim2 = other.claim_for_start("ep");
+	EXPECT_TRUE(claim2.stale.empty());
+	EXPECT_TRUE(!other.begin_end("S1"));                    // stale-from-file: already being ended
+}
+
+SMULTI_TEST(streamlabs_tiktok_session_never_ends_twice)
+{
+	StreamlabsSessionBook book;
+	book.on_started("S1", "ep", "Tiktok");
+	EXPECT_EQ(book.release_owner("ep"), "S1");
+	EXPECT_EQ(book.release_owner("ep"), "");                // second stop: nothing to end
+	EXPECT_TRUE(!book.begin_end("S1"));                     // queued end owns it
+	book.finish_end("S1", EndOutcome::Ended);
+	EXPECT_TRUE(!book.begin_end("S1"));                     // ended once, never again
+	EXPECT_TRUE(!book.release_unadopted("S1"));
+	EXPECT_TRUE(book.take_for_shutdown().empty());
+
+	/* a failed (not cancelled) end may be retried later, e.g. from the session file */
+	StreamlabsSessionBook failed;
+	failed.on_started("S9", "ep", "Tiktok");
+	EXPECT_EQ(failed.release_owner("ep"), "S9");
+	failed.finish_end("S9", EndOutcome::Failed);
+	EXPECT_TRUE(failed.begin_end("S9"));
+}
+
+SMULTI_TEST(streamlabs_tiktok_session_cancelled_end_retried_at_shutdown)
+{
+	/* EXIT: stop() queued the end, the worker picked it up, shutdown cut it off. */
+	StreamlabsSessionBook book;
+	book.on_started("S1", "ep", "Tiktok");
+	EXPECT_EQ(book.release_owner("ep"), "S1");
+	book.finish_end("S1", EndOutcome::Cancelled);
+	auto ids = book.take_for_shutdown();
+	EXPECT_EQ(ids.size(), static_cast<size_t>(1));
+	if (!ids.empty())
+		EXPECT_EQ(ids[0], "S1");
+
+	/* a queued end that was dropped with the queue is ended at shutdown as well */
+	StreamlabsSessionBook dropped;
+	dropped.on_started("S2", "ep", "Tiktok");
+	EXPECT_EQ(dropped.release_owner("ep"), "S2");
+	auto ids2 = dropped.take_for_shutdown();
+	EXPECT_EQ(ids2.size(), static_cast<size_t>(1));
+	EXPECT_TRUE(dropped.take_for_shutdown().empty());       // handed out once
+}
+
+SMULTI_TEST(streamlabs_tiktok_session_start_reply_during_shutdown_is_ended)
+{
+	/* the start reply arrives while shutdown waits for the worker: nobody adopts it */
+	StreamlabsSessionBook book;
+	book.on_started("S7", "ep", "Tiktok");
+	auto ids = book.take_for_shutdown();
+	EXPECT_EQ(ids.size(), static_cast<size_t>(1));
+	if (!ids.empty())
+		EXPECT_EQ(ids[0], "S7");
+	EXPECT_EQ(book.open_id(), "");
+}
+
+SMULTI_TEST(streamlabs_tiktok_session_busy_for_other_endpoint)
+{
+	StreamlabsSessionBook book;
+	book.on_started("S1", "ep-a", "Tiktok A");
+	EXPECT_EQ(book.busy_with("ep-b"), "Tiktok A");
+	EXPECT_EQ(book.busy_with("ep-a"), "");
+	auto claim = book.claim_for_start("ep-b");
+	EXPECT_EQ(claim.busy_with, "Tiktok A");
+	EXPECT_TRUE(claim.stale.empty());
+	EXPECT_EQ(book.open_id(), "S1");                        // the other endpoint keeps its session
+	EXPECT_EQ(book.release_owner("ep-b"), "");
 }
