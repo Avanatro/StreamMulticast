@@ -100,7 +100,8 @@ public:
 
 	/** Context menu for one item (list or preview): picks an action and runs it. The item is identified by
 	 * id + the scene uuid it was seen in, captured by the caller before any event loop runs. UI thread. */
-	void show_item_menu(const QPoint &global_pos, int64_t item_id, const std::string &scene_uuid);
+	void show_item_menu(const QPoint &global_pos, int64_t item_id, std::string scene_uuid);
+	/* scene_uuid is taken BY VALUE on purpose: callers pass m_list_scene_uuid, which refresh() reassigns inside the nested event loop of a menu or dialog. */
 
 	/** Reload the transform panel now (force: also while a field has focus). UI thread. */
 	void reload_editor(bool force);
@@ -120,9 +121,9 @@ private slots:
 private:
 	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, Fit, Fill, Reset, CenterH, CenterV };
 
-	void run_item_action(ItemAction action, const std::string &scene_uuid, int64_t id);
-	void rename_item(const std::string &scene_uuid, int64_t id);
-	void apply_transform(ItemAction action, const std::string &scene_uuid, int64_t id);
+	void run_item_action(ItemAction action, std::string scene_uuid, int64_t id);
+	void rename_item(std::string scene_uuid, int64_t id);
+	void apply_transform(ItemAction action, std::string scene_uuid, int64_t id);
 	void on_list_context_menu(const QPoint &list_pos);
 	bool with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn);
 	bool with_scene_impl(const std::string *required_uuid, const SceneFn &fn);

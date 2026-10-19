@@ -881,7 +881,7 @@ void VerticalItemList::on_list_context_menu(const QPoint &list_pos)
 		       m_list_scene_uuid);
 }
 
-void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id, const std::string &scene_uuid)
+void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id, std::string scene_uuid)
 {
 	if (m_shutdown.load() || item_id == 0 || scene_uuid.empty())
 		return;
@@ -932,7 +932,7 @@ void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id,
 	}
 }
 
-void VerticalItemList::run_item_action(ItemAction action, const std::string &scene_uuid, int64_t id)
+void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid, int64_t id)
 {
 	if (m_shutdown.load() || id == 0 || scene_uuid.empty())
 		return;
@@ -992,7 +992,7 @@ void VerticalItemList::run_item_action(ItemAction action, const std::string &sce
 		set_status(error);
 }
 
-void VerticalItemList::apply_transform(ItemAction action, const std::string &scene_uuid, int64_t id)
+void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid, int64_t id)
 {
 	const layout::Size canvas = owned_canvas_size(m_canvas);
 	bool locked = false;
@@ -1045,7 +1045,7 @@ void VerticalItemList::apply_transform(ItemAction action, const std::string &sce
 	notify_change();
 }
 
-void VerticalItemList::rename_item(const std::string &scene_uuid, int64_t id)
+void VerticalItemList::rename_item(std::string scene_uuid, int64_t id)
 {
 	std::string old_name;
 	bool shared = false;
