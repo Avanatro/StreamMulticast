@@ -58,6 +58,18 @@ bool transition_running(obs_source_t *transition)
 	return running;
 }
 
+/**
+ * obs_transition_set on one of our transitions, stopping a running one first: obs_transition_set clears
+ * the sources but never calls the type's transition_stop, so an aborted stinger would keep its old fixed
+ * duration and transition point for its next start (transition-stinger.c restart branch).
+ */
+void set_transition_stopped(obs_source_t *transition, obs_source_t *source)
+{
+	if (transition_running(transition))
+		obs_transition_force_stop(transition);
+	obs_transition_set(transition, source);
+}
+
 bool file_exists(const std::string &path)
 {
 	return !path.empty() && os_file_exists(path.c_str());
@@ -603,7 +615,7 @@ void OwnedCanvas::destroy_wrapper(obs_source_t *wrapper)
 	/* Disconnect waits for an in-flight callback (signal dispatch holds the handler mutex). */
 	signal_handler_disconnect(obs_source_get_signal_handler(wrapper), "transition_stop",
 				  &OwnedCanvas::on_transition_stop, this);
-	obs_transition_set(wrapper, nullptr); // drop the scene refs now
+	set_transition_stopped(wrapper, nullptr); // drop the scene refs now
 	obs_source_release(wrapper);         // UI thread
 }
 
@@ -634,10 +646,10 @@ void OwnedCanvas::install(obs_canvas_t *canvas, obs_source_t *wrapper)
 		keep = nullptr;
 	}
 	if (keep)
-		obs_transition_set(wrapper, keep);
+		set_transition_stopped(wrapper, keep);
 	obs_canvas_set_channel(canvas, 0, wrapper);
 	if (is_own_wrapper(channel))
-		obs_transition_set(channel, nullptr); // kept prepared, but holds no scene while off channel 0
+		set_transition_stopped(channel, nullptr); // kept prepared, holds no scene while off channel 0
 	obs_source_release(keep);
 	obs_source_release(channel);
 }
@@ -796,7 +808,7 @@ void OwnedCanvas::start_switch(obs_canvas_t *canvas, obs_source_t *scene, const 
 	if (instant || (entry && entry->plan.instant)) {
 		wrapper = channel_wrapper(canvas);
 		if (wrapper)
-			obs_transition_set(wrapper, scene);
+			set_transition_stopped(wrapper, scene);
 	} else {
 		uint32_t duration = main_duration_ms;
 		if (entry && entry->wrapper && entry->applied_json == entry->plan.settings_json) {
@@ -914,7 +926,7 @@ void OwnedCanvas::repair_removed_scene()
 				target = obs_source_get_ref(a);
 			else
 				obs_canvas_enum_scenes(canvas, first_live_scene, &target);
-			obs_transition_set(channel, target); // instant; null when no scene is left
+			set_transition_stopped(channel, target); // instant; null when no scene is left
 			obs_log(LOG_INFO, "owned canvas: active scene was removed, now showing '%s'",
 				target ? source_name(target).c_str() : "(none)");
 			obs_source_release(target);
