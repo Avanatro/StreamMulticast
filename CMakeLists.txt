@@ -73,6 +73,7 @@ target_sources(
     src/core/Endpoint.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
+    src/core/LinkedStart.cpp
     src/core/ObsServiceImport.cpp
     src/core/TikTokBridgeImport.cpp
 

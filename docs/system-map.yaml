@@ -190,10 +190,22 @@ nodes:
     needs: [endpoint-registry]
     code:
       - src/plugin-main.cpp
+      - src/core/LinkedStart.hpp
+      - src/core/LinkedStart.cpp
+      - tests/test_linked_start.cpp
     works_when:
       - id: main-stream-linking.linked-start
-        behavior: "Streaming-started event starts every linked and enabled endpoint (UNVERIFIED: the enabled flag is not checked)."
-        verification: []
+        behavior: "Streaming-started event starts only endpoints that are enabled and linked to the main stream. Selection is the pure function select_linked_for_start; the event wiring in plugin-main.cpp is not covered by an automated check."
+        verification:
+          - kind: automated
+            reference: tests/test_linked_start.cpp
+            check: linked_start_skips_disabled_endpoints
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed before the fix (disabled endpoint selected), passed after (WU3 commit)"
+            checked_at: 2026-10-19
+          - kind: manual
+            reference: "OBS runtime check: start main stream with one disabled linked endpoint; it must not start (not run in this session)"
+            result: pending
     status: building
   - id: ui-endpoint-dialog
     lane: ui

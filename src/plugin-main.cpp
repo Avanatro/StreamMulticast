@@ -23,6 +23,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "plugin-support.h"
 #include "core/ConfigStore.hpp"
 #include "core/EndpointRegistry.hpp"
+#include "core/LinkedStart.hpp"
 #include "pipeline/ControllerReaper.hpp"
 #include "pipeline/HealthSampler.hpp"
 #include "pipeline/OutputController.hpp"
@@ -55,12 +56,10 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		obs_log(LOG_INFO, "OBS main stream started — triggering linked endpoints");
-		for (auto &ep : g_registry->all()) {
-			if (ep.linked_to_main) {
-				auto ctrl = g_registry->controller_for(ep.id);
-				if (ctrl && !ctrl->is_running())
-					ctrl->start();
-			}
+		for (auto &ep : smulti::select_linked_for_start(g_registry->all())) {
+			auto ctrl = g_registry->controller_for(ep.id);
+			if (ctrl && !ctrl->is_running())
+				ctrl->start();
 		}
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STOPPED) {
 		obs_log(LOG_INFO, "OBS main stream stopped — stopping linked endpoints");
