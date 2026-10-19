@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <obs.h>
 #include <obs-frontend-api.h>
 
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,14 @@ bool scan_scene(void *param, obs_source_t *scene)
 		const char *name = obs_source_get_name(scene);
 		scan->first_name = name ? name : "";
 	}
+	return true;
+}
+
+bool collect_scene_name(void *param, obs_source_t *scene)
+{
+	const char *name = obs_source_get_name(scene);
+	if (name)
+		static_cast<std::vector<std::string> *>(param)->emplace_back(name);
 	return true;
 }
 
@@ -250,8 +259,10 @@ void OwnedCanvas::on_save_load(obs_data_t *data, bool saving)
 		return;
 	if (!saving) {
 		const char *name = obs_data_get_string(data, kSceneSaveKey);
+		SceneLinkSettings links = scene_link_load(data);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_scene_name = name ? name : "";
+		m_links = std::move(links);
 		return;
 	}
 
@@ -271,12 +282,78 @@ void OwnedCanvas::on_save_load(obs_data_t *data, bool saving)
 		m_scene_name = name;
 	if (!m_scene_name.empty())
 		obs_data_set_string(data, kSceneSaveKey, m_scene_name.c_str());
+	scene_link_save(data, m_links);
 }
 
 std::string OwnedCanvas::uuid() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_uuid;
+}
+
+SceneLinkSettings OwnedCanvas::link_settings() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_links;
+}
+
+void OwnedCanvas::set_link_settings(const SceneLinkSettings &settings)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_links = settings;
+}
+
+void OwnedCanvas::on_scene_renamed(const std::string &old_name, const std::string &new_name)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	rename_scene_in_links(m_links, old_name, new_name);
+}
+
+void OwnedCanvas::follow_program_scene()
+{
+	const SceneLinkSettings settings = link_settings();
+	if (!settings.enabled)
+		return;
+
+	std::string main_name;
+	obs_source_t *program = obs_frontend_get_current_scene();
+	if (program) {
+		const char *n = obs_source_get_name(program);
+		main_name = n ? n : "";
+		obs_source_release(program);
+	}
+	if (main_name.empty())
+		return;
+
+	obs_canvas_t *canvas = get_ref();
+	if (!canvas)
+		return;
+
+	if (obs_canvas_has_video(canvas)) {
+		std::vector<std::string> verticals;
+		obs_canvas_enum_scenes(canvas, collect_scene_name, &verticals);
+
+		const std::optional<std::string> target = resolve_linked_scene(main_name, settings, verticals);
+		if (target) {
+			std::string active;
+			obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+			if (current) {
+				const char *n = obs_source_get_name(current);
+				active = n ? n : "";
+				obs_source_release(current);
+			}
+			if (active != *target) {
+				obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, target->c_str());
+				if (scene) {
+					obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
+					obs_scene_release(scene);
+					obs_log(LOG_INFO, "scene link: \"%s\" -> \"%s\"", main_name.c_str(),
+						target->c_str());
+				}
+			}
+		}
+	}
+	obs_canvas_release(canvas);
 }
 
 } // namespace smulti

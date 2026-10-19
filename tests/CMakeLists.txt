@@ -17,6 +17,7 @@ set(SMULTI_TEST_SOURCES
     test_canvas_resolve.cpp
     test_canvas_owned.cpp
     test_layout_math.cpp
+    test_scene_link.cpp
 )
 
 add_executable(
@@ -30,6 +31,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/CanvasResolve.cpp
   ${CMAKE_SOURCE_DIR}/src/core/OwnedCanvasPolicy.cpp
   ${CMAKE_SOURCE_DIR}/src/core/LayoutMath.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/SceneLink.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

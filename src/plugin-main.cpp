@@ -77,6 +77,36 @@ static void refresh_vertical_scenes()
 		g_vertical_dock->refresh_scenes();
 }
 
+static void refresh_vertical_links()
+{
+	if (g_vertical_dock)
+		g_vertical_dock->refresh_links();
+}
+
+/* Rebuild the owned canvas, then put it on the scene linked to the current program scene. UI thread. */
+static void ensure_owned_canvas_and_follow()
+{
+	if (!g_owned_canvas)
+		return;
+	g_owned_canvas->ensure();
+	g_owned_canvas->follow_program_scene();
+	refresh_vertical_scenes();
+}
+
+/* libobs global "source_rename" (any thread): keep explicit scene links pointing at renamed scenes. */
+static void on_source_rename(void *, calldata_t *cd)
+{
+	if (!g_module_alive.load() || !g_owned_canvas)
+		return;
+	auto *source = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
+	if (!source || !obs_source_is_scene(source))
+		return;
+	const char *new_name = calldata_string(cd, "new_name");
+	const char *prev_name = calldata_string(cd, "prev_name");
+	if (new_name && prev_name)
+		g_owned_canvas->on_scene_renamed(prev_name, new_name);
+}
+
 /* libobs "canvas_remove" (global signal, emitted synchronously by obs_canvas_remove BEFORE the
  * caller releases its own ref; libobs obs-canvas.c:560-572). Drop our weak ref so get_ref() returns
  * null, then wait for any in-flight draw, so the frontend's later release is the final one and runs
@@ -106,10 +136,8 @@ static void shutdown_vertical_preview()
 /* Runs on the UI thread (queued from the libobs video_reset signal). */
 static void ensure_owned_canvas_task(void *)
 {
-	if (g_module_alive.load() && g_owned_canvas) {
-		g_owned_canvas->ensure();
-		refresh_vertical_scenes();
-	}
+	if (g_module_alive.load())
+		ensure_owned_canvas_and_follow();
 }
 
 /* obs_reset_video() frees every canvas mix; rebuild ours after a main video
@@ -142,10 +170,13 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		shutdown_vertical_preview();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
 	    event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
-		if (g_owned_canvas) {
-			g_owned_canvas->ensure();
-			refresh_vertical_scenes();
-		}
+		ensure_owned_canvas_and_follow();
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
+		/* Program scene only (studio mode preview fires PREVIEW_SCENE_CHANGED, ignored). */
+		if (g_owned_canvas)
+			g_owned_canvas->follow_program_scene();
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
+		refresh_vertical_links();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
@@ -229,6 +260,7 @@ bool obs_module_load()
 	g_module_alive = true;
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
+	signal_handler_connect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
 
 	/* 6. Create and register the dock widget
 	 * obs_frontend_add_dock_by_id was added in OBS 30.0.
@@ -284,6 +316,7 @@ void obs_module_unload()
 	g_module_alive = false;
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
+	signal_handler_disconnect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
 	obs_frontend_remove_save_callback(on_save_load, nullptr);
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 

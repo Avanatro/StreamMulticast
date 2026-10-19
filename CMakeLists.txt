@@ -75,6 +75,7 @@ target_sources(
     src/core/CanvasResolve.cpp
     src/core/OwnedCanvasPolicy.cpp
     src/core/LayoutMath.cpp
+    src/core/SceneLink.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/LinkedStart.cpp
@@ -99,6 +100,7 @@ target_sources(
     src/ui/CanvasPreview.cpp
     src/ui/VerticalCanvasDock.cpp
     src/ui/VerticalSceneList.cpp
+    src/ui/VerticalSceneLink.cpp
     src/ui/ImportScenesDialog.cpp
     src/ui/VerticalItemList.cpp
     src/ui/TransformEditor.cpp

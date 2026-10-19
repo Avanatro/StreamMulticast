@@ -15,6 +15,7 @@ namespace smulti {
 class CanvasPreview;
 class OwnedCanvas;
 class VerticalItemList;
+class VerticalSceneLink;
 class VerticalSceneList;
 
 /**
@@ -38,6 +39,9 @@ public:
 	/** Rebuild the scene list (UI thread). Call after OwnedCanvas::ensure(). */
 	void refresh_scenes();
 
+	/** Rebuild the Links tab (main scene list changed). UI thread. */
+	void refresh_links();
+
 	/** Disconnect the scene list from the canvas signals; any thread. Call before the canvas is released. */
 	void detach_scene_signals();
 
@@ -45,6 +49,7 @@ private:
 	CanvasPreview *m_preview = nullptr;
 	VerticalSceneList *m_scenes = nullptr;
 	VerticalItemList *m_items = nullptr;
+	VerticalSceneLink *m_links = nullptr;
 	QTabWidget *m_tabs = nullptr;
 };
 

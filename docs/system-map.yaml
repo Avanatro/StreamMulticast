@@ -228,11 +228,43 @@ nodes:
             reference: "OBS runtime check: TikTok endpoint bound to the vertical canvas must encode 1080x1920 (not run in this session)"
             result: pending
     status: building
+  - id: scene-link
+    lane: core
+    goal: "The vertical canvas follows the main program scene through a pure name-based link."
+    owns: [link.scene-resolution]
+    needs: []
+    code:
+      - src/core/SceneLink.hpp
+      - src/core/SceneLink.cpp
+      - tests/test_scene_link.cpp
+    works_when:
+      - id: scene-link.resolve
+        behavior: "resolve_linked_scene(main, settings, vertical scenes): link off -> keep; explicit entry naming an existing scene -> it; explicit empty -> keep; explicit entry naming a missing scene -> default rule; default rule is vertical 'V <main>', then vertical '<main>', else keep. Renames migrate explicit keys and values; settings round-trip through obs_data (keys streammulticast_vertical_links, streammulticast_vertical_link_enabled)."
+        verification:
+          - kind: automated
+            reference: tests/test_scene_link.cpp
+            check: scene_link_default_prefers_v_prefix
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed before implementation (configure error, missing SceneLink.cpp), 10/10 passed after (TASK-23)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_scene_link.cpp
+            check: scene_link_explicit_missing_falls_back
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed before implementation (configure error, missing SceneLink.cpp), 10/10 passed after (TASK-23)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_scene_link.cpp
+            check: scene_link_disabled_never_switches
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed before implementation (configure error, missing SceneLink.cpp), 10/10 passed after (TASK-23)"
+            checked_at: 2026-10-19
+    status: building
   - id: owned-vertical-canvas
     lane: pipeline
     goal: "The plugin owns exactly one vertical canvas and endpoints on it stop cleanly when it goes away."
     owns: [canvas.owned-vertical-identity]
-    needs: [canvas-selection, endpoint-model]
+    needs: [canvas-selection, endpoint-model, scene-link]
     code:
       - src/core/OwnedCanvasPolicy.hpp
       - src/core/OwnedCanvasPolicy.cpp
@@ -296,6 +328,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: restart OBS, then change Settings > Video; the V canvas preview renders its scene both times (not run in this session)"
+            result: pending
+      - id: owned-vertical-canvas.scene-link-switch
+        behavior: "OwnedCanvas::follow_program_scene() reads the program scene (obs_frontend_get_current_scene), resolves the linked vertical scene with resolve_linked_scene and calls obs_canvas_set_channel(owned, 0, scene) on the owned canvas only, logging one line 'scene link: \"<main>\" -> \"<vertical>\"'; nothing happens when the link is off, nothing matches or the scene is already active. Triggered by OBS_FRONTEND_EVENT_SCENE_CHANGED (program scene; studio preview ignored) and after ensure() on collection/profile/video reset. Link settings are saved in the collection data by the existing save callback and migrated on scene rename (global source_rename signal). Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: switch the main scene between Gaming, Just Chatting, Dev/Coding, BRB; the vertical preview follows with the V scene; restart OBS and the links persist (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
             result: pending
       - id: owned-vertical-canvas.own-mix
         behavior: "The owned canvas has its own video mix (1080x1920, main fps) independent of whether Aitum Vertical is active; Aitum's canvas and the V scenes are never written."
@@ -469,8 +507,10 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math]
+    needs: [owned-vertical-canvas, layout-math, scene-link]
     code:
+      - src/ui/VerticalSceneLink.hpp
+      - src/ui/VerticalSceneLink.cpp
       - src/ui/VerticalCanvasDock.hpp
       - src/ui/VerticalCanvasDock.cpp
       - src/ui/CanvasPreview.hpp
@@ -508,12 +548,18 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: import V Just Chatting from Aitum Vertical; the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source, Aitum still lists its four V scenes with unchanged names (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-13)"
             result: pending
+      - id: ui-vertical-dock.scene-link
+        behavior: "The Links tab has a 'Follow main scene' checkbox and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings and applied at once via follow_program_scene(). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: switching the main scene switches the vertical preview; mapping a main scene to another V scene or (keep current) in the Links tab changes the behaviour; renaming a scene keeps its mapping (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
+            result: pending
     status: building
   - id: plugin-entry
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h

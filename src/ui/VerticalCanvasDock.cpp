@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "CanvasPreview.hpp"
 #include "VerticalItemList.hpp"
+#include "VerticalSceneLink.hpp"
 #include "VerticalSceneList.hpp"
 
 #include <QVBoxLayout>
@@ -32,6 +33,9 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, QWidget *parent) : Q
 	m_tabs->addTab(m_scenes, tr("Scenes"));
 	m_items = new VerticalItemList(canvas, m_tabs);
 	m_tabs->addTab(m_items, tr("Sources"));
+	m_links = new VerticalSceneLink(canvas, m_tabs);
+	m_tabs->addTab(m_links, tr("Links"));
+	m_tabs->setTabToolTip(0, tr("\"Set active\" is overridden by the next main scene change while links are on."));
 	layout->addWidget(m_tabs, 2);
 }
 
@@ -47,6 +51,13 @@ void VerticalCanvasDock::refresh_scenes()
 		m_scenes->refresh();
 	if (m_items)
 		m_items->refresh();
+	refresh_links();
+}
+
+void VerticalCanvasDock::refresh_links()
+{
+	if (m_links)
+		m_links->refresh();
 }
 
 void VerticalCanvasDock::detach_scene_signals()
@@ -63,6 +74,8 @@ void VerticalCanvasDock::shutdown_preview()
 		m_scenes->shutdown();
 	if (m_items)
 		m_items->shutdown();
+	if (m_links)
+		m_links->shutdown();
 	if (m_preview)
 		m_preview->shutdown();
 }

@@ -7,6 +7,8 @@ GPLv2 — see LICENSE for full text.
 
 #pragma once
 
+#include "../core/SceneLink.hpp"
+
 #include <mutex>
 #include <string>
 
@@ -64,6 +66,24 @@ public:
 	/** UUID of the owned canvas, empty when there is none. */
 	std::string uuid() const;
 
+	/* ---- linked scene switching (main program scene -> channel 0 of the owned canvas) ---- */
+
+	/** Copy of the link settings (mutex guarded, any thread). */
+	SceneLinkSettings link_settings() const;
+
+	/** Replace the link settings (any thread). Persisted by the next save callback. */
+	void set_link_settings(const SceneLinkSettings &settings);
+
+	/** A scene (main or vertical) was renamed: migrate explicit entries. Any thread. */
+	void on_scene_renamed(const std::string &old_name, const std::string &new_name);
+
+	/**
+	 * Switch channel 0 of the owned canvas to the scene linked to the current program scene.
+	 * UI thread only. Takes and releases every reference inside the call. No-op when the link is
+	 * disabled, nothing matches, the canvas is missing or the linked scene is already active.
+	 */
+	void follow_program_scene();
+
 private:
 	void remember(obs_canvas_t *canvas);
 	void ensure_active_scene(obs_canvas_t *canvas);
@@ -72,6 +92,7 @@ private:
 	obs_weak_canvas_t *m_weak = nullptr;
 	std::string m_uuid;
 	std::string m_scene_name; ///< scene wanted on channel 0 (loaded from or saved to the collection)
+	SceneLinkSettings m_links; ///< loaded from / saved to the collection (guarded by m_mutex)
 };
 
 } // namespace smulti
