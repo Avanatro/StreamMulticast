@@ -408,7 +408,7 @@ nodes:
     lane: ui
     goal: "User edits one endpoint with import helpers and validation."
     owns: [ui.endpoint-form]
-    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation]
+    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation, canvas-selection]
     code:
       - src/ui/EndpointDialog.hpp
       - src/ui/EndpointDialog.cpp
@@ -418,6 +418,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: save an endpoint with the same server and key as another one; a warning must appear and Yes must still save (not run in this session)"
+            result: pending
+      - id: ui-endpoint-dialog.canvas-selector
+        behavior: "The dialog offers Main canvas, then every canvas from snapshot_canvases() with the plugin-owned one first, and saves the chosen uuid and name; a stored canvas that no longer exists stays selected as '<name> (missing)'. The dialog never writes a legacy orientation (always SourceMatch). The TikTok bridge import selects StreamMulticast Vertical."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: the dialog lists Main, StreamMulticast Vertical and Aitum Vertical; saving keeps uuid and name (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-8)"
             result: pending
     status: building
   - id: ui-config-tab

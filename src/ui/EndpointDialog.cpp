@@ -12,6 +12,8 @@ GPLv2 — see LICENSE for full text.
 #include "../core/EndpointValidation.hpp"
 #include "../core/MainServiceTarget.hpp"
 #include "../core/EndpointRegistry.hpp"
+#include "../core/CanvasMigration.hpp"
+#include "../pipeline/CanvasLookup.hpp"
 
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -21,8 +23,6 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
 #include <QtCore/QFileInfo>
-#include <QtGui/QStandardItemModel>
-#include <QtGui/QStandardItem>
 
 namespace smulti {
 
@@ -131,21 +131,10 @@ void EndpointDialog::setup_ui()
 		m_audio_cb->addItem(QString("%1 kbps").arg(rate), rate);
 	form->addRow(tr("Audio Bitrate:"), m_audio_cb);
 
-	/* Output Orientation (v1.0.5) */
-	m_orientation_cb = new QComboBox(this);
-	m_orientation_cb->addItem(tr("Source (match OBS canvas)"),
-	                          static_cast<int>(OutputOrientation::SourceMatch));
-	m_orientation_cb->addItem(tr("Vertical 1080×1920 — Letterbox (TikTok / Shorts / Reels)"),
-	                          static_cast<int>(OutputOrientation::Vertical1080x1920Letterbox));
-	/* Center-crop reserved for v1.1 — listed disabled-style as a hint */
-	m_orientation_cb->addItem(tr("Vertical 1080×1920 — Center-Crop  (v1.1, not yet available)"),
-	                          static_cast<int>(OutputOrientation::Vertical1080x1920CenterCrop));
-	/* Disable the v1.1 entry */
-	auto *model = qobject_cast<QStandardItemModel *>(m_orientation_cb->model());
-	if (model && model->item(2)) {
-		model->item(2)->setFlags(model->item(2)->flags() & ~Qt::ItemIsEnabled);
-	}
-	form->addRow(tr("Output Orientation:"), m_orientation_cb);
+	/* Video canvas: empty ref = OBS main canvas, otherwise uuid + name of a canvas */
+	m_canvas_cb = new QComboBox(this);
+	populate_canvas_combo();
+	form->addRow(tr("Video canvas:"), m_canvas_cb);
 
 	/* Linked to main stream */
 	m_linked_cb = new QCheckBox(tr("Start/stop with OBS main stream"), this);
@@ -229,13 +218,8 @@ void EndpointDialog::populate_from_endpoint()
 		}
 	}
 
-	/* Orientation combo */
-	for (int i = 0; i < m_orientation_cb->count(); ++i) {
-		if (m_orientation_cb->itemData(i).toInt() == static_cast<int>(m_endpoint.orientation)) {
-			m_orientation_cb->setCurrentIndex(i);
-			break;
-		}
-	}
+	/* Canvas combo */
+	select_canvas(m_endpoint.canvas_uuid, m_endpoint.canvas_name);
 
 	/* Try to match server URL to a template */
 	m_template_cb->blockSignals(true);
@@ -247,6 +231,104 @@ void EndpointDialog::populate_from_endpoint()
 		}
 	}
 	m_template_cb->blockSignals(false);
+}
+
+/* -----------------------------------------------------------------------
+ * Canvas selector
+ * ----------------------------------------------------------------------- */
+namespace {
+constexpr int kCanvasUuidRole = Qt::UserRole + 1;
+constexpr int kCanvasNameRole = Qt::UserRole + 2;
+}
+
+void EndpointDialog::populate_canvas_combo()
+{
+	m_canvas_cb->clear();
+
+	/* Main canvas: both refs empty */
+	m_canvas_cb->addItem(tr("Main canvas"));
+	m_canvas_cb->setItemData(0, QString(), kCanvasUuidRole);
+	m_canvas_cb->setItemData(0, QString(), kCanvasNameRole);
+
+	m_canvases = snapshot_canvases();
+
+	auto add_canvas = [this](const CanvasInfo &c) {
+		const QString name = QString::fromStdString(c.name);
+		m_canvas_cb->addItem(name);
+		const int row = m_canvas_cb->count() - 1;
+		m_canvas_cb->setItemData(row, QString::fromStdString(c.uuid), kCanvasUuidRole);
+		m_canvas_cb->setItemData(row, name, kCanvasNameRole);
+	};
+
+	/* Owned canvas first after Main, then the others in enumeration order */
+	for (const CanvasInfo &c : m_canvases)
+		if (!c.is_main && c.name == kOwnedVerticalCanvasName)
+			add_canvas(c);
+	for (const CanvasInfo &c : m_canvases)
+		if (!c.is_main && c.name != kOwnedVerticalCanvasName)
+			add_canvas(c);
+}
+
+void EndpointDialog::select_canvas(const std::string &uuid, const std::string &name)
+{
+	if (uuid.empty() && name.empty()) {
+		m_canvas_cb->setCurrentIndex(0);
+		return;
+	}
+
+	/* A stored ref that points at the main canvas selects "Main canvas" */
+	for (const CanvasInfo &c : m_canvases) {
+		if (c.is_main && ((!uuid.empty() && c.uuid == uuid) ||
+		                  (uuid.empty() && !name.empty() && c.name == name))) {
+			m_canvas_cb->setCurrentIndex(0);
+			return;
+		}
+	}
+
+	const QString q_uuid = QString::fromStdString(uuid);
+	const QString q_name = QString::fromStdString(name);
+
+	/* uuid first, then name (same order as resolve_canvas) */
+	int found = -1;
+	if (!q_uuid.isEmpty()) {
+		for (int i = 1; i < m_canvas_cb->count(); ++i) {
+			if (m_canvas_cb->itemData(i, kCanvasUuidRole).toString() == q_uuid &&
+			    !m_canvas_cb->itemData(i, kCanvasUuidRole).toString().isEmpty()) {
+				found = i;
+				break;
+			}
+		}
+	}
+	if (found < 0 && !q_name.isEmpty()) {
+		for (int i = 1; i < m_canvas_cb->count(); ++i) {
+			if (m_canvas_cb->itemData(i, kCanvasNameRole).toString() == q_name &&
+			    !m_canvas_cb->itemData(i, kCanvasUuidRole).toString().isEmpty()) {
+				found = i;
+				break;
+			}
+		}
+	}
+
+	if (found < 0) {
+		/* Reuse an earlier "(missing)" entry for the same ref */
+		for (int i = 1; i < m_canvas_cb->count(); ++i) {
+			if (m_canvas_cb->itemData(i, kCanvasUuidRole).toString() == q_uuid &&
+			    m_canvas_cb->itemData(i, kCanvasNameRole).toString() == q_name) {
+				found = i;
+				break;
+			}
+		}
+	}
+
+	if (found < 0) {
+		/* Canvas is not in the current list: keep the stored ref selectable */
+		const QString shown = q_name.isEmpty() ? q_uuid : q_name;
+		m_canvas_cb->addItem(tr("%1 (missing)").arg(shown));
+		found = m_canvas_cb->count() - 1;
+		m_canvas_cb->setItemData(found, q_uuid, kCanvasUuidRole);
+		m_canvas_cb->setItemData(found, q_name, kCanvasNameRole);
+	}
+	m_canvas_cb->setCurrentIndex(found);
 }
 
 /* -----------------------------------------------------------------------
@@ -262,8 +344,10 @@ Endpoint EndpointDialog::collect_from_form() const
 	ep.video_bitrate_kbps   = m_bitrate_spin->value();
 	ep.keyframe_interval_sec = m_keyint_spin->value();
 	ep.audio_bitrate_kbps   = m_audio_cb->currentData().toInt();
-	ep.orientation          = static_cast<OutputOrientation>(
-	                              m_orientation_cb->currentData().toInt());
+	/* Framing is chosen by the canvas now; never write a legacy orientation back. */
+	ep.orientation          = OutputOrientation::SourceMatch;
+	ep.canvas_uuid          = m_canvas_cb->currentData(kCanvasUuidRole).toString().toStdString();
+	ep.canvas_name          = m_canvas_cb->currentData(kCanvasNameRole).toString().toStdString();
 	ep.linked_to_main       = m_linked_cb->isChecked();
 	ep.encoder_backend      = static_cast<EncoderBackend>(
 	                              m_backend_cb->currentData().toInt());
@@ -376,13 +460,7 @@ void EndpointDialog::on_import_tiktok_bridge()
 		}
 	}
 
-	for (int i = 0; i < m_orientation_cb->count(); ++i) {
-		if (m_orientation_cb->itemData(i).toInt() ==
-		    static_cast<int>(OutputOrientation::Vertical1080x1920Letterbox)) {
-			m_orientation_cb->setCurrentIndex(i);
-			break;
-		}
-	}
+	select_canvas(std::string(), kOwnedVerticalCanvasName);
 
 	m_bitrate_spin->setValue(2500);
 	for (int i = 0; i < m_audio_cb->count(); ++i) {

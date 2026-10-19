@@ -10,6 +10,7 @@ GPLv2 — see LICENSE for full text.
 #include "../core/Endpoint.hpp"
 #include "../core/EndpointRegistry.hpp"
 #include "../pipeline/EncoderFactory.hpp"
+#include "../core/CanvasResolve.hpp"
 
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QLineEdit>
@@ -28,6 +29,7 @@ namespace smulti {
  *   - Name
  *   - Server URL (with pre-defined template dropdown)
  *   - Stream Key (password field with Show/Hide toggle)
+ *   - Video canvas (Main canvas or any OBS canvas)
  *   - Encoder Backend (auto-detected available backends)
  *   - Video Bitrate (500–25000 kbps spinner)
  *   - Keyframe Interval (1–10 s spinner)
@@ -66,6 +68,9 @@ private:
 	void setup_ui();
 	void populate_from_endpoint();
 	Endpoint collect_from_form() const;
+	void populate_canvas_combo();
+	/** Select the entry for this ref; a ref missing from the list gets a "(missing)" entry. */
+	void select_canvas(const std::string &uuid, const std::string &name);
 
 	Endpoint           m_endpoint; ///< original (input)
 	Endpoint           m_result;   ///< edited (output)
@@ -81,7 +86,7 @@ private:
 	QSpinBox    *m_bitrate_spin {nullptr};
 	QSpinBox    *m_keyint_spin  {nullptr};
 	QComboBox   *m_audio_cb     {nullptr};
-	QComboBox   *m_orientation_cb {nullptr};   ///< v1.0.5 — Source / Vertical Letterbox
+	QComboBox   *m_canvas_cb    {nullptr};   ///< Video canvas: Main (empty ref) or a canvas uuid + name
 	QCheckBox   *m_linked_cb    {nullptr};
 	QPushButton *m_import_btn   {nullptr};   ///< v1.0.6 — Import from active OBS profile
 	QPushButton *m_tiktok_bridge_btn {nullptr}; ///< v1.0.7 — Import local TikTok Bridge JSON
@@ -92,6 +97,9 @@ private:
 
 	/* Available backends (auto-detected) */
 	std::vector<EncoderBackend> m_available_backends;
+
+	/* Canvas snapshot taken when the dialog was built */
+	std::vector<CanvasInfo> m_canvases;
 
 	/* Server URL templates */
 	struct ServerTemplate {
