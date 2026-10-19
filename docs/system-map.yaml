@@ -523,3 +523,47 @@ nodes:
         behavior: "unknown - to be mapped. Headers are pinned to 31.1.1, field use is OBS 32.1."
         verification: []
     status: unknown
+  - id: layout-math
+    lane: foundation
+    goal: "Pure transform math places a source on a canvas: fit, fill via symmetric crop, and crop clamping."
+    owns: [layout.transform-math]
+    needs: []
+    code:
+      - src/core/LayoutMath.hpp
+      - src/core/LayoutMath.cpp
+      - tests/test_layout_math.cpp
+    works_when:
+      - id: layout-math.fit-fill-crop
+        behavior: "fit scales uniformly by min(cw/sw, ch/sh) and centres without crop; fill scales by max(...) at pos 0,0 with a symmetric crop so the visible part equals the canvas; clamp_crop keeps every value >= 0 with left+right <= w-1 and top+bottom <= h-1; a zero-sized source yields the identity transform."
+        verification:
+          - kind: automated
+            reference: tests/test_layout_math.cpp
+            check: layout_fit_landscape_into_portrait
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_layout_math.cpp
+            check: layout_fill_landscape_into_portrait_center_crops
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_layout_math.cpp
+            check: layout_fit_same_aspect_is_exact
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_layout_math.cpp
+            check: layout_clamp_crop_never_exceeds_source
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_layout_math.cpp
+            check: layout_zero_source_size_is_identity
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+    status: building
