@@ -587,7 +587,7 @@ void CanvasPreview::contextMenuEvent(QContextMenuEvent *event)
 	}
 	m_selection.set(snap.scene_uuid, hit);
 	event->accept();
-	m_context_handler(event->globalPos(), hit);
+	m_context_handler(event->globalPos(), hit, snap.scene_uuid);
 }
 
 void CanvasPreview::mousePressEvent(QMouseEvent *event)

@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <obs-frontend-api.h>
 
 #include <QtCore/QMetaObject>
+#include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtGui/QAction>
 #include <QtWidgets/QHBoxLayout>
@@ -122,22 +123,15 @@ bool name_taken(const std::string &name)
 }
 
 struct UsedOutside {
-	std::string owned_canvas_uuid;
 	std::string source_name;
 	bool found = false;
 };
 
-/* A scene outside the owned canvas that contains the source (by name, recursively). */
+/* A main-canvas scene that contains the source (by name, recursively). obs_enum_scenes covers the main
+ * canvas only (OBS 31), so the plugin's own canvas never shows up here. */
 bool scene_uses_source(void *param, obs_source_t *scene_source)
 {
 	auto *u = static_cast<UsedOutside *>(param);
-	obs_canvas_t *c = obs_source_get_canvas(scene_source); // strong ref or null
-	const char *uuid = c ? obs_canvas_get_uuid(c) : nullptr;
-	const bool owned = uuid && u->owned_canvas_uuid == uuid;
-	if (c)
-		obs_canvas_release(c);
-	if (owned)
-		return true;
 	obs_scene_t *scene = obs_scene_from_source(scene_source);
 	if (scene && obs_scene_find_source_recursive(scene, u->source_name.c_str())) {
 		u->found = true;
@@ -252,15 +246,16 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selec
 	connect(m_remove_btn, &QPushButton::clicked, this, &VerticalItemList::on_remove);
 	connect(m_up_btn, &QPushButton::clicked, this, &VerticalItemList::on_up);
 	connect(m_down_btn, &QPushButton::clicked, this, &VerticalItemList::on_down);
-	connect(m_props_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Properties, selected_id()); });
-	connect(m_filters_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Filters, selected_id()); });
-	connect(m_rename_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Rename, selected_id()); });
+	connect(m_props_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Properties, m_list_scene_uuid, selected_id()); });
+	connect(m_filters_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Filters, m_list_scene_uuid, selected_id()); });
+	connect(m_rename_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Rename, m_list_scene_uuid, selected_id()); });
 	m_list->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(m_list, &QListWidget::customContextMenuRequested, this,
 		[this](const QPoint &pos) { on_list_context_menu(pos); });
 	connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *row) {
 		if (row)
-			run_item_action(ItemAction::Properties, static_cast<int64_t>(row->data(kIdRole).toLongLong()));
+			run_item_action(ItemAction::Properties, m_list_scene_uuid,
+					static_cast<int64_t>(row->data(kIdRole).toLongLong()));
 	});
 	connect(m_list, &QListWidget::currentRowChanged, this, [this] { on_selection_changed(); });
 	connect(m_list, &QListWidget::itemChanged, this, &VerticalItemList::on_item_changed);
@@ -694,8 +689,9 @@ void VerticalItemList::on_add_existing()
 	choices.sort(Qt::CaseInsensitive);
 
 	bool ok = false;
+	QPointer<VerticalItemList> self(this);
 	const QString picked = QInputDialog::getItem(this, tr("Add source"), tr("Existing source:"), choices, 0, false, &ok);
-	if (m_shutdown.load() || !ok || picked.isEmpty())
+	if (!self || m_shutdown.load() || !ok || picked.isEmpty())
 		return;
 
 	QString error;
@@ -808,8 +804,9 @@ void VerticalItemList::on_add_new()
 	for (const NewType &t : types)
 		labels << t.label;
 	bool ok = false;
+	QPointer<VerticalItemList> self(this);
 	const QString picked = QInputDialog::getItem(this, tr("New source"), tr("Source type:"), labels, 0, false, &ok);
-	if (m_shutdown.load() || !ok || picked.isEmpty())
+	if (!self || m_shutdown.load() || !ok || picked.isEmpty())
 		return;
 	const int type_index = labels.indexOf(picked);
 	if (type_index < 0)
@@ -822,12 +819,12 @@ void VerticalItemList::on_add_new()
 	if (dn && *dn)
 		display = QString::fromUtf8(dn);
 	std::string name = item_actions::unique_name(display.toStdString(), all_source_names());
-	QString message = tr("Name of the new source (it is created as a normal OBS source and also appears in "
-			     "the main source list):");
+	QString message = tr("Name of the new source (it is created as a normal, global OBS source and added to "
+			     "the vertical scene only):");
 	for (;;) {
 		const QString typed = QInputDialog::getText(this, tr("New source"), message, QLineEdit::Normal,
 							    QString::fromStdString(name), &ok);
-		if (m_shutdown.load() || !ok)
+		if (!self || m_shutdown.load() || !ok)
 			return;
 		name = typed.trimmed().toStdString();
 		if (name.empty()) {
@@ -852,6 +849,9 @@ void VerticalItemList::on_add_new()
 			error = tr("OBS could not create a source of this type.");
 			return;
 		}
+		/* Same default as OBS's own Add menu: sources that ask for it start monitored. */
+		if (obs_source_get_output_flags(source) & OBS_SOURCE_MONITOR_BY_DEFAULT)
+			obs_source_set_monitoring_type(source, OBS_MONITORING_TYPE_MONITOR_ONLY);
 		obs_sceneitem_t *item = obs_scene_add(scene, source); // not ref'd for the caller
 		if (item)
 			new_id = obs_sceneitem_get_id(item);
@@ -866,7 +866,7 @@ void VerticalItemList::on_add_new()
 	refresh();
 	set_status(error);
 	if (new_id != 0)
-		run_item_action(ItemAction::Properties, new_id);
+		run_item_action(ItemAction::Properties, list_scene, new_id);
 }
 
 /* ---- item actions ---------------------------------------------------------- */
@@ -877,14 +877,14 @@ void VerticalItemList::on_list_context_menu(const QPoint &list_pos)
 	if (!row)
 		return;
 	m_list->setCurrentItem(row); // writes the shared selection
-	show_item_menu(m_list->viewport()->mapToGlobal(list_pos), static_cast<int64_t>(row->data(kIdRole).toLongLong()));
+	show_item_menu(m_list->viewport()->mapToGlobal(list_pos), static_cast<int64_t>(row->data(kIdRole).toLongLong()),
+		       m_list_scene_uuid);
 }
 
-void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id)
+void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id, const std::string &scene_uuid)
 {
-	if (m_shutdown.load() || item_id == 0)
+	if (m_shutdown.load() || item_id == 0 || scene_uuid.empty())
 		return;
-	const std::string scene_uuid = m_list_scene_uuid;
 
 	bool locked = false;
 	bool interactive = false;
@@ -918,22 +918,26 @@ void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id)
 	transform->setEnabled(!locked);
 
 	/* The menu is closed before anything runs: the action opens dialogs and resolves the item afresh. */
+	QPointer<VerticalItemList> self(this);
 	QAction *chosen = menu.exec(global_pos);
-	if (m_shutdown.load() || !chosen)
+	if (!self || m_shutdown.load() || !chosen)
 		return;
+	/* The scene uuid was captured before the menu's event loop (a refresh may have switched scenes since):
+	 * run_item_action refuses the access when the active scene is no longer that one. */
 	for (const auto &e : entries) {
 		if (e.first == chosen) {
-			run_item_action(e.second, item_id);
+			run_item_action(e.second, scene_uuid, item_id);
 			return;
 		}
 	}
 }
 
-void VerticalItemList::run_item_action(ItemAction action, int64_t id)
+void VerticalItemList::run_item_action(ItemAction action, const std::string &scene_uuid, int64_t id)
 {
-	if (m_shutdown.load() || id == 0)
+	if (m_shutdown.load() || id == 0 || scene_uuid.empty())
 		return;
-	const std::string scene_uuid = m_list_scene_uuid; // ids belong to this scene only
+	/* ids belong to scene_uuid only: with_item / apply_transform / rename_item refuse (and say so in the
+	 * status line) when the active scene is another one, so nothing is done to a same-id item elsewhere. */
 	QString error;
 
 	switch (action) {
@@ -972,6 +976,8 @@ void VerticalItemList::run_item_action(ItemAction action, int64_t id)
 		});
 		if (!ok)
 			error = tr("The item no longer exists or the active scene changed.");
+		else
+			notify_change(); // item_locked is not a connected signal: redraw the preview handles now
 		break;
 	}
 	case ItemAction::Fit:
@@ -1043,13 +1049,11 @@ void VerticalItemList::rename_item(const std::string &scene_uuid, int64_t id)
 {
 	std::string old_name;
 	bool shared = false;
-	const std::string owned_uuid = m_canvas.uuid();
 	const bool exists = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
 		obs_source_t *src = obs_sceneitem_get_source(item);
 		const char *n = src ? obs_source_get_name(src) : nullptr;
 		old_name = n ? n : "";
 		UsedOutside u;
-		u.owned_canvas_uuid = owned_uuid;
 		u.source_name = old_name;
 		obs_enum_scenes(scene_uses_source, &u);
 		shared = u.found;
@@ -1066,9 +1070,10 @@ void VerticalItemList::rename_item(const std::string &scene_uuid, int64_t id)
 	else
 		text += tr("\n\nSources are global in OBS: the new name shows everywhere the source is used.");
 	bool ok = false;
+	QPointer<VerticalItemList> self(this);
 	const QString typed = QInputDialog::getText(this, tr("Rename source"), text, QLineEdit::Normal,
 						    QString::fromStdString(old_name), &ok);
-	if (m_shutdown.load() || !ok)
+	if (!self || m_shutdown.load() || !ok)
 		return;
 	const std::string name = typed.trimmed().toStdString();
 	if (name.empty()) {

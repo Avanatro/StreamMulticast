@@ -76,8 +76,8 @@ public:
 	/** Scene access used for hit tests and writes (UI thread). Without it the preview is view-only. */
 	void set_scene_access(PreviewSceneAccess access) { m_access = std::move(access); }
 
-	/** Right click on an item (already selected): fn(global position, item id). UI thread. */
-	void set_context_menu_handler(std::function<void(const QPoint &, int64_t)> handler)
+	/** Right click on an item (already selected): fn(global position, item id, scene uuid). UI thread. */
+	void set_context_menu_handler(std::function<void(const QPoint &, int64_t, const std::string &)> handler)
 	{
 		m_context_handler = std::move(handler);
 	}
@@ -179,7 +179,7 @@ private:
 	VerticalSelection &m_selection;
 	PreviewSceneAccess m_access;
 	std::function<void()> m_edit_listener;
-	std::function<void(const QPoint &, int64_t)> m_context_handler;
+	std::function<void(const QPoint &, int64_t, const std::string &)> m_context_handler;
 
 	std::mutex m_display_mutex; ///< guards m_display (flush may come from a libobs signal thread)
 	obs_display_t *m_display = nullptr;
