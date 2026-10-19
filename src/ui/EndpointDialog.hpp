@@ -20,6 +20,9 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLabel>
 
+class QGroupBox;
+class QVBoxLayout;
+
 namespace smulti {
 
 /**
@@ -94,6 +97,33 @@ private:
 	QPushButton *m_save_btn     {nullptr};
 	QPushButton *m_cancel_btn   {nullptr};
 	QLabel      *m_status_label {nullptr};
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/* Key source "Streamlabs TikTok" (optional build flag): the server URL and key
+	 * are fetched at go-live; the token is imported once from the generator's
+	 * config.json into the DPAPI vault and never shown. */
+	void setup_streamlabs_ui(QVBoxLayout *outer);
+	bool streamlabs_selected() const;
+	void apply_key_source();
+	void refresh_streamlabs_status();
+	void on_streamlabs_import();
+	void on_streamlabs_disconnect();
+	void on_streamlabs_search();
+
+	QComboBox   *m_key_source_cb            {nullptr};
+	QGroupBox   *m_streamlabs_box           {nullptr};
+	QLabel      *m_streamlabs_status        {nullptr};
+	QPushButton *m_streamlabs_import_btn    {nullptr};
+	QPushButton *m_streamlabs_disconnect_btn{nullptr};
+	QLineEdit   *m_streamlabs_title_edit    {nullptr};
+	QLineEdit   *m_streamlabs_search_edit   {nullptr};
+	QPushButton *m_streamlabs_search_btn    {nullptr};
+	QComboBox   *m_streamlabs_category_cb   {nullptr};
+	/* Manual server/key kept while "Streamlabs TikTok" is selected, saved unchanged. */
+	QString      m_manual_server;
+	QString      m_manual_key;
+	bool         m_streamlabs_shown         {false};
+#endif
 
 	/* Available backends (auto-detected) */
 	std::vector<EncoderBackend> m_available_backends;

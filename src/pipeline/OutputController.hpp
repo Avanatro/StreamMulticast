@@ -9,6 +9,9 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/Endpoint.hpp"
 #include "EncoderFactory.hpp"
+#ifdef SMULTI_STREAMLABS_TIKTOK
+#include "../core/StreamlabsTikTok.hpp"
+#endif
 
 #include <string>
 #include <atomic>
@@ -167,6 +170,15 @@ public:
 	/** Last error string (empty if no error) */
 	std::string last_error() const;
 
+	/**
+	 * True while a key provider is involved: a pre-start key fetch is pending
+	 * or a provider session (Streamlabs TikTok) is open.  Such a controller is
+	 * stopped together with the main stream even when it is not Live, so the
+	 * fetch is aborted or the session is ended.  Always false in builds without
+	 * SMULTI_STREAMLABS_TIKTOK.
+	 */
+	bool has_provider_work() const;
+
 	/** Endpoint ID this controller manages */
 	const std::string &endpoint_id() const { return m_endpoint.id; }
 
@@ -222,6 +234,25 @@ public:
 
 private:
 	void set_state(OutputState s);
+
+	/**
+	 * The original start() body after the Idle -> Starting transition:
+	 * resolve canvas, create output and encoders, obs_output_start.
+	 */
+	bool start_output();
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/**
+	 * Key provider path (UI thread).  start() stays non-blocking: it asks the
+	 * StreamlabsClient for a session and returns; the completion callback
+	 * (UI thread) either starts the output with the fetched target or fails
+	 * the endpoint.  A stop() in between bumps m_key_fetch_gen, so a late
+	 * result is not adopted and the client ends that session again.
+	 */
+	bool request_provider_target();
+	bool on_provider_target(uint64_t gen, const StreamlabsResult &r);
+	void end_provider_session();
+#endif
 
 	/** OBS signal callbacks — registered on the output */
 	static void on_start_signal(void *data, calldata_t *cd);
@@ -319,6 +350,16 @@ private:
 
 	/** Guards shutdown_blocking() idempotency — set once, never reset. */
 	std::atomic<bool>   m_shutdown_done {false};
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/* Key provider session, guarded by m_mutex.  The fetched server/key live
+	 * only here (never in m_endpoint, never persisted). */
+	uint64_t            m_key_fetch_gen      {0};
+	bool                m_key_fetch_pending  {false};
+	bool                m_provider_session   {false};
+	std::string         m_session_server;
+	std::string         m_session_key;
+#endif
 
 	static constexpr int REATTACH_WAIT_TIMEOUT_MS = 2000;
 	static constexpr int REATTACH_POLL_MS         = 20;

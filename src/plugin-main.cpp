@@ -30,6 +30,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/OutputController.hpp"
 #include "pipeline/OwnedCanvas.hpp"
 #include "pipeline/VerticalRecorder.hpp"
+#ifdef SMULTI_STREAMLABS_TIKTOK
+#include "pipeline/StreamlabsClient.hpp"
+#endif
 #include "ui/MultistreamDock.hpp"
 #include "ui/VerticalCanvasDock.hpp"
 
@@ -56,6 +59,11 @@ static std::unique_ptr<smulti::VerticalRecorder> g_vertical_recorder; /* shut do
 /* UI-thread context for calls posted from libobs threads (vertical recorder "stop" signal, hotkey).
  * Deleted in unload only after every poster is disconnected; deleting it drops pending posts. */
 static QObject *                                 g_ui_context = nullptr;
+#ifdef SMULTI_STREAMLABS_TIKTOK
+/* Optional Streamlabs TikTok key provider. Posts results through post_to_ui, so it is shut down
+ * (worker joined, open session ended) before g_ui_context is deleted. */
+static std::unique_ptr<smulti::StreamlabsClient> g_streamlabs;
+#endif
 static obs_hotkey_id                             g_record_hotkey = OBS_INVALID_HOTKEY_ID;
 static bool                                      g_record_settings_saved = false;
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
@@ -72,6 +80,27 @@ static void post_to_ui(std::function<void()> fn)
 	QObject *context = g_ui_context;
 	if (context)
 		QMetaObject::invokeMethod(context, std::move(fn), Qt::QueuedConnection);
+}
+
+/* Streamlabs TikTok: end every open session synchronously (5 s bound each). Idempotent. UI thread. */
+static void shutdown_streamlabs()
+{
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	if (g_streamlabs)
+		g_streamlabs->shutdown_and_end_blocking();
+#endif
+}
+
+/* Stop endpoints that hold a key provider session or a pending key fetch (Streamlabs TikTok). */
+static void stop_provider_endpoints()
+{
+	if (!g_registry)
+		return;
+	for (auto &ep : g_registry->all()) {
+		auto ctrl = g_registry->controller_for(ep.id);
+		if (ctrl && ctrl->has_provider_work())
+			ctrl->stop();
+	}
 }
 
 /* Forced, non-blocking stop of the vertical recording (canvas going away, shutdown). UI thread. */
@@ -322,6 +351,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		if (g_vertical_recorder)
 			g_vertical_recorder->on_main_recording_stopping();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		stop_provider_endpoints(); // ends a Streamlabs TikTok session (TASK-28)
 		stop_vertical_recording("scene collection changing"); // before the owned canvas reference goes
 		cancel_pending_follow();
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
@@ -351,7 +381,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		for (auto &ep : g_registry->all()) {
 			if (ep.linked_to_main) {
 				auto ctrl = g_registry->controller_for(ep.id);
-				if (ctrl && ctrl->is_running())
+				/* has_provider_work: a pending key fetch or open provider session is ended too */
+				if (ctrl && (ctrl->is_running() || ctrl->has_provider_work()))
 					ctrl->stop();
 			}
 		}
@@ -361,9 +392,10 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		flush_config();
 		for (auto &ep : g_registry->all()) {
 			auto ctrl = g_registry->controller_for(ep.id);
-			if (ctrl && ctrl->is_running())
+			if (ctrl && (ctrl->is_running() || ctrl->has_provider_work()))
 				ctrl->stop();
 		}
+		shutdown_streamlabs(); // after the stops above queued their session ends
 		stop_vertical_recording("OBS exit");
 		cancel_pending_follow();
 		disconnect_transition_start();
@@ -400,6 +432,10 @@ bool obs_module_load()
 
 	/* 3c. Vertical recording of the owned canvas; its teardown jobs run on the reaper. */
 	g_ui_context = new QObject(); // UI thread
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	g_streamlabs = std::make_unique<smulti::StreamlabsClient>(post_to_ui);
+	smulti::set_streamlabs_client(g_streamlabs.get());
+#endif
 	g_vertical_recorder = std::make_unique<smulti::VerticalRecorder>(*g_owned_canvas, *g_reaper, post_to_ui);
 	g_record_hotkey = obs_hotkey_register_frontend("StreamMulticast.VerticalRecord",
 						       "StreamMulticast: Start/Stop vertical recording", on_record_hotkey,
@@ -518,6 +554,13 @@ void obs_module_unload()
 	g_record_hotkey = OBS_INVALID_HOTKEY_ID;
 	if (g_vertical_recorder)
 		g_vertical_recorder->shutdown();
+	/* Streamlabs: the stops above queued their session ends; run them now, join the worker,
+	 * then no thread can post anymore. Controllers see a null client from here on. */
+	shutdown_streamlabs();
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	smulti::set_streamlabs_client(nullptr);
+	g_streamlabs.reset();
+#endif
 	delete g_ui_context;
 	g_ui_context = nullptr;
 

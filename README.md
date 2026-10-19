@@ -126,6 +126,19 @@ A minimal Windows companion script lives in `tools/tiktok-bridge/`. It can write
 the handoff file from prompts, clipboard content, or explicit command-line
 values, and can optionally start a user-chosen external helper.
 
+### TikTok via Streamlabs (optional build flag)
+
+> **Unofficial and off by default.** This uses an unofficial Streamlabs API (it identifies itself as Streamlabs Desktop). It may stop working at any time and may violate the Streamlabs or TikTok terms of service. Use it at your own risk. Release builds do not contain it.
+
+Build with `-DSMULTI_STREAMLABS_TIKTOK=ON` to let a TikTok endpoint fetch its RTMP URL and stream key from Streamlabs every time it goes live, instead of pasting a fresh key by hand:
+
+1. Log in once with the separate *StreamLabs TikTok Stream Key Generator*; it writes a `config.json` with a `token` field.
+2. In the endpoint dialog set **Key source** to **Streamlabs TikTok** and click **Import token from generator config…**. Only the token is read; it is stored encrypted for your Windows user (DPAPI) in `streamlabs_tiktok.bin` in the plugin config folder, never in `config.json`, never logged and never shown. **Disconnect** deletes it.
+3. The status line shows `Connected as @user — can go live: yes/no`. Set a title and search a category (or keep *Other*).
+4. When the endpoint starts, the plugin starts a Streamlabs TikTok session, streams to the URL and key it returns (kept in memory for this session only) and ends the session when the endpoint stops, the main stream stops, the scene collection changes or OBS exits. A failed fetch only stops that endpoint and shows the error in the Health tab. A session left open by a crash is ended before the next start (only its id is kept, in `streamlabs_tiktok_session.txt`).
+
+With the flag off (default) the plugin builds and behaves exactly as before; the TikTok Bridge import above stays the supported path.
+
 ---
 
 ## Build from source (contributors only)

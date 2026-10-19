@@ -1,0 +1,7 @@
+{
+    "title": "Fixture title",
+    "game": "Other",
+    "audience_type": "0",
+    "token": "FAKE-TOKEN-not-a-real-one",
+    "suppress_donation_reminder": true
+}

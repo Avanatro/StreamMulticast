@@ -68,6 +68,15 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R canvas_, local run 2026-10-19; failed before implementation (build error, missing CanvasMigration.hpp), passed after (TASK-3)"
             checked_at: 2026-10-19
+      - id: endpoint-model.key-provider
+        behavior: "Endpoint carries key_provider ('' = manual, 'streamlabs_tiktok'), streamlabs_title, streamlabs_category_id and streamlabs_category_name, serialized under the same names; a missing or unknown key_provider loads as ''. Config schema stays 2. The key fetched at go-live is never stored in these fields."
+        verification:
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_endpoint_key_provider_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
     status: building
   - id: config-persistence
     lane: foundation
@@ -572,7 +581,7 @@ nodes:
     lane: pipeline
     goal: "One endpoint streams, reconnects with backoff and stops without blocking the UI."
     owns: [output.state-machine, output.reconnect-policy, output.libobs-objects]
-    needs: [encoder-factory, canvas-selection, controller-reaper]
+    needs: [encoder-factory, canvas-selection, controller-reaper, streamlabs-client]
     code:
       - src/pipeline/OutputController.hpp
       - src/pipeline/OutputController.cpp
@@ -588,6 +597,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: remove the vertical canvas (or switch scene collection) while an endpoint streams on it; the endpoint must stop, the log must show \"canvas '<name>' removed, stopping endpoint\", OBS must not crash and no reconnect may start (not run in this session)"
+            result: pending
+      - id: output-lifecycle.provider-key-fetch
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: start() of an endpoint with key_provider streamlabs_tiktok goes Starting and asks StreamlabsClient for a session without blocking the UI thread; the completion (UI thread) streams to the returned rtmp/key, held only in the controller for this session, or sets FailedHard with the sanitized error (Health tab); other endpoints are unaffected. stop() aborts a pending fetch (generation counter, late result not adopted and ended by the client) and ends an open session once. Main stream stop, scene collection change, OBS exit and unload stop controllers with has_provider_work(). Compiled with -DSMULTI_STREAMLABS_TIKTOK=ON (release-sltt) and OFF (build_tests); not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): Tiktok endpoint linked to main; start the main stream; log shows 'streamlabs tiktok: session started for 'Tiktok'', TikTok receives video; stop the main stream; log shows 'session ended (success=true)'; with no token the endpoint shows the error and Twitch still streams (not run in this session, TASK-28)"
             result: pending
     status: building
   - id: endpoint-registry
@@ -659,7 +674,7 @@ nodes:
     lane: ui
     goal: "User edits one endpoint with import helpers and validation."
     owns: [ui.endpoint-form]
-    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation, canvas-selection]
+    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation, canvas-selection, streamlabs-tiktok, streamlabs-client, streamlabs-token-vault]
     code:
       - src/ui/EndpointDialog.hpp
       - src/ui/EndpointDialog.cpp
@@ -675,6 +690,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: the dialog lists Main, StreamMulticast Vertical and Aitum Vertical; saving keeps uuid and name (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-8)"
+            result: pending
+      - id: ui-endpoint-dialog.streamlabs
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: 'Key source' combo (Manual | Streamlabs TikTok). Streamlabs shows 'Import token from generator config…' (file picker, only the token is read and stored in the DPAPI vault), 'Disconnect' (deletes it), a status line from the info call ('Connected as @user — can go live: yes/no' or the error), Title and Category search (line edit, Search, result combo ending with Other). Server URL and key are read-only, greyed, with the hint 'fetched at go-live'; the stored manual values are saved unchanged; save skips the server/key and duplicate checks. The token is never shown."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): Dima imports the token once, the status shows 'Connected as @<user>', goes live, TikTok receives video, the session is ended on stop (not run in this session; plugin compiled with -DSMULTI_STREAMLABS_TIKTOK=ON in D:/OpenWorld/StreamMulticast-build/release-sltt, TASK-28)"
             result: pending
     status: building
   - id: ui-config-tab
@@ -808,7 +829,7 @@ nodes:
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording, streamlabs-client]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h
@@ -954,4 +975,111 @@ nodes:
             result: passed
             run: "node --test tools/install/migrate-config.test.mjs, 28/28 passed, local run 2026-10-19; failed before implementation (scripts missing), passed after (TASK-18)"
             checked_at: 2026-10-19
+    status: building
+  - id: streamlabs-tiktok
+    lane: core
+    goal: "Streamlabs TikTok requests are described and their answers parsed without network, OBS runtime or Qt, and no error text carries a secret."
+    owns: [streamlabs.request-shapes, streamlabs.response-parsing, streamlabs.token-import]
+    needs: []
+    code:
+      - src/core/StreamlabsTikTok.hpp
+      - src/core/StreamlabsTikTok.cpp
+      - tests/test_streamlabs_tiktok.cpp
+      - tests/fixtures/streamlabs_generator_config.json
+    works_when:
+      - id: streamlabs-tiktok.parse
+        behavior: "info/search/start/end requests use https://streamlabs.com/api/v5/slobs/tiktok (search query cut to 25 code points and url-encoded; start is multipart title, device_platform=win32, category=<game_mask_id or ''>, audience_type=0); start needs id, rtmp and key (any missing = MissingField error); info reads user.username, application_status.status, can_be_live (only JSON true); search always appends {Other, ''}; end needs success=true. Error messages never contain the token, key, rtmp URL or body; a body that is not one well-formed JSON object is rejected before the libobs parser can log a fragment of it. The generator config.json 'token' is accepted when non-empty, printable ASCII and at most 512 characters. One user agent constant (Streamlabs Desktop Electron)."
+        verification:
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_parse_start_ok
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_parse_start_missing_key_is_error
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_parse_start_error_message_has_no_secrets
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation; with the JSON pre-check removed the case failed (libobs logged the key fragment), restored 11/11 passed (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_parse_info_can_be_live
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_parse_end_success
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_search_appends_other
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_search_truncates_25
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_import_generator_config_token
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_import_rejects_empty_token
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_start_request_fields
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+    status: building
+  - id: streamlabs-token-vault
+    lane: pipeline
+    goal: "The imported Streamlabs token is kept encrypted for the current Windows user and is never stored in plain text."
+    owns: [streamlabs.token-storage]
+    needs: []
+    code:
+      - src/pipeline/StreamlabsTokenVault.hpp
+      - src/pipeline/StreamlabsTokenVault.cpp
+    works_when:
+      - id: streamlabs-token-vault.dpapi
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: save() encrypts with CryptProtectData (current user, constant entropy, UI forbidden) and writes obs_module_config_path('streamlabs_tiktok.bin') atomically (temp file, flush, MoveFileEx replace); load() decrypts with CryptUnprotectData; plaintext buffers are wiped (SecureZeroMemory); remove() is Disconnect. The token is never in config.json, never logged, never shown. Compiled (ON build imports CryptProtectData/CryptUnprotectData from CRYPT32.dll), not run."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): after the import, streamlabs_tiktok.bin exists in the plugin config folder, contains no readable token text, config.json has no token; Disconnect deletes the file (not run in this session, TASK-28)"
+            result: pending
+    status: building
+  - id: streamlabs-client
+    lane: pipeline
+    goal: "Streamlabs TikTok calls run off the UI thread over TLS, results reach the UI thread only while the plugin lives, and every started session is ended once."
+    owns: [streamlabs.http-transport, streamlabs.session-lifecycle]
+    needs: [streamlabs-tiktok, streamlabs-token-vault]
+    code:
+      - src/pipeline/StreamlabsClient.hpp
+      - src/pipeline/StreamlabsClient.cpp
+    works_when:
+      - id: streamlabs-client.session
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: one FIFO worker thread does WinHTTP calls (https only, TLS 1.2+, 15 s timeouts, 5 s for end; authorization Bearer and the Streamlabs Desktop user agent); results are posted to the UI thread through plugin-main's post_to_ui and dropped after shutdown (shared alive flag). start_session ends a still-open or crash-left session first (id persisted in obs_module_config_path('streamlabs_tiktok_session.txt'), never the key), then starts; a result nobody adopts is ended again; a second endpoint is refused while another owns the session. end_session runs at most once per session. shutdown_and_end_blocking (OBS exit, unload, before the UI post context is deleted) cancels the in-flight request by closing its handle, joins the worker and ends open sessions synchronously, bounded to 5 s each. Logs one info line per start/end ('streamlabs tiktok: session started for '<name>'' / 'session ended (success=<bool>)'), never the token, key, rtmp URL or a body. Compiled (ON build imports WinHttpOpen from WINHTTP.dll; OFF build imports neither WINHTTP nor CRYPT32), no real network call made."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): go live, stop, quit OBS while live; the log has exactly one 'session started' and one 'session ended (success=true)' per session and no token or key; kill OBS while live, restart and go live: 'ending a previous session before a new start' appears first (not run in this session, TASK-28)"
+            result: pending
     status: building

@@ -10,6 +10,10 @@ GPLv2 — see LICENSE for full text.
 #include "CanvasLookup.hpp"
 #include "../core/CanvasResolve.hpp"
 #include "../plugin-support.h"
+#ifdef SMULTI_STREAMLABS_TIKTOK
+#include "StreamlabsClient.hpp"
+#include "StreamlabsTokenVault.hpp"
+#endif
 
 #include <obs.h>
 #include <obs-output.h>
@@ -288,9 +292,24 @@ void OutputController::do_create_output()
 	assert(!m_output);
 
 	/* Service settings (RTMP URL + stream key) */
+	std::string server = m_endpoint.server_url;
+	std::string key    = m_endpoint.stream_key;
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	{
+		/* Provider endpoints stream to the target fetched for this session only. */
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_provider_session) {
+			server = m_session_server;
+			key    = m_session_key;
+		}
+	}
+#endif
 	obs_data_t *service_settings = obs_data_create();
-	obs_data_set_string(service_settings, "server", m_endpoint.server_url.c_str());
-	obs_data_set_string(service_settings, "key",    m_endpoint.stream_key.c_str());
+	obs_data_set_string(service_settings, "server", server.c_str());
+	obs_data_set_string(service_settings, "key",    key.c_str());
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	streamlabs_vault::wipe(key);
+#endif
 
 	std::string service_name = "smulti_service_" + m_endpoint.id;
 	obs_service_t *service = obs_service_create(
@@ -354,6 +373,15 @@ bool OutputController::start()
 
 	obs_log(LOG_INFO, "OutputController [%s]: starting", m_endpoint.name.c_str());
 
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	if (m_endpoint.key_provider == kKeyProviderStreamlabsTikTok)
+		return request_provider_target();
+#endif
+	return start_output();
+}
+
+bool OutputController::start_output()
+{
 	/* Lazy-join: pick up after a previous stop() or a just-finished reconnect
 	 * attempt.  stop() never joins m_reconnect_thread itself (see class doc);
 	 * start() pays that cost here instead, right before it needs sole
@@ -483,6 +511,11 @@ void OutputController::stop()
 	/* Flag any in-flight reconnect to abort — checked by
 	 * reconnect_thread_func()'s poll loop and its session-validity guards. */
 	m_stop_reconnect.store(true);
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/* Abort a pending key fetch and end an open provider session (at most once). */
+	end_provider_session();
+#endif
 
 	obs_output_t *output_for_signals;
 	obs_canvas_t *canvas_for_signals;
@@ -1042,5 +1075,95 @@ void OutputController::reconnect_thread_func()
 		        err ? err : "(unknown)");
 	}
 }
+
+/* -----------------------------------------------------------------------
+ * Key provider (Streamlabs TikTok, optional build flag)
+ * ----------------------------------------------------------------------- */
+bool OutputController::has_provider_work() const
+{
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_key_fetch_pending || m_provider_session;
+#else
+	return false;
+#endif
+}
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+bool OutputController::request_provider_target()
+{
+	StreamlabsClient *client = streamlabs_client();
+	if (!client) {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_state      = OutputState::FailedHard;
+		m_last_error = "Streamlabs TikTok is not available";
+		return false;
+	}
+
+	uint64_t gen;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		gen = ++m_key_fetch_gen;
+		m_key_fetch_pending = true;
+	}
+	obs_log(LOG_INFO, "OutputController [%s]: fetching the stream target from Streamlabs",
+	        m_endpoint.name.c_str());
+
+	const std::string title =
+		m_endpoint.streamlabs_title.empty() ? m_endpoint.name : m_endpoint.streamlabs_title;
+	std::weak_ptr<OutputController> weak = weak_from_this();
+	client->start_session(m_endpoint.id, m_endpoint.name, title, m_endpoint.streamlabs_category_id,
+	                      [weak, gen](const StreamlabsResult &r) {
+		                      auto self = weak.lock();
+		                      return self ? self->on_provider_target(gen, r) : false;
+	                      });
+	return true; // Starting; the output starts from on_provider_target()
+}
+
+bool OutputController::on_provider_target(uint64_t gen, const StreamlabsResult &r)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		/* Stopped (or restarted) meanwhile: not ours anymore, the client ends it. */
+		if (!m_key_fetch_pending || gen != m_key_fetch_gen || m_state != OutputState::Starting)
+			return false;
+		m_key_fetch_pending = false;
+		if (!r.ok) {
+			m_state      = OutputState::FailedHard;
+			m_last_error = "Streamlabs TikTok: " + r.error_message;
+			return false;
+		}
+		m_provider_session = true;
+		m_session_server   = r.rtmp;
+		m_session_key      = r.key;
+	}
+
+	if (!start_output()) {
+		/* Keep the FailedHard state and error from start_output(); release the session. */
+		end_provider_session();
+	}
+	return true;
+}
+
+void OutputController::end_provider_session()
+{
+	bool end = false;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_key_fetch_pending) {
+			m_key_fetch_pending = false;
+			++m_key_fetch_gen; // a late fetch result is no longer adopted
+		}
+		end                = m_provider_session;
+		m_provider_session = false;
+		streamlabs_vault::wipe(m_session_key);
+		m_session_server.clear();
+	}
+	if (end) {
+		if (StreamlabsClient *client = streamlabs_client())
+			client->end_session(m_endpoint.id);
+	}
+}
+#endif
 
 } // namespace smulti

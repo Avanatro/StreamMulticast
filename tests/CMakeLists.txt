@@ -20,6 +20,7 @@ set(SMULTI_TEST_SOURCES
     test_scene_link.cpp
     test_canvas_scale_ref.cpp
     test_vertical_record.cpp
+    test_streamlabs_tiktok.cpp
 )
 
 add_executable(
@@ -36,6 +37,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/SceneLink.cpp
   ${CMAKE_SOURCE_DIR}/src/core/CanvasScaleRef.cpp
   ${CMAKE_SOURCE_DIR}/src/core/VerticalRecord.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/StreamlabsTikTok.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(
@@ -43,6 +45,8 @@ target_include_directories(
   PRIVATE "${CMAKE_SOURCE_DIR}/src" "${SMULTI_DEPS_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_link_libraries(streammulticast_tests PRIVATE "${SMULTI_OBS_LIB}")
+# Fake-token fixtures only; tests never read a real generator config.
+target_compile_definitions(streammulticast_tests PRIVATE SMULTI_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 
 # obs.dll needs FFmpeg/zlib from obs-deps at load time. Resolve both through
 # PATH for ctest instead of copying a growing DLL set next to the executable.

@@ -85,6 +85,7 @@ target_sources(
     src/core/MainServiceTarget.cpp
     src/core/ObsServiceImport.cpp
     src/core/TikTokBridgeImport.cpp
+    src/core/StreamlabsTikTok.cpp
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp
@@ -109,6 +110,19 @@ target_sources(
     src/ui/VerticalItemList.cpp
     src/ui/TransformEditor.cpp
 )
+
+# Optional Streamlabs TikTok key provider (unofficial API, off by default).
+# OFF: the plugin builds and behaves as before. The pure core above
+# (StreamlabsTikTok.cpp, no network) is always compiled and unit-tested.
+option(SMULTI_STREAMLABS_TIKTOK "Fetch the TikTok RTMP URL and key from Streamlabs at go-live (unofficial API)" OFF)
+if(SMULTI_STREAMLABS_TIKTOK)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}
+    PRIVATE src/pipeline/StreamlabsTokenVault.cpp src/pipeline/StreamlabsClient.cpp
+  )
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE SMULTI_STREAMLABS_TIKTOK=1)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp crypt32)
+endif()
 
 # Include directories
 target_include_directories(

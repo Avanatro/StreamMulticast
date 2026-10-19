@@ -19,6 +19,9 @@ typedef struct obs_data obs_data_t;
 
 namespace smulti {
 
+/** Endpoint::key_provider value for the Streamlabs TikTok provider. */
+constexpr const char *kKeyProviderStreamlabsTikTok = "streamlabs_tiktok";
+
 /**
  * EncoderBackend — video encoder selection per endpoint.
  * Only backends that obs_enum_encoder_types reports as available
@@ -79,6 +82,15 @@ struct Endpoint {
 	 * canvas_uuid is the stable key, canvas_name the fallback lookup. */
 	std::string canvas_uuid;
 	std::string canvas_name;
+
+	/* Key provider: "" = manual server_url/stream_key, kKeyProviderStreamlabsTikTok =
+	 * fetched from Streamlabs at go-live (optional build flag SMULTI_STREAMLABS_TIKTOK).
+	 * The fetched URL and key live only in the running OutputController and are
+	 * never written back to these fields or to config.json. */
+	std::string key_provider;
+	std::string streamlabs_title;         ///< TikTok stream title
+	std::string streamlabs_category_id;   ///< game_mask_id, "" = Other
+	std::string streamlabs_category_name; ///< display name of the category
 
 	/* Behaviour */
 	bool enabled       = true;        ///< Is this endpoint active at all?

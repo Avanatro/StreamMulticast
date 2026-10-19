@@ -14,6 +14,12 @@ GPLv2 — see LICENSE for full text.
 #include "../core/EndpointRegistry.hpp"
 #include "../core/CanvasMigration.hpp"
 #include "../pipeline/CanvasLookup.hpp"
+#ifdef SMULTI_STREAMLABS_TIKTOK
+#include "../core/StreamlabsTikTok.hpp"
+#include "../pipeline/StreamlabsClient.hpp"
+#include "../pipeline/StreamlabsTokenVault.hpp"
+#include <QtCore/QPointer>
+#endif
 
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -78,6 +84,16 @@ void EndpointDialog::setup_ui()
 	m_name_edit = new QLineEdit(this);
 	m_name_edit->setPlaceholderText(tr("e.g. Twitch Main"));
 	form->addRow(tr("Name:"), m_name_edit);
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/* Key source */
+	m_key_source_cb = new QComboBox(this);
+	m_key_source_cb->addItem(tr("Manual"), QString());
+	m_key_source_cb->addItem(tr("Streamlabs TikTok"), QString::fromUtf8(kKeyProviderStreamlabsTikTok));
+	m_key_source_cb->setToolTip(tr("Streamlabs TikTok fetches the TikTok server URL and stream key at go-live. "
+	                               "It uses an unofficial Streamlabs API that may stop working."));
+	form->addRow(tr("Key source:"), m_key_source_cb);
+#endif
 
 	/* Server template dropdown */
 	m_template_cb = new QComboBox(this);
@@ -144,6 +160,10 @@ void EndpointDialog::setup_ui()
 
 	outer->addLayout(form);
 
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	setup_streamlabs_ui(outer);
+#endif
+
 	/* Status label (for test connection result) */
 	m_status_label = new QLabel(this);
 	m_status_label->setVisible(false);
@@ -204,6 +224,18 @@ void EndpointDialog::populate_from_endpoint()
 	m_keyint_spin->setValue(m_endpoint.keyframe_interval_sec);
 	m_linked_cb->setChecked(m_endpoint.linked_to_main);
 
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	m_streamlabs_title_edit->setText(QString::fromStdString(m_endpoint.streamlabs_title));
+	m_streamlabs_category_cb->clear();
+	m_streamlabs_category_cb->addItem(m_endpoint.streamlabs_category_name.empty()
+	                                          ? tr("Other")
+	                                          : QString::fromStdString(m_endpoint.streamlabs_category_name),
+	                                  QString::fromStdString(m_endpoint.streamlabs_category_id));
+	m_key_source_cb->blockSignals(true);
+	m_key_source_cb->setCurrentIndex(m_endpoint.key_provider == kKeyProviderStreamlabsTikTok ? 1 : 0);
+	m_key_source_cb->blockSignals(false);
+#endif
+
 	/* Backend combo */
 	for (int i = 0; i < m_backend_cb->count(); ++i) {
 		if (m_backend_cb->itemData(i).toInt() == static_cast<int>(m_endpoint.encoder_backend)) {
@@ -233,6 +265,10 @@ void EndpointDialog::populate_from_endpoint()
 		}
 	}
 	m_template_cb->blockSignals(false);
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	apply_key_source();
+#endif
 }
 
 /* -----------------------------------------------------------------------
@@ -353,6 +389,19 @@ Endpoint EndpointDialog::collect_from_form() const
 	ep.linked_to_main       = m_linked_cb->isChecked();
 	ep.encoder_backend      = static_cast<EncoderBackend>(
 	                              m_backend_cb->currentData().toInt());
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	ep.key_provider = streamlabs_selected() ? kKeyProviderStreamlabsTikTok : "";
+	if (streamlabs_selected()) {
+		/* The greyed fields are empty placeholders; keep the manual values as they were. */
+		ep.server_url = m_manual_server.toStdString();
+		ep.stream_key = m_manual_key.toStdString();
+	}
+	ep.streamlabs_title = m_streamlabs_title_edit->text().trimmed().toStdString();
+	ep.streamlabs_category_id = m_streamlabs_category_cb->currentData().toString().toStdString();
+	ep.streamlabs_category_name = ep.streamlabs_category_id.empty()
+	                                      ? std::string()
+	                                      : m_streamlabs_category_cb->currentText().toStdString();
+#endif
 	return ep;
 }
 
@@ -504,6 +553,14 @@ void EndpointDialog::on_save()
 		QMessageBox::warning(this, tr("Validation"), tr("Please enter a name for this endpoint."));
 		return;
 	}
+#ifdef SMULTI_STREAMLABS_TIKTOK
+	/* Server URL and key are fetched at go-live: nothing to validate or compare here. */
+	if (streamlabs_selected()) {
+		m_result = collect_from_form();
+		accept();
+		return;
+	}
+#endif
 	if (m_server_edit->text().trimmed().isEmpty()) {
 		QMessageBox::warning(this, tr("Validation"), tr("Please enter a server URL."));
 		return;
@@ -536,5 +593,180 @@ void EndpointDialog::on_save()
 	m_result = candidate;
 	accept();
 }
+
+#ifdef SMULTI_STREAMLABS_TIKTOK
+/* -----------------------------------------------------------------------
+ * Streamlabs TikTok key source (optional build flag)
+ * ----------------------------------------------------------------------- */
+void EndpointDialog::setup_streamlabs_ui(QVBoxLayout *outer)
+{
+	m_streamlabs_box = new QGroupBox(tr("Streamlabs TikTok"), this);
+	auto *form = new QFormLayout(m_streamlabs_box);
+	form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+
+	m_streamlabs_status = new QLabel(tr("Not connected"), m_streamlabs_box);
+	m_streamlabs_status->setWordWrap(true);
+	form->addRow(tr("Status:"), m_streamlabs_status);
+
+	auto *token_row = new QHBoxLayout();
+	m_streamlabs_import_btn = new QPushButton(tr("Import token from generator config…"), m_streamlabs_box);
+	m_streamlabs_import_btn->setToolTip(tr("Select the config.json of the StreamLabs TikTok Stream Key Generator. "
+	                                       "Only its token is read; it is stored encrypted for your Windows user."));
+	m_streamlabs_disconnect_btn = new QPushButton(tr("Disconnect"), m_streamlabs_box);
+	m_streamlabs_disconnect_btn->setToolTip(tr("Delete the stored Streamlabs token."));
+	token_row->addWidget(m_streamlabs_import_btn);
+	token_row->addWidget(m_streamlabs_disconnect_btn);
+	token_row->addStretch();
+	form->addRow(QString(), token_row);
+
+	m_streamlabs_title_edit = new QLineEdit(m_streamlabs_box);
+	m_streamlabs_title_edit->setPlaceholderText(tr("TikTok stream title (default: endpoint name)"));
+	form->addRow(tr("Title:"), m_streamlabs_title_edit);
+
+	auto *search_row = new QHBoxLayout();
+	m_streamlabs_search_edit = new QLineEdit(m_streamlabs_box);
+	m_streamlabs_search_edit->setPlaceholderText(tr("Search a category"));
+	m_streamlabs_search_btn = new QPushButton(tr("Search"), m_streamlabs_box);
+	search_row->addWidget(m_streamlabs_search_edit);
+	search_row->addWidget(m_streamlabs_search_btn);
+	form->addRow(tr("Category:"), search_row);
+
+	m_streamlabs_category_cb = new QComboBox(m_streamlabs_box);
+	form->addRow(QString(), m_streamlabs_category_cb);
+
+	m_streamlabs_box->setVisible(false);
+	outer->addWidget(m_streamlabs_box);
+
+	connect(m_key_source_cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+	        [this](int) { apply_key_source(); });
+	connect(m_streamlabs_import_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_import(); });
+	connect(m_streamlabs_disconnect_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_disconnect(); });
+	connect(m_streamlabs_search_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_search(); });
+	connect(m_streamlabs_search_edit, &QLineEdit::returnPressed, this, [this]() { on_streamlabs_search(); });
+}
+
+bool EndpointDialog::streamlabs_selected() const
+{
+	return m_key_source_cb && m_key_source_cb->currentIndex() == 1;
+}
+
+void EndpointDialog::apply_key_source()
+{
+	const bool sl = streamlabs_selected();
+	if (sl && !m_streamlabs_shown) {
+		/* Keep the manual values out of sight; they are saved unchanged. */
+		m_manual_server = m_server_edit->text();
+		m_manual_key = m_key_edit->text();
+		m_server_edit->clear();
+		m_key_edit->clear();
+	} else if (!sl && m_streamlabs_shown) {
+		m_server_edit->setText(m_manual_server);
+		m_key_edit->setText(m_manual_key);
+	}
+	m_streamlabs_shown = sl;
+
+	m_server_edit->setReadOnly(sl);
+	m_key_edit->setReadOnly(sl);
+	m_server_edit->setEnabled(!sl);
+	m_key_edit->setEnabled(!sl);
+	m_server_edit->setPlaceholderText(sl ? tr("fetched at go-live") : tr("rtmp://... or rtmps://..."));
+	m_key_edit->setPlaceholderText(sl ? tr("fetched at go-live") : tr("Stream key (stored plain)"));
+	m_template_cb->setEnabled(!sl);
+	m_show_key_btn->setEnabled(!sl);
+	m_import_btn->setEnabled(!sl);
+	m_tiktok_bridge_btn->setEnabled(!sl);
+	m_test_btn->setEnabled(!sl);
+	m_streamlabs_box->setVisible(sl);
+	if (sl)
+		refresh_streamlabs_status();
+}
+
+void EndpointDialog::refresh_streamlabs_status()
+{
+	StreamlabsClient *client = streamlabs_client();
+	if (!client) {
+		m_streamlabs_status->setText(tr("Streamlabs TikTok is not available."));
+		return;
+	}
+	if (!streamlabs_vault::exists()) {
+		m_streamlabs_status->setText(tr("Not connected. Import the token from the generator config.json."));
+		m_streamlabs_disconnect_btn->setEnabled(false);
+		return;
+	}
+	m_streamlabs_disconnect_btn->setEnabled(true);
+	m_streamlabs_status->setText(tr("Checking…"));
+	QPointer<EndpointDialog> guard(this);
+	client->info([guard](const StreamlabsResult &r) {
+		if (!guard)
+			return;
+		if (!r.ok) {
+			guard->m_streamlabs_status->setText(QString::fromStdString(r.error_message));
+			return;
+		}
+		const QString user = QString::fromStdString(r.username);
+		const QString live = r.can_be_live ? EndpointDialog::tr("yes") : EndpointDialog::tr("no");
+		guard->m_streamlabs_status->setText(
+			user.isEmpty() ? EndpointDialog::tr("Connected — can go live: %1").arg(live)
+			               : EndpointDialog::tr("Connected as @%1 — can go live: %2").arg(user, live));
+	});
+}
+
+void EndpointDialog::on_streamlabs_import()
+{
+	const QString path = QFileDialog::getOpenFileName(this, tr("Import token from generator config"), QString(),
+	                                                  tr("Generator config (config.json);;JSON files (*.json)"));
+	if (path.isEmpty())
+		return;
+
+	StreamlabsTokenImport imported = streamlabs_import_generator_config_file(path.toStdString());
+	if (!imported.ok) {
+		QMessageBox::warning(this, tr("Import token"), QString::fromStdString(imported.error_message));
+		return;
+	}
+	std::string error;
+	const bool saved = streamlabs_vault::save(imported.token, error);
+	streamlabs_vault::wipe(imported.token);
+	if (!saved) {
+		QMessageBox::warning(this, tr("Import token"), QString::fromStdString(error));
+		return;
+	}
+	obs_log(LOG_INFO, "streamlabs tiktok: token imported");
+	refresh_streamlabs_status();
+}
+
+void EndpointDialog::on_streamlabs_disconnect()
+{
+	if (!streamlabs_vault::remove()) {
+		QMessageBox::warning(this, tr("Disconnect"), tr("Could not delete the stored token."));
+		return;
+	}
+	obs_log(LOG_INFO, "streamlabs tiktok: token deleted");
+	refresh_streamlabs_status();
+}
+
+void EndpointDialog::on_streamlabs_search()
+{
+	StreamlabsClient *client = streamlabs_client();
+	const QString query = m_streamlabs_search_edit->text().trimmed();
+	if (!client || query.isEmpty())
+		return;
+	m_streamlabs_search_btn->setEnabled(false);
+	QPointer<EndpointDialog> guard(this);
+	client->search(query.toStdString(), [guard](const StreamlabsResult &r) {
+		if (!guard)
+			return;
+		guard->m_streamlabs_search_btn->setEnabled(true);
+		if (!r.ok) {
+			guard->m_streamlabs_status->setText(QString::fromStdString(r.error_message));
+			return;
+		}
+		guard->m_streamlabs_category_cb->clear();
+		for (const auto &c : r.categories)
+			guard->m_streamlabs_category_cb->addItem(QString::fromStdString(c.full_name),
+			                                         QString::fromStdString(c.game_mask_id));
+		guard->m_streamlabs_category_cb->setCurrentIndex(0);
+	});
+}
+#endif
 
 } // namespace smulti

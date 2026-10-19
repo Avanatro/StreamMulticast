@@ -64,6 +64,10 @@ Endpoint Endpoint::make_default(const std::string &name)
 	ep.orientation          = OutputOrientation::SourceMatch;
 	ep.canvas_uuid          = "";
 	ep.canvas_name          = "";
+	ep.key_provider         = "";
+	ep.streamlabs_title     = "";
+	ep.streamlabs_category_id   = "";
+	ep.streamlabs_category_name = "";
 	ep.enabled              = true;
 	ep.linked_to_main       = true;
 	ep.sort_order           = 0;
@@ -94,6 +98,10 @@ obs_data_t *Endpoint::serialize() const
 	obs_data_set_int   (data, "orientation",      static_cast<long long>(orientation));
 	obs_data_set_string(data, "canvas_uuid",      canvas_uuid.c_str());
 	obs_data_set_string(data, "canvas_name",      canvas_name.c_str());
+	obs_data_set_string(data, "key_provider",     key_provider.c_str());
+	obs_data_set_string(data, "streamlabs_title", streamlabs_title.c_str());
+	obs_data_set_string(data, "streamlabs_category_id",   streamlabs_category_id.c_str());
+	obs_data_set_string(data, "streamlabs_category_name", streamlabs_category_name.c_str());
 	obs_data_set_bool  (data, "enabled",          enabled);
 	obs_data_set_bool  (data, "linked_to_main",   linked_to_main);
 	obs_data_set_int   (data, "sort_order",       sort_order);
@@ -140,6 +148,16 @@ Endpoint Endpoint::deserialize(obs_data_t *data)
 		ep.canvas_uuid = obs_data_get_string(data, "canvas_uuid");
 	if (has("canvas_name"))
 		ep.canvas_name = obs_data_get_string(data, "canvas_name");
+	/* Unknown or missing provider = manual: an older or newer DLL never makes this one fetch keys. */
+	if (has("key_provider") &&
+	    std::string(obs_data_get_string(data, "key_provider")) == kKeyProviderStreamlabsTikTok)
+		ep.key_provider = kKeyProviderStreamlabsTikTok;
+	if (has("streamlabs_title"))
+		ep.streamlabs_title = obs_data_get_string(data, "streamlabs_title");
+	if (has("streamlabs_category_id"))
+		ep.streamlabs_category_id = obs_data_get_string(data, "streamlabs_category_id");
+	if (has("streamlabs_category_name"))
+		ep.streamlabs_category_name = obs_data_get_string(data, "streamlabs_category_name");
 	if (has("enabled"))
 		ep.enabled = obs_data_get_bool(data, "enabled");
 	if (has("linked_to_main"))
