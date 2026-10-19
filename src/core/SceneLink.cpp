@@ -45,6 +45,11 @@ std::optional<std::string> resolve_linked_scene(const std::string &main_scene, c
 	return std::nullopt;
 }
 
+bool scene_changed_needs_catch_up(const std::optional<std::string> &target, const std::string &active_or_destination)
+{
+	return target.has_value() && *target != active_or_destination;
+}
+
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name)
 {
 	if (old_name == new_name)

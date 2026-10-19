@@ -155,72 +155,10 @@ static void refresh_vertical_links()
 		g_vertical_dock->refresh_links();
 }
 
-/* libobs global "source_transition_start". obs_transition_start emits it after the destination is
- * set as OBS_TRANSITION_SOURCE_B (libobs obs-source-transition.c:351-368), i.e. BEFORE the
- * transition runs; the frontend's SCENE_CHANGED only follows at transition end (OBSBasic::
- * TransitionStopped), or at once for the force/cut path. It fires for whatever transition is on output
- * channel 0, so a per-scene override transition is covered (OBSBasic::OverrideTransition puts it there
- * first). Private sources never emit it, so the plugin's own vertical transition does not re-enter.
- * The callback runs on the thread that started the transition: it copies plain values (type, name,
- * settings json, destination scene and its override) and queues them to the UI thread, where the vertical
- * transition starts (same type, settings copy and duration; TASK-31). */
-static void on_transition_start(void *, calldata_t *cd)
-{
-	if (!g_module_alive.load() || !g_owned_canvas)
-		return;
-	auto *transition = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
-	if (!transition)
-		return;
-
-	obs_source_t *program_output = obs_get_output_source(0);
-	const bool is_program = program_output == transition;
-	obs_source_release(program_output);
-	if (!is_program)
-		return;
-
-	obs_source_t *dest = obs_transition_get_source(transition, OBS_TRANSITION_SOURCE_B); // fade-to-black: null
-	if (!dest)
-		return;
-	smulti::MainTransitionStart start;
-	const char *dest_name = obs_source_get_name(dest);
-	start.dest_scene = dest_name ? dest_name : "";
-	/* Per-scene override, as OBSBasic::GetOverrideTransition / GetOverrideTransitionDuration read it. */
-	obs_data_t *priv = obs_source_get_private_settings(dest);
-	if (priv) {
-		const char *ov = obs_data_get_string(priv, "transition");
-		start.override_name = ov ? ov : "";
-		start.override_duration_ms = obs_data_has_user_value(priv, "transition_duration")
-						     ? obs_data_get_int(priv, "transition_duration")
-						     : 300;
-		obs_data_release(priv);
-	}
-	obs_source_release(dest);
-	if (start.dest_scene.empty())
-		return;
-
-	const char *id = obs_source_get_id(transition);
-	const char *name = obs_source_get_name(transition);
-	const char *uuid = obs_source_get_uuid(transition);
-	start.uuid = uuid ? uuid : "";
-	start.id = id ? id : "";
-	start.name = name ? name : "";
-	obs_data_t *settings = obs_source_get_settings(transition);
-	if (settings) {
-		const char *json = obs_data_get_json(settings);
-		start.settings_json = json ? json : "";
-		obs_data_release(settings);
-	}
-
-	post_to_ui([start]() {
-		if (g_module_alive.load() && g_owned_canvas)
-			g_owned_canvas->on_main_transition_start(start);
-	});
-}
-
-static void disconnect_transition_start()
-{
-	signal_handler_disconnect(obs_get_signal_handler(), "source_transition_start", on_transition_start, nullptr);
-}
+/* The main transition start is taken from each frontend transition's own "transition_start" signal inside
+ * OwnedCanvas (connected with the prepared transitions): frontend transitions are private sources, and
+ * libobs emits the GLOBAL source_transition_start only for non-private ones (obs-internal.h
+ * obs_source_dosignal), so a global hook never fired (TASK-31 fix round 3, live defect). */
 
 /* Rebuild the owned canvas; optionally put it on the scene linked to the current program scene
  * (only on collection load/change: a profile change or video reset must not undo a manual Set active). */
@@ -320,7 +258,6 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		flush_config();
 		save_record_settings_once();
 		stop_vertical_recording("OBS is shutting down");
-		disconnect_transition_start();
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
@@ -400,7 +337,6 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		}
 		shutdown_streamlabs(); // after the stops above queued their session ends
 		stop_vertical_recording("OBS exit");
-		disconnect_transition_start();
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
@@ -459,7 +395,6 @@ bool obs_module_load()
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
-	signal_handler_connect(obs_get_signal_handler(), "source_transition_start", on_transition_start, nullptr);
 
 	/* 6. Create and register the dock widget
 	 * obs_frontend_add_dock_by_id was added in OBS 30.0.
@@ -516,7 +451,6 @@ void obs_module_unload()
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
-	disconnect_transition_start();
 	obs_frontend_remove_save_callback(on_save_load, nullptr);
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 

@@ -118,3 +118,14 @@ SMULTI_TEST(scene_link_ignores_removed_wait_stinger_key)
 	EXPECT_EQ(obs_data_has_user_value(out, "streammulticast_vertical_link_wait_stinger"), false);
 	obs_data_release(out);
 }
+
+SMULTI_TEST(scene_link_catch_up_skips_started_transition)
+{
+	/* SCENE_CHANGED arrives at the END of the main transition. When the vertical transition already started
+	 * towards the linked scene at transition_start (its destination counts as active), the catch-up must not
+	 * switch again (TASK-31 fix round 3: the start hook never fired, only this fallback did). */
+	EXPECT_EQ(smulti::scene_changed_needs_catch_up(std::string("V Just Chatting"), "V Just Chatting"), false);
+	EXPECT_EQ(smulti::scene_changed_needs_catch_up(std::string("V Just Chatting"), "V Gaming"), true);
+	EXPECT_EQ(smulti::scene_changed_needs_catch_up(std::string("V Gaming"), ""), true);
+	EXPECT_EQ(smulti::scene_changed_needs_catch_up(std::nullopt, "V Gaming"), false);
+}

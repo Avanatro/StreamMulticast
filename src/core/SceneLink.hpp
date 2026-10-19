@@ -45,6 +45,13 @@ struct SceneLinkSettings {
 std::optional<std::string> resolve_linked_scene(const std::string &main_scene, const SceneLinkSettings &settings,
 						const std::vector<std::string> &vertical_scenes);
 
+/**
+ * SCENE_CHANGED (end of the main transition, or a cut) catch-up: switch only when there is a linked
+ * target and the vertical canvas is not already on it. `active_or_destination` is the active vertical
+ * scene, or the destination of a running vertical transition (started at transition_start).
+ */
+bool scene_changed_needs_catch_up(const std::optional<std::string> &target, const std::string &active_or_destination);
+
 /** A scene was renamed: re-key / re-target explicit entries. Returns true when anything changed. */
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name);
 

@@ -73,6 +73,11 @@ struct MainTransitionStart {
  * active vertical scene" goes through active_scene_ref() (the destination while a transition runs); every
  * switch goes through switch_scene() / follow_scene() / on_main_transition_start().
  *
+ * Frontend transitions are private sources, so libobs never emits the GLOBAL source_transition_start for
+ * them (obs_source_dosignal skips obs->signals for private sources): the main transition start is taken
+ * from each frontend transition's own "transition_start" signal, connected with its "update" signal
+ * (fix round 3, live defect).
+ *
  * Transitions are PREPARED ahead of use (fix round 1): one vertical transition per frontend transition,
  * keyed by its uuid, created and refreshed on ensure(), TRANSITION_LIST_CHANGED / TRANSITION_CHANGED, each
  * frontend transition's "update" signal and after each vertical run. A stinger loads its media
@@ -215,7 +220,9 @@ private:
 	void start_switch(obs_canvas_t *canvas, obs_source_t *scene, const Prepared *entry, bool instant,
 			  uint32_t main_duration_ms);
 	void queue_refresh();
+	void disconnect_frontend(obs_weak_source_t *frontend);
 	static void on_transition_stop(void *param, calldata_t *cd);
+	static void on_frontend_transition_start(void *param, calldata_t *cd);
 	static void on_frontend_update(void *param, calldata_t *cd);
 
 	mutable std::mutex m_mutex;
