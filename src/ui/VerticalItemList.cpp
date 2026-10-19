@@ -7,11 +7,13 @@ GPLv2 — see LICENSE for full text.
 
 #include "VerticalItemList.hpp"
 
+#include "VerticalCanvasDock.hpp" // VerticalSelection
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
 
 #include <QtCore/QMetaObject>
+#include <QtCore/QTimer>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
@@ -33,6 +35,7 @@ constexpr const char *kSceneSignals[] = {"item_add", "item_remove", "reorder", "
 constexpr const char *kTransformSignal = "item_transform";
 
 constexpr int kIdRole = Qt::UserRole;
+constexpr qint64 kReloadIntervalMs = 33; ///< transform panel / preview overlay reload, ~30 Hz
 
 struct ItemRow {
 	int64_t id = 0;
@@ -88,7 +91,10 @@ bool collect_input(void *param, obs_source_t *source)
 
 } // namespace
 
-VerticalItemList::VerticalItemList(OwnedCanvas &canvas, QWidget *parent) : QWidget(parent), m_canvas(canvas)
+VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selection, QWidget *parent)
+	: QWidget(parent),
+	  m_canvas(canvas),
+	  m_selection(selection)
 {
 	auto *layout = new QVBoxLayout(this);
 	layout->setContentsMargins(0, 0, 0, 0);
@@ -128,6 +134,7 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, QWidget *parent) : QWidg
 	connect(m_down_btn, &QPushButton::clicked, this, &VerticalItemList::on_down);
 	connect(m_list, &QListWidget::currentRowChanged, this, [this] { on_selection_changed(); });
 	connect(m_list, &QListWidget::itemChanged, this, &VerticalItemList::on_item_changed);
+	connect(&m_selection, &VerticalSelection::changed, this, [this] { on_selection_model_changed(); });
 
 	refresh();
 }
@@ -141,6 +148,17 @@ VerticalItemList::~VerticalItemList()
 
 bool VerticalItemList::with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn)
 {
+	return with_scene_impl(&scene_uuid, [&fn](obs_scene_t *scene, const std::string &) { fn(scene); });
+}
+
+bool VerticalItemList::with_active_scene(const SceneFn &fn)
+{
+	return with_scene_impl(nullptr, fn);
+}
+
+/* required_uuid null: whatever scene is active. Otherwise only that scene (item ids are per scene). */
+bool VerticalItemList::with_scene_impl(const std::string *required_uuid, const SceneFn &fn)
+{
 	if (m_shutdown.load())
 		return false;
 	obs_canvas_t *canvas = m_canvas.get_ref();
@@ -150,19 +168,20 @@ bool VerticalItemList::with_scene(const std::string &scene_uuid, const std::func
 	bool called = false;
 	obs_source_t *source = obs_canvas_get_channel(canvas, 0);
 	obs_scene_t *scene = source ? obs_scene_from_source(source) : nullptr; // no ref; valid while source is held
-	const char *active_uuid = source ? obs_source_get_uuid(source) : nullptr;
+	const char *active_uuid_c = source ? obs_source_get_uuid(source) : nullptr;
+	const std::string active_uuid = active_uuid_c ? active_uuid_c : "";
 	/* Item ids are per scene: refuse when the active scene is not the one the ids come from. */
-	if (scene && (scene_uuid.empty() || !active_uuid || scene_uuid != active_uuid))
+	if (active_uuid.empty() || (required_uuid && *required_uuid != active_uuid))
 		scene = nullptr;
 	if (scene) {
 		/* INV-6: write only to a scene that belongs to the owned canvas. */
 		obs_canvas_t *scene_canvas = obs_source_get_canvas(source);
-		const char *scene_uuid = scene_canvas ? obs_canvas_get_uuid(scene_canvas) : nullptr;
-		const bool owned = scene_canvas == canvas && scene_uuid && m_canvas.uuid() == scene_uuid;
+		const char *canvas_uuid = scene_canvas ? obs_canvas_get_uuid(scene_canvas) : nullptr;
+		const bool owned = scene_canvas == canvas && canvas_uuid && m_canvas.uuid() == canvas_uuid;
 		if (scene_canvas)
 			obs_canvas_release(scene_canvas);
 		if (owned) {
-			fn(scene);
+			fn(scene, active_uuid);
 			called = true;
 		}
 	}
@@ -210,16 +229,46 @@ void VerticalItemList::queue_editor_reload()
 	if (m_shutdown.load())
 		return;
 	if (m_reload_queued.exchange(true))
+		return; // one reload pending; it reads the latest values when it runs
+	QMetaObject::invokeMethod(this, [this] { editor_reload_throttled(); }, Qt::QueuedConnection);
+}
+
+/* UI thread. item_transform can fire every frame (and on every drag step): at most ~30 reloads/s. */
+void VerticalItemList::editor_reload_throttled()
+{
+	if (m_shutdown.load()) {
+		m_reload_queued = false;
 		return;
-	QMetaObject::invokeMethod(
-		this,
-		[this] {
-			m_reload_queued = false;
-			if (m_shutdown.load())
-				return;
-			m_editor->reload(false);
-		},
-		Qt::QueuedConnection);
+	}
+	const qint64 since = m_reload_clock.isValid() ? m_reload_clock.elapsed() : kReloadIntervalMs;
+	if (since < kReloadIntervalMs) {
+		QTimer::singleShot(static_cast<int>(kReloadIntervalMs - since), this, [this] { editor_reload_now(); });
+		return;
+	}
+	editor_reload_now();
+}
+
+void VerticalItemList::editor_reload_now()
+{
+	m_reload_queued = false;
+	if (m_shutdown.load())
+		return;
+	m_reload_clock.restart();
+	m_editor->reload(false);
+	notify_change();
+}
+
+void VerticalItemList::reload_editor(bool force)
+{
+	if (m_shutdown.load())
+		return;
+	m_editor->reload(force);
+}
+
+void VerticalItemList::notify_change()
+{
+	if (m_change_listener && !m_shutdown.load())
+		m_change_listener();
 }
 
 void VerticalItemList::queue_refresh()
@@ -352,7 +401,7 @@ void VerticalItemList::refresh()
 	if (m_shutdown.load())
 		return;
 
-	int64_t previous = m_pending_select != 0 ? m_pending_select : selected_id();
+	const int64_t pending = m_pending_select;
 	m_pending_select = 0;
 
 	ItemRows items;
@@ -383,11 +432,10 @@ void VerticalItemList::refresh()
 		detach_signals();
 	}
 	m_has_scene = have_scene;
-	if (scene_uuid != m_list_scene_uuid) {
-		/* Another scene is active: ids of the old scene mean other items here. Drop the selection. */
-		previous = 0;
-		m_list_scene_uuid = scene_uuid;
-	}
+	/* The selection model carries its scene uuid: a selection from another (old) scene yields 0 here, so a
+	 * scene change drops it, because ids of the old scene mean other items in this one. */
+	const int64_t previous = pending != 0 ? pending : m_selection.item_in(scene_uuid);
+	m_list_scene_uuid = scene_uuid;
 	if (!have_scene) {
 		std::lock_guard<std::mutex> lock(m_conn_mutex);
 		detach_scene_signals_locked();
@@ -421,6 +469,9 @@ void VerticalItemList::refresh()
 		m_editor->set_item(m_list_scene_uuid, now);
 	else
 		m_editor->reload(false);
+	/* An item that is gone (or a scene change) clears the shared selection; the preview follows. */
+	m_selection.set(m_list_scene_uuid, now);
+	notify_change();
 }
 
 int64_t VerticalItemList::selected_id() const
@@ -451,6 +502,43 @@ void VerticalItemList::on_selection_changed()
 		return;
 	update_buttons();
 	m_editor->set_item(m_list_scene_uuid, selected_id());
+	m_selection.set(m_list_scene_uuid, selected_id());
+}
+
+/* The selection changed elsewhere (preview click): mirror it in the list and the transform panel. */
+void VerticalItemList::on_selection_model_changed()
+{
+	if (m_shutdown.load())
+		return;
+	if (!m_selection.scene_uuid().empty() && m_selection.scene_uuid() != m_list_scene_uuid) {
+		queue_refresh(); // the preview saw a newer active scene than the rows; refresh picks the id up
+		return;
+	}
+	const int64_t id = m_selection.item_in(m_list_scene_uuid);
+	if (id == selected_id())
+		return;
+	int row = -1;
+	for (int i = 0; i < m_list->count(); ++i) {
+		if (static_cast<int64_t>(m_list->item(i)->data(kIdRole).toLongLong()) == id) {
+			row = i;
+			break;
+		}
+	}
+	m_list->blockSignals(true);
+	if (row >= 0) {
+		m_list->setCurrentRow(row);
+		m_list->scrollToItem(m_list->item(row));
+	} else {
+		m_list->setCurrentRow(-1);
+		m_list->clearSelection();
+	}
+	m_list->blockSignals(false);
+	update_buttons();
+	m_editor->set_item(m_list_scene_uuid, selected_id());
+	if (row < 0 && id != 0) {
+		m_pending_select = id; // an item the rows do not show yet (just added): rebuild and keep it
+		queue_refresh();
+	}
 }
 
 /* ---- actions ---------------------------------------------------------- */

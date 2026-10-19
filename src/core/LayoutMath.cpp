@@ -74,4 +74,17 @@ Crop clamp_crop(Crop c, Size source)
 	return out;
 }
 
+Rect letterbox(Size canvas, Size widget)
+{
+	Rect r;
+	if (degenerate(canvas, widget))
+		return r;
+	const ItemTransform t = fit(canvas, widget);
+	r.x = static_cast<int>(std::lround(t.pos_x));
+	r.y = static_cast<int>(std::lround(t.pos_y));
+	r.w = static_cast<int>(std::lround(static_cast<float>(canvas.w) * t.scale_x));
+	r.h = static_cast<int>(std::lround(static_cast<float>(canvas.h) * t.scale_y));
+	return r;
+}
+
 } // namespace smulti::layout

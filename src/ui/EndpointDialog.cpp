@@ -29,6 +29,7 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
 #include <QtCore/QFileInfo>
+#include <QtCore/QStandardPaths>
 
 namespace smulti {
 
@@ -713,7 +714,9 @@ void EndpointDialog::refresh_streamlabs_status()
 
 void EndpointDialog::on_streamlabs_import()
 {
-	const QString path = QFileDialog::getOpenFileName(this, tr("Import token from generator config"), QString(),
+	/* The generator usually sits in Downloads; start there (empty = Qt default when unknown). */
+	const QString start_dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+	const QString path = QFileDialog::getOpenFileName(this, tr("Import token from generator config"), start_dir,
 	                                                  tr("Generator config (config.json);;JSON files (*.json)"));
 	if (path.isEmpty())
 		return;

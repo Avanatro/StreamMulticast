@@ -75,6 +75,7 @@ target_sources(
     src/core/CanvasResolve.cpp
     src/core/OwnedCanvasPolicy.cpp
     src/core/LayoutMath.cpp
+    src/core/PreviewEdit.cpp
     src/core/SceneLink.cpp
     src/core/CanvasScaleRef.cpp
     src/core/VerticalRecord.cpp

@@ -7,8 +7,12 @@ GPLv2 — see LICENSE for full text.
 
 #pragma once
 
+#include <QtCore/QObject>
 #include <QtWidgets/QTabWidget>
 #include <QtWidgets/QWidget>
+
+#include <cstdint>
+#include <string>
 
 class QCheckBox;
 class QLabel;
@@ -23,6 +27,54 @@ class VerticalItemList;
 class VerticalSceneLink;
 class VerticalSceneList;
 class VerticalRecorder;
+
+/**
+ * The one selected scene item of the vertical dock (G2: single source of truth). The Sources list and
+ * the preview both read and write it; neither keeps its own copy. Item ids are unique per scene only,
+ * so the selection always carries the uuid of the scene the id belongs to. UI thread only; holds no
+ * libobs reference. changed() fires only when the value really changes.
+ */
+class VerticalSelection : public QObject {
+	Q_OBJECT
+
+public:
+	explicit VerticalSelection(QObject *parent = nullptr) : QObject(parent) {}
+
+	void set(const std::string &scene_uuid, int64_t item_id)
+	{
+		if (item_id == 0 || scene_uuid.empty()) {
+			clear();
+			return;
+		}
+		if (scene_uuid == m_scene_uuid && item_id == m_item_id)
+			return;
+		m_scene_uuid = scene_uuid;
+		m_item_id = item_id;
+		emit changed();
+	}
+	void clear()
+	{
+		if (m_item_id == 0 && m_scene_uuid.empty())
+			return;
+		m_scene_uuid.clear();
+		m_item_id = 0;
+		emit changed();
+	}
+	const std::string &scene_uuid() const { return m_scene_uuid; }
+	int64_t item_id() const { return m_item_id; }
+	/** The selected id if it belongs to scene_uuid, else 0. */
+	int64_t item_in(const std::string &scene_uuid) const
+	{
+		return !scene_uuid.empty() && scene_uuid == m_scene_uuid ? m_item_id : 0;
+	}
+
+signals:
+	void changed();
+
+private:
+	std::string m_scene_uuid;
+	int64_t m_item_id = 0;
+};
 
 /**
  * Second dock ("StreamMulticast Vertical", id avanatro_streammulticast_vertical):
@@ -57,6 +109,7 @@ private:
 	void on_record_settings_changed();
 
 	VerticalRecorder &m_recorder;
+	VerticalSelection *m_selection = nullptr; ///< child; re-parented last so it is deleted after the widgets
 	QPushButton *m_record = nullptr;
 	QCheckBox *m_record_with_main = nullptr;
 	QLineEdit *m_record_folder = nullptr;

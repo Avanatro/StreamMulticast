@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "TransformEditor.hpp"
 
+#include <QtCore/QElapsedTimer>
 #include <QtWidgets/QWidget>
 
 #include <atomic>
@@ -39,6 +40,10 @@ class QLabel;
 namespace smulti {
 
 class OwnedCanvas;
+class VerticalSelection;
+
+/** fn(scene, scene_uuid) runs with the owned canvas' ACTIVE scene; see VerticalItemList::with_active_scene. */
+using SceneFn = std::function<void(obs_scene_t *, const std::string &scene_uuid)>;
 
 /**
  * "Sources" tab of the vertical dock: the items of the ACTIVE scene (channel 0) of the owned canvas,
@@ -58,12 +63,14 @@ class OwnedCanvas;
  *    collection changing, SCRIPTING_SHUTDOWN, unload). The destructor repeats it.
  *  - Only the owned canvas is ever written (INV-6): every write re-checks that the scene belongs to
  *    the owned canvas. Added inputs are only referenced, never modified.
+ *  - The selected row mirrors the dock's VerticalSelection (the single selection source, shared with
+ *    the preview). A scene change or a removed item clears it.
  */
 class VerticalItemList : public QWidget {
 	Q_OBJECT
 
 public:
-	explicit VerticalItemList(OwnedCanvas &canvas, QWidget *parent = nullptr);
+	VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selection, QWidget *parent = nullptr);
 	~VerticalItemList() override;
 
 	/** Rebuild the list and (re)connect the signals. UI thread only. */
@@ -75,6 +82,19 @@ public:
 	/** Detach and never connect or touch libobs again (OBS exit, module unload). Any thread, idempotent. */
 	void shutdown();
 
+	/**
+	 * Run fn with the active scene (channel 0) of the owned canvas and its uuid, UI thread. Same reference
+	 * and INV-6 rules as every other access here: all refs are released before it returns, fn must not keep
+	 * the scene or any item. False (fn not called) when there is no canvas/scene or after shutdown.
+	 */
+	bool with_active_scene(const SceneFn &fn);
+
+	/** Reload the transform panel now (force: also while a field has focus). UI thread. */
+	void reload_editor(bool force);
+
+	/** Called on the UI thread after the items or a transform changed (throttled like the editor reload). */
+	void set_change_listener(std::function<void()> listener) { m_change_listener = std::move(listener); }
+
 private slots:
 	void on_add();
 	void on_remove();
@@ -85,6 +105,11 @@ private slots:
 
 private:
 	bool with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn);
+	bool with_scene_impl(const std::string *required_uuid, const SceneFn &fn);
+	void on_selection_model_changed();
+	void editor_reload_throttled();
+	void editor_reload_now();
+	void notify_change();
 	bool with_item(const std::string &scene_uuid, int64_t item_id, const std::function<void(obs_sceneitem_t *)> &fn);
 	void connect_canvas_signals(obs_canvas_t *canvas);
 	void connect_scene_signals(obs_source_t *scene_source);
@@ -100,6 +125,9 @@ private:
 	static void on_transform_signal(void *param, calldata_t *cd);
 
 	OwnedCanvas &m_canvas;
+	VerticalSelection &m_selection;
+	std::function<void()> m_change_listener;
+	QElapsedTimer m_reload_clock; ///< UI thread: last editor reload (30 Hz throttle)
 	QLabel *m_scene_label = nullptr;
 	QListWidget *m_list = nullptr;
 	QPushButton *m_add_btn = nullptr;

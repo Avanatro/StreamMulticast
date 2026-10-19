@@ -582,6 +582,17 @@ StreamlabsTokenImport streamlabs_import_generator_config(const std::string &json
 	if (!data)
 		return token_error("The file is not a valid generator config.json.");
 
+	/* The plugin's own config (top-level "endpoints" array) is a common wrong pick in the file dialog. */
+	obs_data_item_t *endpoints = obs_data_item_byname(data, "endpoints");
+	const bool is_plugin_config = endpoints && obs_data_item_gettype(endpoints) == OBS_DATA_ARRAY;
+	if (endpoints)
+		obs_data_item_release(&endpoints);
+	if (is_plugin_config) {
+		obs_data_release(data);
+		return token_error("This is the StreamMulticast config, not the generator's config.json. Pick the "
+				   "config.json next to StreamLabsTikTokStreamKeyGenerator.exe.");
+	}
+
 	obs_data_item_t *item = obs_data_item_byname(data, "token");
 	const bool is_string = item && obs_data_item_gettype(item) == OBS_DATA_STRING;
 	std::string token;

@@ -36,7 +36,11 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 	layout->setContentsMargins(4, 4, 4, 4);
 	layout->setSpacing(4);
 
-	m_preview = new CanvasPreview(canvas, this);
+	/* Parent set at the end of the constructor: QObject deletes children in order, so the selection goes
+	 * last, after the preview and the list that reference it. */
+	m_selection = new VerticalSelection();
+
+	m_preview = new CanvasPreview(canvas, *m_selection, this);
 	layout->addWidget(m_preview, 3);
 
 	/* No colours here: checked state and the theme's text-danger class mark a running recording. */
@@ -51,13 +55,26 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 	m_tabs = new QTabWidget(this);
 	m_scenes = new VerticalSceneList(canvas, m_tabs);
 	m_tabs->addTab(m_scenes, tr("Scenes"));
-	m_items = new VerticalItemList(canvas, m_tabs);
+	m_items = new VerticalItemList(canvas, *m_selection, m_tabs);
 	m_tabs->addTab(m_items, tr("Sources"));
 	m_links = new VerticalSceneLink(canvas, m_tabs);
 	m_tabs->addTab(m_links, tr("Links"));
 	m_tabs->addTab(build_record_tab(), tr("Record"));
 	m_tabs->setTabToolTip(0, tr("\"Set active\" is overridden by the next main scene change while links are on."));
 	layout->addWidget(m_tabs, 2);
+
+	/* Preview editing goes through the list's scene access (same reference and INV-6 rules). Both are
+	 * children of this dock; the list refuses access after shutdown. */
+	m_preview->set_scene_access([this](const SceneFn &fn) { return m_items && m_items->with_active_scene(fn); });
+	m_preview->set_edit_listener([this]() {
+		if (m_items)
+			m_items->reload_editor(true);
+	});
+	m_items->set_change_listener([this]() {
+		if (m_preview)
+			m_preview->refresh_overlay();
+	});
+	m_selection->setParent(this);
 
 	/* The recorder calls back on the UI thread; the dock may be destroyed by Qt first at OBS exit. */
 	QPointer<VerticalCanvasDock> self(this);

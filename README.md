@@ -107,6 +107,10 @@ That's it. Building from source is **only** for contributors who want to modify 
 
 Pair with [Stream Health Doctor](https://tools.avanatro.com/stream-health/) for deeper per-output telemetry in a separate browser window on a second monitor.
 
+### Editing the vertical canvas in its preview
+
+The **StreamMulticast Vertical** dock preview can be edited like the OBS main preview: click an item to select it (the Sources tab row follows, and selecting a row highlights the item), drag to move it (snaps to the canvas edges, the centre lines and other items' edges; hold **Ctrl** to move freely), drag a corner handle to resize with the aspect ratio kept (**Shift** = free) or an edge handle to resize one axis. Arrow keys nudge by 1 px (**Shift** = 10 px), **Esc** cancels a running drag, **Ctrl+Z** undoes the last drag or nudge (one step only; the OBS undo history covers the main canvas only). **Delete** does nothing in this preview. Locked and hidden items cannot be clicked; rotation, alignment and crop are kept as they are (use the transform panel or OBS for those).
+
 ### TikTok Bridge handoff format
 
 Optional helper tools can pass TikTok RTMP data to StreamMulticast by writing:
@@ -133,7 +137,7 @@ values, and can optionally start a user-chosen external helper.
 Build with `-DSMULTI_STREAMLABS_TIKTOK=ON` to let a TikTok endpoint fetch its RTMP URL and stream key from Streamlabs every time it goes live, instead of pasting a fresh key by hand:
 
 1. Log in once with the separate *StreamLabs TikTok Stream Key Generator*; it writes a `config.json` with a `token` field.
-2. In the endpoint dialog set **Key source** to **Streamlabs TikTok** and click **Import token from generator config…**. Only the token is read; it is stored encrypted for your Windows user (DPAPI) in `streamlabs_tiktok.bin` in the plugin config folder, never in `config.json`, never logged and never shown. **Disconnect** deletes it.
+2. In the endpoint dialog set **Key source** to **Streamlabs TikTok** and click **Import token from generator config…** (the file picker opens in your Downloads folder; pick the `config.json` next to `StreamLabsTikTokStreamKeyGenerator.exe`; picking the StreamMulticast config by mistake is refused with a hint). Only the token is read; it is stored encrypted for your Windows user (DPAPI) in `streamlabs_tiktok.bin` in the plugin config folder, never in `config.json`, never logged and never shown. **Disconnect** deletes it.
 3. The status line shows `Connected as @user — can go live: yes/no`. Set a title and search a category (or keep *Other*).
 4. When the endpoint starts, the plugin starts a Streamlabs TikTok session, streams to the URL and key it returns (kept in memory for this session only) and ends the session when the endpoint stops, the main stream stops, the scene collection changes or OBS exits. A failed fetch only stops that endpoint and shows the error in the Health tab. A session left open by a crash is ended before the next start (only its id is kept, in `streamlabs_tiktok_session.txt`).
 

@@ -692,7 +692,7 @@ nodes:
             reference: "OBS runtime check: the dialog lists Main, StreamMulticast Vertical and Aitum Vertical; saving keeps uuid and name (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-8)"
             result: pending
       - id: ui-endpoint-dialog.streamlabs
-        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: 'Key source' combo (Manual | Streamlabs TikTok). Streamlabs shows 'Import token from generator config…' (file picker, only the token is read and stored in the DPAPI vault), 'Disconnect' (deletes it), a status line from the info call ('Connected as @user — can go live: yes/no' or the error), Title and Category search (line edit, Search, result combo ending with Other). Server URL and key are read-only, greyed, with the hint 'fetched at go-live'; the stored manual values are saved unchanged; save skips the server/key and duplicate checks. The token is never shown."
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: 'Key source' combo (Manual | Streamlabs TikTok). Streamlabs shows 'Import token from generator config…' (file picker starting in the user's Downloads folder, QStandardPaths::DownloadLocation; only the token is read and stored in the DPAPI vault; picking the StreamMulticast config shows the streamlabs-tiktok refusal text), 'Disconnect' (deletes it), a status line from the info call ('Connected as @user — can go live: yes/no' or the error), Title and Category search (line edit, Search, result combo ending with Other). Server URL and key are read-only, greyed, with the hint 'fetched at go-live'; the stored manual values are saved unchanged; save skips the server/key and duplicate checks. The token is never shown."
         verification:
           - kind: manual
             reference: "OBS runtime check (ON build): Dima imports the token once, the status shows 'Connected as @<user>', goes live, TikTok receives video, the session is ended on stop (not run in this session; plugin compiled with -DSMULTI_STREAMLABS_TIKTOK=ON in D:/OpenWorld/StreamMulticast-build/release-sltt, TASK-28)"
@@ -741,7 +741,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording]
+    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -824,6 +824,12 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: dropdown text is readable in the Links tab and in the endpoint dialog Video canvas selector with the OBS dark (Yami) and light themes (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-25)"
             result: pending
+      - id: ui-vertical-dock.drag-edit
+        behavior: "The preview edits the owned canvas' active scene like the OBS main preview (TASK-29): a left click selects the topmost visible, unlocked item (handles of the selected item are tested first, 6 px radius) or clears the selection on empty canvas; dragging moves it with snapping (8 widget px: canvas edges, centre lines, other visible items' edges; Ctrl held = no snap) or resizes it from 8 handles (corner keeps the aspect, Shift free, edge one axis, opposite side fixed, min 8 canvas px; bounds items change bounds, others scale; rotation, alignment and crop are never written) with live obs_sceneitem_set_pos/set_scale/set_bounds inside obs_sceneitem_defer_update_begin/end. Arrow keys nudge 1 px (Shift 10), Escape cancels a drag (restores the press transform), Ctrl+Z restores the transform before the last drag or nudge (one step; obs_frontend undo only covers the main canvas), Delete does nothing; these keys are claimed via ShortcutOverride so OBS main-window shortcuts (Delete removes a main source) never fire from the preview. Resize/move cursors follow the handle and rotation. The draw callback outlines the selected item in red with 8 square handles (outline only when locked) and the hovered item thinly, using the solid base effect in canvas coordinates under the canvas ortho; it reads only cached corners under a mutex, never a scene or item pointer. One selection source (VerticalSelection owned by the dock, scene uuid + item id): a preview click selects the Sources row and loads the transform panel, a row selects in the preview; the panel reloads at most ~30 times per second during drags (item_transform) and forced on release; a scene change or removed item clears the selection. All scene/item refs live inside one UI-thread call through VerticalItemList::with_active_scene (INV-6 check there); shutdown drops the access, the drag and the overlay before the display is destroyed. Only compiled locally (plugin target built with SMULTI_STREAMLABS_TIKTOK OFF and ON), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: in V Gaming drag and resize the webcam in the vertical dock preview (corner keeps aspect, Shift free, edges one axis, snaps to edges and centre, Ctrl disables), the Sources row and transform values follow live; clicking a row highlights the item; arrows nudge, Escape cancels, Ctrl+Z undoes, Delete leaves the main canvas untouched; scene switch, collection switch and quitting OBS during/after a drag do not crash (not run in this session; plugin target compiled, TASK-29)"
+            result: pending
     status: building
   - id: plugin-entry
     lane: entry
@@ -894,7 +900,7 @@ nodes:
       - tests/test_layout_math.cpp
     works_when:
       - id: layout-math.fit-fill-crop
-        behavior: "fit scales uniformly by min(cw/sw, ch/sh) and centres without crop; fill scales by max(...) at pos 0,0 with a symmetric crop so the visible part equals the canvas; clamp_crop keeps every value >= 0 with left+right <= w-1 and top+bottom <= h-1; a zero-sized source yields the identity transform."
+        behavior: "fit scales uniformly by min(cw/sw, ch/sh) and centres without crop; fill scales by max(...) at pos 0,0 with a symmetric crop so the visible part equals the canvas; clamp_crop keeps every value >= 0 with left+right <= w-1 and top+bottom <= h-1; a zero-sized source yields the identity transform. letterbox(canvas, widget) is fit() rounded to whole pixels; the preview render and its mouse mapping both use it (TASK-29)."
         verification:
           - kind: automated
             reference: tests/test_layout_math.cpp
@@ -925,6 +931,110 @@ nodes:
             check: layout_zero_source_size_is_identity
             result: passed
             run: "ctest --test-dir build_tests -C Release -R layout_, local run 2026-10-19; build failed before implementation (missing LayoutMath.cpp), 5/5 passed after (TASK-9)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_map_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+    status: building
+  - id: preview-edit
+    lane: core
+    goal: "Pure math for click-and-drag editing in the vertical preview: view mapping, item boxes, hit tests, snapping move, handle resize and nudge."
+    owns: [preview-edit.math]
+    needs: [layout-math]
+    code:
+      - src/core/PreviewEdit.hpp
+      - src/core/PreviewEdit.cpp
+      - tests/test_preview_edit.cpp
+    works_when:
+      - id: preview-edit.math
+        behavior: "OBS-free and Qt-free. View maps widget px <-> canvas px through layout::letterbox. An item box follows libobs update_item_transform: size = bounds or scale*(source-crop), corners = pos + R(rot)*(unit*size - alignment origin). hit_item returns the topmost visible, unlocked, non-degenerate item containing a point (rotated boxes via the inverse transform); hit_handle finds the nearest of 8 handles within a widget-px radius (default 6). move_position snaps the moved box's axis-aligned extent per axis to canvas edges, other visible items' edges and (by its centre) the canvas centre lines within a threshold (default 8 widget px in canvas px); ctrl disables snapping. resize keeps the opposite corner/edge fixed, keeps the aspect on corners unless shift, changes one axis on edges, writes bounds for bounds items and scale otherwise, clamps each side to >= 8 canvas px without flipping, and projects the drag on the item's own axes so any rotation (0/90/180/270 tested) works. nudge moves 1 px, 10 with shift."
+        verification:
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_map_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_hit_topmost_wins
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_hit_skips_locked_hidden
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_hit_rotated_box
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_handle_hit
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_move_snaps_to_edge
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_move_snaps_to_center
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_move_ctrl_disables_snap
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_resize_corner_keeps_aspect
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_resize_shift_free
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_resize_edge_one_axis
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_resize_bounds_item
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_resize_min_size
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_preview_edit.cpp
+            check: preview_edit_nudge
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
             checked_at: 2026-10-19
     status: building
   - id: release-staging
@@ -988,7 +1098,7 @@ nodes:
       - tests/fixtures/streamlabs_generator_config.json
     works_when:
       - id: streamlabs-tiktok.parse
-        behavior: "info/search/start/end requests use https://streamlabs.com/api/v5/slobs/tiktok (search query cut to 25 code points and url-encoded; start is multipart title, device_platform=win32, category=<game_mask_id or ''>, audience_type=0); start needs id, rtmp and key (any missing = MissingField error); info reads user.username, application_status.status, can_be_live (only JSON true); search always appends {Other, ''}; end needs success=true. Error messages never contain the token, key, rtmp URL or body; a body that is not one well-formed JSON object (also invalid or overlong UTF-8, UTF-8 surrogates, \\u0000, lone surrogate escapes, integers outside int64, non-finite reals, duplicate keys) is rejected before the libobs parser can log a fragment of it. The generator config.json 'token' is accepted when non-empty, printable ASCII and at most 512 characters. One user agent constant (Streamlabs Desktop Electron)."
+        behavior: "info/search/start/end requests use https://streamlabs.com/api/v5/slobs/tiktok (search query cut to 25 code points and url-encoded; start is multipart title, device_platform=win32, category=<game_mask_id or ''>, audience_type=0); start needs id, rtmp and key (any missing = MissingField error); info reads user.username, application_status.status, can_be_live (only JSON true); search always appends {Other, ''}; end needs success=true. Error messages never contain the token, key, rtmp URL or body; a body that is not one well-formed JSON object (also invalid or overlong UTF-8, UTF-8 surrogates, \\u0000, lone surrogate escapes, integers outside int64, non-finite reals, duplicate keys) is rejected before the libobs parser can log a fragment of it. The generator config.json 'token' is accepted when non-empty, printable ASCII and at most 512 characters; a file with a top-level 'endpoints' array (the StreamMulticast config) is refused with \"This is the StreamMulticast config, not the generator's config.json. Pick the config.json next to StreamLabsTikTokStreamKeyGenerator.exe.\" and no token is taken from it (TASK-29). One user agent constant (Streamlabs Desktop Electron)."
         verification:
           - kind: automated
             reference: tests/test_streamlabs_tiktok.cpp
@@ -1049,6 +1159,12 @@ nodes:
             check: streamlabs_tiktok_start_request_fields
             result: passed
             run: "ctest --test-dir build_tests -C Release -R streamlabs_tiktok_, local run 2026-10-19; configure failed before implementation (missing src/core/StreamlabsTikTok.cpp), 11/11 passed after (TASK-28)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_streamlabs_tiktok.cpp
+            check: streamlabs_tiktok_import_detects_plugin_config
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'preview_edit_|streamlabs_tiktok_', local run 2026-10-19; 15/15 new cases failed against a stub PreviewEdit.cpp / unchanged import, 31/31 passed after; full ctest 134/134 (TASK-29)"
             checked_at: 2026-10-19
     status: building
   - id: streamlabs-token-vault

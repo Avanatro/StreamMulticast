@@ -436,3 +436,26 @@ SMULTI_TEST(streamlabs_tiktok_session_busy_for_other_endpoint)
 	EXPECT_EQ(book.open_id(), "S1");                        // the other endpoint keeps its session
 	EXPECT_EQ(book.release_owner("ep-b"), "");
 }
+
+SMULTI_TEST(streamlabs_tiktok_import_detects_plugin_config)
+{
+	/* The StreamMulticast config (top-level "endpoints" array) is a common wrong pick. */
+	const char *kPluginConfig = R"({"schema_version":3,"endpoints":[{"id":"a","name":"TikTok"}]})";
+	StreamlabsTokenImport r = smulti::streamlabs_import_generator_config(kPluginConfig);
+	EXPECT_TRUE(!r.ok);
+	EXPECT_TRUE(r.token.empty());
+	EXPECT_EQ(r.error_message,
+		  std::string("This is the StreamMulticast config, not the generator's config.json. Pick the config.json "
+			      "next to StreamLabsTikTokStreamKeyGenerator.exe."));
+
+	/* Even with a token field next to it, the plugin config is refused (never import a wrong token). */
+	StreamlabsTokenImport both =
+		smulti::streamlabs_import_generator_config(R"({"token":"FAKE-TOKEN-xyz","endpoints":[]})");
+	EXPECT_TRUE(!both.ok);
+	EXPECT_TRUE(both.token.empty());
+
+	/* "endpoints" that is not an array is not the plugin config: the normal token rules apply. */
+	StreamlabsTokenImport other = smulti::streamlabs_import_generator_config(R"({"token":"FAKE-TOKEN-xyz","endpoints":1})");
+	EXPECT_TRUE(other.ok);
+	EXPECT_EQ(other.token, "FAKE-TOKEN-xyz");
+}

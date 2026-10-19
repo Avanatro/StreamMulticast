@@ -39,4 +39,14 @@ ItemTransform fill(Size source, Size canvas);
 /// source pixel stays visible). A zero-sized source clamps everything to 0.
 Crop clamp_crop(Crop c, Size source);
 
+/// Whole-pixel rectangle.
+struct Rect {
+	int x = 0, y = 0, w = 0, h = 0;
+};
+
+/// Letterboxed viewport of `canvas` inside `widget`: fit() rounded to whole
+/// pixels. The preview render and its mouse mapping both use this, so they
+/// never disagree. A zero-sized canvas or widget yields an empty rect.
+Rect letterbox(Size canvas, Size widget);
+
 } // namespace smulti::layout
