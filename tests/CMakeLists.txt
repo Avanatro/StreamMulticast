@@ -11,8 +11,11 @@ add_executable(
   test_endpoint_roundtrip.cpp
   test_endpoint_defaults.cpp
   test_linked_start.cpp
+  test_endpoint_validation.cpp
+  test_linked_start_duplicates.cpp
   ${CMAKE_SOURCE_DIR}/src/core/Endpoint.cpp
   ${CMAKE_SOURCE_DIR}/src/core/LinkedStart.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/EndpointValidation.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

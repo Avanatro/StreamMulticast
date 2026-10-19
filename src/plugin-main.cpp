@@ -24,6 +24,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/ConfigStore.hpp"
 #include "core/EndpointRegistry.hpp"
 #include "core/LinkedStart.hpp"
+#include "core/MainServiceTarget.hpp"
 #include "pipeline/ControllerReaper.hpp"
 #include "pipeline/HealthSampler.hpp"
 #include "pipeline/OutputController.hpp"
@@ -56,7 +57,17 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 
 	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		obs_log(LOG_INFO, "OBS main stream started — triggering linked endpoints");
-		for (auto &ep : smulti::select_linked_for_start(g_registry->all())) {
+		/* Skip endpoints that would stream to the same server+key as the main
+		 * stream or as an earlier endpoint. Log the endpoint name only,
+		 * never the stream key. */
+		auto plan = smulti::plan_linked_start(g_registry->all(), smulti::read_main_service_target());
+		for (const auto &skipped : plan.skipped_duplicates) {
+			obs_log(LOG_WARNING, "Skipping endpoint '%s': same server and key as %s",
+				skipped.name.c_str(),
+				skipped.reason == smulti::DuplicateKind::MainService ? "the OBS main stream"
+										     : "another endpoint");
+		}
+		for (auto &ep : plan.to_start) {
 			auto ctrl = g_registry->controller_for(ep.id);
 			if (ctrl && !ctrl->is_running())
 				ctrl->start();

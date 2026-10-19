@@ -9,6 +9,9 @@ GPLv2 — see LICENSE for full text.
 #include "../plugin-support.h"
 #include "../core/ObsServiceImport.hpp"
 #include "../core/TikTokBridgeImport.hpp"
+#include "../core/EndpointValidation.hpp"
+#include "../core/MainServiceTarget.hpp"
+#include "../core/EndpointRegistry.hpp"
 
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -430,7 +433,27 @@ void EndpointDialog::on_save()
 		return;
 	}
 
-	m_result = collect_from_form();
+	Endpoint candidate = collect_from_form();
+
+	/* Warn about a duplicate target (same server + key as another enabled
+	 * endpoint or the OBS main stream). The user may still save. The stream
+	 * key is never shown or logged. */
+	DuplicateResult dup = find_duplicate(candidate, m_registry.all(), read_main_service_target());
+	if (dup.kind != DuplicateKind::None) {
+		QString what = dup.kind == DuplicateKind::MainService
+				       ? tr("the OBS main stream")
+				       : tr("the endpoint \"%1\"").arg(QString::fromStdString(dup.other_name));
+		auto answer = QMessageBox::warning(
+			this, tr("Duplicate target"),
+			tr("This endpoint uses the same server and stream key as %1. "
+			   "Streaming twice to the same target usually fails or interrupts the stream. "
+			   "Save anyway?").arg(what),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (answer != QMessageBox::Yes)
+			return;
+	}
+
+	m_result = candidate;
 	accept();
 }
 

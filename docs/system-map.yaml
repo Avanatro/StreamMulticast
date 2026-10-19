@@ -22,6 +22,14 @@ ignore:
   - "**/*.subagent"
   - "*.subagent"
 
+# Generated or pre-existing untracked files that are not part of this change.
+size_ignore:
+  - "build_x64_vs18/**"
+  - "build_tests/**"
+  - "cmake/.CMakeBuildNumber"
+  - "**/*.subagent"
+  - "*.subagent"
+
 nodes:
   - id: endpoint-model
     lane: foundation
@@ -95,11 +103,33 @@ nodes:
     goal: "Invalid or duplicate endpoints (empty fields, bad scheme, same ingest and key twice) are rejected or warned before start."
     owns: [endpoint.validation-rules]
     needs: [endpoint-model]
+    code:
+      - src/core/EndpointValidation.hpp
+      - src/core/EndpointValidation.cpp
+      - src/core/MainServiceTarget.hpp
+      - src/core/MainServiceTarget.cpp
+      - tests/test_endpoint_validation.cpp
+      - tests/test_linked_start_duplicates.cpp
     works_when:
       - id: endpoint-validation.dup-target
-        behavior: "Two active endpoints, or one endpoint and the OBS main service, with identical server and key are flagged before streaming starts."
-        verification: []
-    status: planned
+        behavior: "Two targets are duplicates when the normalized server (trimmed, scheme and host lowercased, trailing slashes stripped) and the non-empty stream key are equal. Checked against other enabled endpoints and the OBS main streaming service. The check is pure (find_duplicate); reading the main service via the frontend API (MainServiceTarget) is not covered by an automated check."
+        verification:
+          - kind: automated
+            reference: tests/test_endpoint_validation.cpp
+            check: duplicate_when_normalized_server_and_key_equal
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed against stub before implementation, passed after (WU4 commit)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_endpoint_validation.cpp
+            check: find_duplicate_detects_main_service
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed against stub before implementation, passed after (WU4 commit)"
+            checked_at: 2026-10-19
+          - kind: manual
+            reference: "OBS runtime check: main service and a linked endpoint with identical server and key; the endpoint must be skipped with a warning in the log (not run in this session)"
+            result: pending
+    status: building
   - id: encoder-factory
     lane: pipeline
     goal: "Each endpoint gets a video and audio encoder matching its settings, with safe fallback."
@@ -187,7 +217,7 @@ nodes:
     lane: entry
     goal: "Linked, enabled endpoints start and stop with the OBS main stream."
     owns: [link.main-stream-trigger]
-    needs: [endpoint-registry]
+    needs: [endpoint-registry, endpoint-validation]
     code:
       - src/plugin-main.cpp
       - src/core/LinkedStart.hpp
@@ -206,19 +236,37 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: start main stream with one disabled linked endpoint; it must not start (not run in this session)"
             result: pending
+      - id: main-stream-linking.skip-duplicate
+        behavior: "A linked endpoint whose server and key equal the OBS main stream or an earlier selected endpoint is not started; a warning with the endpoint name (never the key) is logged. Planning is the pure function plan_linked_start; the event wiring is not covered by an automated check."
+        verification:
+          - kind: automated
+            reference: tests/test_linked_start_duplicates.cpp
+            check: plan_skips_endpoint_equal_to_main_service
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed against stub before implementation, passed after (WU4 commit)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_linked_start_duplicates.cpp
+            check: plan_first_of_two_duplicate_endpoints_wins
+            result: passed
+            run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed against stub before implementation, passed after (WU4 commit)"
+            checked_at: 2026-10-19
     status: building
   - id: ui-endpoint-dialog
     lane: ui
     goal: "User edits one endpoint with import helpers and validation."
     owns: [ui.endpoint-form]
-    needs: [endpoint-model, service-import, encoder-factory, platform-server-table]
+    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation]
     code:
       - src/ui/EndpointDialog.hpp
       - src/ui/EndpointDialog.cpp
     works_when:
       - id: ui-endpoint-dialog.save-validation
-        behavior: "Save rejects empty name, server or key."
-        verification: []
+        behavior: "Save rejects empty name, server or key, and warns (user may still save) when server and key duplicate another enabled endpoint or the OBS main stream. The dialog wiring is not covered by an automated check."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: save an endpoint with the same server and key as another one; a warning must appear and Yes must still save (not run in this session)"
+            result: pending
     status: building
   - id: ui-config-tab
     lane: ui
