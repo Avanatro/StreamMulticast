@@ -107,6 +107,9 @@ struct StreamlabsTokenImport {
 	std::string error_message; ///< sanitized
 };
 
+/** A Streamlabs token is non-empty printable ASCII (0x21..0x7E), at most kStreamlabsTokenMax characters. */
+bool streamlabs_token_text_ok(const std::string &token);
+
 /** Extract the string field `token` from the generator's config.json text. */
 StreamlabsTokenImport streamlabs_import_generator_config(const std::string &json_text);
 /** Same, reading the file at `path` (UTF-8). */

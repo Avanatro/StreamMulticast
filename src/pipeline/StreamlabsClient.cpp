@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "StreamlabsClient.hpp"
 #include "StreamlabsTokenVault.hpp"
+#include "../core/StreamlabsLogin.hpp"
 #include "../plugin-support.h"
 
 #include <obs-module.h>
@@ -302,6 +303,7 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 	uc.dwUrlPathLength = static_cast<DWORD>(-1);
 	uc.dwExtraInfoLength = static_cast<DWORD>(-1);
 	if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS || !uc.lpszHostName) {
+		wipe_wide(url);
 		res.transport_error = "only https URLs are allowed";
 		return res;
 	}
@@ -336,6 +338,8 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 		error = GetLastError();
 		close_handle(connect);
 		close_handle(session);
+		wipe_wide(url);
+		wipe_wide(path);
 		res.transport_error = transport_text(error);
 		return res;
 	}
@@ -347,6 +351,8 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 			close_handle(request);
 			close_handle(connect);
 			close_handle(session);
+			wipe_wide(url);
+			wipe_wide(path);
 			res.transport_error = transport_text(ERROR_WINHTTP_OPERATION_CANCELLED);
 			res.cancelled = true;
 			return res;
@@ -354,11 +360,15 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 		slot.request = request;
 	}
 
-	std::wstring token_w = to_wide(token);
-	std::wstring headers = L"authorization: Bearer ";
-	headers += token_w;
-	headers += L"\r\n";
-	wipe_wide(token_w);
+	/* No token: an unauthenticated call (the login code exchange). */
+	std::wstring headers;
+	if (!token.empty()) {
+		std::wstring token_w = to_wide(token);
+		headers = L"authorization: Bearer ";
+		headers += token_w;
+		headers += L"\r\n";
+		wipe_wide(token_w);
+	}
 	std::string body;
 	if (!req.form.empty()) {
 		const std::string boundary = random_boundary();
@@ -366,7 +376,8 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 		body = streamlabs_multipart_body(req.form, boundary);
 	}
 
-	bool ok = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(-1L),
+	bool ok = WinHttpSendRequest(request, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+				     headers.empty() ? 0 : static_cast<DWORD>(-1L),
 				     body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char *>(body.data()),
 				     static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) &&
 		  WinHttpReceiveResponse(request, nullptr);
@@ -414,6 +425,8 @@ StreamlabsClient::HttpResult StreamlabsClient::perform(const StreamlabsRequest &
 	}
 	close_handle(connect);
 	close_handle(session);
+	wipe_wide(url); // the login exchange URL carries the code and verifier
+	wipe_wide(path);
 
 	if (!ok) {
 		streamlabs_vault::wipe(res.body);
@@ -477,7 +490,7 @@ void StreamlabsClient::info(ResultFn done)
 	if (!token) {
 		StreamlabsResult r;
 		r.error_code = StreamlabsError::NoToken;
-		r.error_message = "Not connected. Import a token from the generator config.";
+		r.error_message = "Not connected. Log in with Streamlabs first.";
 		post([done, r]() { done(r); });
 		return;
 	}
@@ -496,7 +509,7 @@ void StreamlabsClient::search(const std::string &query, ResultFn done)
 	if (!token) {
 		StreamlabsResult r;
 		r.error_code = StreamlabsError::NoToken;
-		r.error_message = "Not connected. Import a token from the generator config.";
+		r.error_message = "Not connected. Log in with Streamlabs first.";
 		post([done, r]() { done(r); });
 		return;
 	}
@@ -531,7 +544,7 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 	}
 	auto token = load_token();
 	if (!token) {
-		fail_now("Not connected to Streamlabs. Import a token in the endpoint settings.",
+		fail_now("Not connected to Streamlabs. Log in in the endpoint settings.",
 			 StreamlabsError::NoToken);
 		return;
 	}
@@ -601,6 +614,28 @@ void StreamlabsClient::start_session(const std::string &endpoint_id, const std::
 		});
 		streamlabs_vault::wipe(r.key);
 		streamlabs_vault::wipe(r.rtmp);
+	});
+}
+
+void StreamlabsClient::exchange_login(const std::string &verifier, const std::string &code, TokenFn done)
+{
+	auto verifier_copy = token_holder(std::string(verifier));
+	auto code_copy = token_holder(std::string(code));
+	enqueue([this, verifier_copy, code_copy, done]() {
+		StreamlabsRequest req = streamlabs_login_exchange_request(*verifier_copy, *code_copy);
+		HttpResult http = perform(req, std::string(), kRequestTimeoutMs, m_worker_slot);
+		streamlabs_vault::wipe(req.url);
+		StreamlabsTokenImport r;
+		if (http.transport_ok)
+			r = streamlabs_login_parse_exchange(http.status, http.body);
+		else
+			r.error_message = streamlabs_transport_error(http.transport_error).error_message;
+		streamlabs_vault::wipe(http.body);
+		post([done, r]() mutable {
+			done(r);
+			streamlabs_vault::wipe(r.token);
+		});
+		streamlabs_vault::wipe(r.token);
 	});
 }
 

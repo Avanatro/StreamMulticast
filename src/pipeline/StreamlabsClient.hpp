@@ -76,6 +76,16 @@ public:
 	void start_session(const std::string &endpoint_id, const std::string &endpoint_name, const std::string &title,
 			   const std::string &category_id, AdoptFn adopt);
 
+	using TokenFn = std::function<void(const StreamlabsTokenImport &)>;
+	/**
+	 * UI thread: exchange a browser login code for a Streamlabs token
+	 * (StreamlabsLoginFlow). Same worker and alive flag as every other call; no
+	 * authorization header. `done` runs on the UI thread; the token copy it
+	 * gets is wiped after it returns. The verifier and code copies are wiped
+	 * when the job is gone.
+	 */
+	void exchange_login(const std::string &verifier, const std::string &code, TokenFn done);
+
 	/** Any thread: end the session `endpoint_id` owns (no-op otherwise). Asynchronous, at most once. */
 	void end_session(const std::string &endpoint_id);
 

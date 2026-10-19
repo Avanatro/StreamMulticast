@@ -18,7 +18,10 @@ GPLv2 — see LICENSE for full text.
 #include "../core/StreamlabsTikTok.hpp"
 #include "../pipeline/StreamlabsClient.hpp"
 #include "../pipeline/StreamlabsTokenVault.hpp"
+#include "../pipeline/StreamlabsLoginFlow.hpp"
 #include <QtCore/QPointer>
+#include <QtWidgets/QMenu>
+#include <QtWidgets/QToolButton>
 #endif
 
 #include <QtWidgets/QVBoxLayout>
@@ -66,6 +69,10 @@ EndpointDialog::EndpointDialog(const Endpoint   &ep,
 	setup_ui();
 	populate_from_endpoint();
 }
+
+/* Out of line: the Streamlabs login member needs the complete type. Destroying it
+ * cancels a waiting login (socket closed, listener thread joined). */
+EndpointDialog::~EndpointDialog() = default;
 
 /* -----------------------------------------------------------------------
  * setup_ui
@@ -609,14 +616,39 @@ void EndpointDialog::setup_streamlabs_ui(QVBoxLayout *outer)
 	m_streamlabs_status->setWordWrap(true);
 	form->addRow(tr("Status:"), m_streamlabs_status);
 
+	/* Login options: the browser login first; the Streamlabs Desktop login; the
+	 * generator config.json import stays available under More. */
 	auto *token_row = new QHBoxLayout();
-	m_streamlabs_import_btn = new QPushButton(tr("Import token from generator config…"), m_streamlabs_box);
-	m_streamlabs_import_btn->setToolTip(tr("Select the config.json of the StreamLabs TikTok Stream Key Generator. "
-	                                       "Only its token is read; it is stored encrypted for your Windows user."));
+	m_streamlabs_login_btn = new QPushButton(tr("Log in with Streamlabs…"), m_streamlabs_box);
+	m_streamlabs_login_btn->setToolTip(tr("Opens the Streamlabs login in your web browser. After you log in, the "
+	                                      "token is stored encrypted for your Windows user."));
+	m_streamlabs_login_btn->setAutoDefault(false);
+	QFont primary = m_streamlabs_login_btn->font();
+	primary.setBold(true);
+	m_streamlabs_login_btn->setFont(primary);
+	m_streamlabs_cancel_btn = new QPushButton(tr("Cancel"), m_streamlabs_box);
+	m_streamlabs_cancel_btn->setToolTip(tr("Stop waiting for the browser login."));
+	m_streamlabs_cancel_btn->setAutoDefault(false);
+	m_streamlabs_cancel_btn->setVisible(false);
+	m_streamlabs_desktop_btn = new QPushButton(tr("Use Streamlabs Desktop login"), m_streamlabs_box);
+	m_streamlabs_desktop_btn->setToolTip(tr("Reads the login of Streamlabs Desktop on this PC (read-only)."));
+	m_streamlabs_desktop_btn->setAutoDefault(false);
 	m_streamlabs_disconnect_btn = new QPushButton(tr("Disconnect"), m_streamlabs_box);
 	m_streamlabs_disconnect_btn->setToolTip(tr("Delete the stored Streamlabs token."));
-	token_row->addWidget(m_streamlabs_import_btn);
+	m_streamlabs_disconnect_btn->setAutoDefault(false);
+	m_streamlabs_more_btn = new QToolButton(m_streamlabs_box);
+	m_streamlabs_more_btn->setText(tr("More"));
+	m_streamlabs_more_btn->setPopupMode(QToolButton::InstantPopup);
+	auto *more_menu = new QMenu(m_streamlabs_more_btn);
+	m_streamlabs_import_action = more_menu->addAction(tr("Import token from generator config…"));
+	m_streamlabs_import_action->setToolTip(tr("Select the config.json of the StreamLabs TikTok Stream Key Generator. "
+	                                          "Only its token is read; it is stored encrypted for your Windows user."));
+	m_streamlabs_more_btn->setMenu(more_menu);
+	token_row->addWidget(m_streamlabs_login_btn);
+	token_row->addWidget(m_streamlabs_cancel_btn);
+	token_row->addWidget(m_streamlabs_desktop_btn);
 	token_row->addWidget(m_streamlabs_disconnect_btn);
+	token_row->addWidget(m_streamlabs_more_btn);
 	token_row->addStretch();
 	form->addRow(QString(), token_row);
 
@@ -640,7 +672,15 @@ void EndpointDialog::setup_streamlabs_ui(QVBoxLayout *outer)
 
 	connect(m_key_source_cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 	        [this](int) { apply_key_source(); });
-	connect(m_streamlabs_import_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_import(); });
+	connect(m_streamlabs_login_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_login(); });
+	connect(m_streamlabs_cancel_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_login_cancel(); });
+	connect(m_streamlabs_desktop_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_desktop_import(); });
+	connect(m_streamlabs_import_action, &QAction::triggered, this, [this]() { on_streamlabs_import(); });
+	/* Closing the dialog (Save, Cancel, Esc, window close) aborts a waiting login. */
+	connect(this, &QDialog::finished, this, [this](int) {
+		if (m_streamlabs_login)
+			m_streamlabs_login->cancel();
+	});
 	connect(m_streamlabs_disconnect_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_disconnect(); });
 	connect(m_streamlabs_search_btn, &QPushButton::clicked, this, [this]() { on_streamlabs_search(); });
 	connect(m_streamlabs_search_edit, &QLineEdit::returnPressed, this, [this]() { on_streamlabs_search(); });
@@ -690,7 +730,7 @@ void EndpointDialog::refresh_streamlabs_status()
 		return;
 	}
 	if (!streamlabs_vault::exists()) {
-		m_streamlabs_status->setText(tr("Not connected. Import the token from the generator config.json."));
+		m_streamlabs_status->setText(tr("Not connected. Log in with Streamlabs."));
 		m_streamlabs_disconnect_btn->setEnabled(false);
 		return;
 	}
@@ -710,6 +750,70 @@ void EndpointDialog::refresh_streamlabs_status()
 			user.isEmpty() ? EndpointDialog::tr("Connected — can go live: %1").arg(live)
 			               : EndpointDialog::tr("Connected as @%1 — can go live: %2").arg(user, live));
 	});
+}
+
+void EndpointDialog::set_streamlabs_waiting(bool waiting)
+{
+	m_streamlabs_login_btn->setVisible(!waiting);
+	m_streamlabs_cancel_btn->setVisible(waiting);
+	m_streamlabs_desktop_btn->setEnabled(!waiting);
+	m_streamlabs_disconnect_btn->setEnabled(!waiting && streamlabs_vault::exists());
+	m_streamlabs_more_btn->setEnabled(!waiting);
+}
+
+void EndpointDialog::on_streamlabs_login()
+{
+	if (!m_streamlabs_login) {
+		/* Listener results come back on this dialog's thread; the flow is joined
+		 * before this QObject is destroyed (member of the dialog). */
+		EndpointDialog *self = this;
+		m_streamlabs_login = std::make_unique<StreamlabsLoginFlow>([self](std::function<void()> fn) {
+			QMetaObject::invokeMethod(self, std::move(fn), Qt::QueuedConnection);
+		});
+	}
+	QPointer<EndpointDialog> guard(this);
+	std::string error;
+	const bool started = m_streamlabs_login->start(
+		[guard](const std::string &status) {
+			if (guard)
+				guard->m_streamlabs_status->setText(QString::fromStdString(status));
+		},
+		[guard](bool ok, const std::string &message) {
+			if (!guard)
+				return;
+			guard->set_streamlabs_waiting(false);
+			if (ok) {
+				guard->refresh_streamlabs_status(); // info call: "Connected as @user"
+				return;
+			}
+			guard->m_streamlabs_status->setText(QString::fromStdString(message));
+		},
+		error);
+	if (!started) {
+		m_streamlabs_status->setText(QString::fromStdString(error));
+		return;
+	}
+	set_streamlabs_waiting(true);
+	m_streamlabs_status->setText(tr("Waiting for login in your browser… (Cancel)"));
+}
+
+void EndpointDialog::on_streamlabs_login_cancel()
+{
+	if (!m_streamlabs_login || !m_streamlabs_login->running())
+		return;
+	m_streamlabs_login->cancel();
+	set_streamlabs_waiting(false);
+	refresh_streamlabs_status();
+}
+
+void EndpointDialog::on_streamlabs_desktop_import()
+{
+	std::string message;
+	if (!streamlabs_desktop_import(message)) {
+		QMessageBox::warning(this, tr("Use Streamlabs Desktop login"), QString::fromStdString(message));
+		return;
+	}
+	refresh_streamlabs_status();
 }
 
 void EndpointDialog::on_streamlabs_import()

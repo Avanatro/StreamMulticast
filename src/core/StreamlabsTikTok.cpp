@@ -576,6 +576,17 @@ StreamlabsResult streamlabs_transport_error(const std::string &what)
 /* -----------------------------------------------------------------------
  * Token import
  * ----------------------------------------------------------------------- */
+bool streamlabs_token_text_ok(const std::string &token)
+{
+	if (token.empty() || token.size() > kStreamlabsTokenMax)
+		return false;
+	for (unsigned char c : token) {
+		if (c < 0x21 || c > 0x7E)
+			return false;
+	}
+	return true;
+}
+
 StreamlabsTokenImport streamlabs_import_generator_config(const std::string &json_text)
 {
 	obs_data_t *data = parse_object(json_text);
@@ -610,10 +621,8 @@ StreamlabsTokenImport streamlabs_import_generator_config(const std::string &json
 		return token_error("The config.json 'token' is empty. Log in once with the generator first.");
 	if (token.size() > kStreamlabsTokenMax)
 		return token_error("The config.json 'token' is too long.");
-	for (unsigned char c : token) {
-		if (c < 0x21 || c > 0x7E)
-			return token_error("The config.json 'token' contains unsupported characters.");
-	}
+	if (!streamlabs_token_text_ok(token))
+		return token_error("The config.json 'token' contains unsupported characters.");
 
 	StreamlabsTokenImport ok;
 	ok.ok = true;

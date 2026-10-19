@@ -24,6 +24,7 @@ set(SMULTI_TEST_SOURCES
     test_preview_edit.cpp
     test_item_actions.cpp
     test_vertical_transition.cpp
+    test_streamlabs_login.cpp
 )
 
 add_executable(
@@ -44,6 +45,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/PreviewEdit.cpp
   ${CMAKE_SOURCE_DIR}/src/core/ItemActions.cpp
   ${CMAKE_SOURCE_DIR}/src/core/VerticalTransition.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/StreamlabsLogin.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

@@ -20,10 +20,16 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLabel>
 
+#include <memory>
+
 class QGroupBox;
 class QVBoxLayout;
+class QToolButton;
+class QAction;
 
 namespace smulti {
+
+class StreamlabsLoginFlow;
 
 /**
  * EndpointDialog — modal settings dialog for a single endpoint.
@@ -55,6 +61,7 @@ public:
 	explicit EndpointDialog(const Endpoint     &ep,
 	                        EndpointRegistry   &registry,
 	                        QWidget            *parent = nullptr);
+	~EndpointDialog() override;
 
 	/** Returns the edited Endpoint (valid only after exec() == Accepted) */
 	const Endpoint &result_endpoint() const { return m_result; }
@@ -100,20 +107,29 @@ private:
 
 #ifdef SMULTI_STREAMLABS_TIKTOK
 	/* Key source "Streamlabs TikTok" (optional build flag): the server URL and key
-	 * are fetched at go-live; the token is imported once from the generator's
-	 * config.json into the DPAPI vault and never shown. */
+	 * are fetched at go-live. The token comes from the browser login (primary),
+	 * the Streamlabs Desktop login, or the generator's config.json (under More);
+	 * it is stored in the DPAPI vault and never shown. */
 	void setup_streamlabs_ui(QVBoxLayout *outer);
 	bool streamlabs_selected() const;
 	void apply_key_source();
 	void refresh_streamlabs_status();
+	void on_streamlabs_login();
+	void on_streamlabs_login_cancel();
+	void on_streamlabs_desktop_import();
 	void on_streamlabs_import();
 	void on_streamlabs_disconnect();
+	void set_streamlabs_waiting(bool waiting);
 	void on_streamlabs_search();
 
 	QComboBox   *m_key_source_cb            {nullptr};
 	QGroupBox   *m_streamlabs_box           {nullptr};
 	QLabel      *m_streamlabs_status        {nullptr};
-	QPushButton *m_streamlabs_import_btn    {nullptr};
+	QPushButton *m_streamlabs_login_btn     {nullptr};
+	QPushButton *m_streamlabs_cancel_btn    {nullptr};
+	QPushButton *m_streamlabs_desktop_btn   {nullptr};
+	QToolButton *m_streamlabs_more_btn      {nullptr};
+	QAction     *m_streamlabs_import_action {nullptr};
 	QPushButton *m_streamlabs_disconnect_btn{nullptr};
 	QLineEdit   *m_streamlabs_title_edit    {nullptr};
 	QLineEdit   *m_streamlabs_search_edit   {nullptr};
@@ -123,6 +139,8 @@ private:
 	QString      m_manual_server;
 	QString      m_manual_key;
 	bool         m_streamlabs_shown         {false};
+	/* Browser login in progress; cancelled when the dialog closes or is destroyed. */
+	std::unique_ptr<StreamlabsLoginFlow> m_streamlabs_login;
 #endif
 
 	/* Available backends (auto-detected) */

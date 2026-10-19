@@ -32,6 +32,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/VerticalRecorder.hpp"
 #ifdef SMULTI_STREAMLABS_TIKTOK
 #include "pipeline/StreamlabsClient.hpp"
+#include "pipeline/StreamlabsLoginFlow.hpp"
 #endif
 #include "ui/MultistreamDock.hpp"
 #include "ui/VerticalCanvasDock.hpp"
@@ -85,6 +86,7 @@ static void post_to_ui(std::function<void()> fn)
 static void shutdown_streamlabs()
 {
 #ifdef SMULTI_STREAMLABS_TIKTOK
+	smulti::StreamlabsLoginFlow::shutdown_all(); // joins login listeners; their exchange uses the client
 	if (g_streamlabs)
 		g_streamlabs->shutdown_and_end_blocking();
 #endif

@@ -724,7 +724,7 @@ nodes:
     lane: ui
     goal: "User edits one endpoint with import helpers and validation."
     owns: [ui.endpoint-form]
-    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation, canvas-selection, streamlabs-tiktok, streamlabs-client, streamlabs-token-vault]
+    needs: [endpoint-model, service-import, encoder-factory, platform-server-table, endpoint-validation, canvas-selection, streamlabs-tiktok, streamlabs-client, streamlabs-token-vault, streamlabs-login-flow]
     code:
       - src/ui/EndpointDialog.hpp
       - src/ui/EndpointDialog.cpp
@@ -746,6 +746,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check (ON build): Dima imports the token once, the status shows 'Connected as @<user>', goes live, TikTok receives video, the session is ended on stop (not run in this session; plugin compiled with -DSMULTI_STREAMLABS_TIKTOK=ON in D:/OpenWorld/StreamMulticast-build/release-sltt, TASK-28)"
+            result: pending
+      - id: ui-endpoint-dialog.streamlabs-login
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: the Streamlabs section shows 'Log in with Streamlabs…' (primary, bold), 'Use Streamlabs Desktop login', 'Disconnect' and a 'More' menu holding 'Import token from generator config…'. While the browser login waits, the status is 'Waiting for login in your browser… (Cancel)', a Cancel button replaces the login button and the other token buttons are disabled; Cancel or closing the dialog aborts the flow. Success refreshes the status through the info call ('Connected as @user — can go live: yes/no'); errors are shown sanitized. Not connected reads 'Not connected. Log in with Streamlabs.'"
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): Dima clicks 'Log in with Streamlabs', logs in, sees 'Connected as @user' (not run in this session; plugin compiled with -DSMULTI_STREAMLABS_TIKTOK=ON in D:/OpenWorld/StreamMulticast-build/release-sltt, TASK-32)"
             result: pending
     status: building
   - id: ui-config-tab
@@ -887,11 +893,89 @@ nodes:
             reference: "OBS runtime check: from the vertical dock open the webcam's properties and filters, rename a source (shared warning when the main canvas uses it), lock/unlock, apply the Transform presets, create a new Color Source and Browser source (Interact works for the browser) (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-30)"
             result: pending
     status: building
+  - id: streamlabs-login
+    lane: core
+    goal: "The Streamlabs browser login (PKCE, local callback, code exchange) and the Streamlabs Desktop token scan are described and parsed without network, sockets, OBS runtime or Qt, and no error text carries the code, verifier or token."
+    owns: [streamlabs.login-pkce, streamlabs.login-parsing, streamlabs.desktop-token-scan]
+    needs: [streamlabs-tiktok]
+    code:
+      - src/core/StreamlabsLogin.hpp
+      - src/core/StreamlabsLogin.cpp
+      - tests/test_streamlabs_login.cpp
+    works_when:
+      - id: streamlabs-login.parse
+        behavior: "PKCE: verifier = the 64 given random bytes as lowercase hex (128 chars), challenge = base64url(sha256(verifier ASCII)) without padding (own SHA-256, FIPS vectors tested); any other byte count gives no pair. Login URL https://streamlabs.com/slobs/login?skip_splash=true&external=electron&tiktok&force_verify&origin=slobs&port=<1..65535>&code_challenge=<challenge>&code_flow=true. Callback parser: only 'GET <any path>?<query> HTTP/x' within 8 KiB; no request line yet = Incomplete; no success/code parameter, other method or garbage = NotCallback (answered 404, keep waiting); success exactly 'true' plus a percent-decoded code of 1..2048 printable ASCII = Code; anything else with success or code = Failed. Exchange: GET https://streamlabs.com/api/v5/slobs/auth/data?code_verifier=<v>&code=<url-encoded code>; HTTP 200 + JSON success true + data.oauth_token (non-empty printable ASCII, at most 512, shared rule streamlabs_token_text_ok) = token; the strict JSON pre-check of streamlabs-tiktok runs before libobs parses. Desktop scan: the last apiToken entry (quote apiToken quote colon quote hex quote) whose value is 16..128 hex characters; other occurrences are skipped. Error messages never contain the code, verifier, token or body."
+        verification:
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_pkce_challenge_known_vector
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_url_has_port_and_challenge
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_callback_parses_code
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_callback_rejects_failure
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_exchange_parses_token
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_login_exchange_error_has_no_secrets
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_desktop_token_scan_last_match
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_streamlabs_login.cpp
+            check: streamlabs_desktop_token_scan_rejects_non_hex
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'streamlabs_login_|streamlabs_desktop_|streamlabs_tiktok_', local run 2026-10-20; 8/8 new cases failed against a stub StreamlabsLogin.cpp, 25/25 passed after; full ctest 155/155 (TASK-32)"
+            checked_at: 2026-10-20
+    status: building
+  - id: streamlabs-login-flow
+    lane: pipeline
+    goal: "The user logs in to Streamlabs from the endpoint dialog (browser or Streamlabs Desktop login), and the token lands in the vault without the external generator program."
+    owns: [streamlabs.login-flow, streamlabs.desktop-import]
+    needs: [streamlabs-login, streamlabs-client, streamlabs-token-vault]
+    code:
+      - src/pipeline/StreamlabsLoginFlow.hpp
+      - src/pipeline/StreamlabsLoginFlow.cpp
+    works_when:
+      - id: streamlabs-login-flow.browser-login
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: start() takes 64 bytes from BCryptGenRandom, binds a TCP listener to 127.0.0.1:0 (never 0.0.0.0, SO_EXCLUSIVEADDRUSE), opens the login URL with QDesktopServices::openUrl on the UI thread, and a worker thread accepts connections until a valid callback, 300 s or cancel (250 ms poll); each request is read up to 8 KiB / 5 s; other requests get 404; the callback gets a small 'You can close this tab' page. The code is exchanged through StreamlabsClient::exchange_login (same worker, no authorization header, url/path wiped after the request); on success the token is saved in the vault and the dialog's info call shows 'Connected as @user'. cancel() (Cancel button, dialog finished, destructor, StreamlabsLoginFlow::shutdown_all from plugin-main at OBS exit and unload before the client shuts down) drops late results (alive flag); the thread closes the socket and is joined. Verifier, code and token copies are wiped after use and never logged. streamlabs_desktop_import reads only the newest *.log in %APPDATA%/slobs-client/Local Storage/leveldb (missing folder = message; FILE_SHARE_READ|WRITE|DELETE, read-only, at most 64 MiB), scans it with streamlabs-login and stores the token. Compiled (ON build imports WS2_32.dll and BCryptGenRandom from bcrypt.dll; OFF build imports neither), no real network, browser or Streamlabs Desktop file used."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (ON build): Dima clicks 'Log in with Streamlabs…', logs in in the browser, the tab says 'You can close this tab', the dialog shows 'Connected as @user'; Cancel while waiting restores the buttons; with Streamlabs Desktop logged in, 'Use Streamlabs Desktop login' connects (not run in this session, TASK-32)"
+            result: pending
+    status: building
   - id: plugin-entry
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording, streamlabs-client]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h
@@ -1305,13 +1389,13 @@ nodes:
     lane: pipeline
     goal: "Streamlabs TikTok calls run off the UI thread over TLS, results reach the UI thread only while the plugin lives, and every started session is ended once."
     owns: [streamlabs.http-transport, streamlabs.session-lifecycle]
-    needs: [streamlabs-tiktok, streamlabs-token-vault]
+    needs: [streamlabs-tiktok, streamlabs-token-vault, streamlabs-login]
     code:
       - src/pipeline/StreamlabsClient.hpp
       - src/pipeline/StreamlabsClient.cpp
     works_when:
       - id: streamlabs-client.session
-        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: one FIFO worker thread does WinHTTP calls (https only, TLS 1.2+, 15 s timeouts, 5 s for end; authorization Bearer and the Streamlabs Desktop user agent); results are posted to the UI thread through plugin-main's post_to_ui and dropped after shutdown (shared alive flag). start_session ends a still-open or crash-left session first (id persisted in obs_module_config_path('streamlabs_tiktok_session.txt'), never the key), then starts; a result nobody adopts is ended again; a second endpoint is refused while another owns the session. end_session runs at most once per session. shutdown_and_end_blocking (OBS exit, unload, before the UI post context is deleted) cancels the in-flight request by closing its handle, joins the worker and ends open sessions synchronously, bounded to 5 s each. Logs one info line per start/end ('streamlabs tiktok: session started for '<name>'' / 'session ended (success=<bool>)'), never the token, key, rtmp URL or a body. Compiled (ON build imports WinHttpOpen from WINHTTP.dll; OFF build imports neither WINHTTP nor CRYPT32), no real network call made."
+        behavior: "Only with SMULTI_STREAMLABS_TIKTOK: one FIFO worker thread does WinHTTP calls (https only, TLS 1.2+, 15 s timeouts, 5 s for end; authorization Bearer and the Streamlabs Desktop user agent); results are posted to the UI thread through plugin-main's post_to_ui and dropped after shutdown (shared alive flag). start_session ends a still-open or crash-left session first (id persisted in obs_module_config_path('streamlabs_tiktok_session.txt'), never the key), then starts; a result nobody adopts is ended again; a second endpoint is refused while another owns the session. end_session runs at most once per session. shutdown_and_end_blocking (OBS exit, unload, before the UI post context is deleted) cancels the in-flight request by closing its handle, joins the worker and ends open sessions synchronously, bounded to 5 s each. exchange_login (TASK-32) runs the browser login code exchange on the same worker without an authorization header and posts the parsed token result to the UI thread (wiped after the callback). Logs one info line per start/end ('streamlabs tiktok: session started for '<name>'' / 'session ended (success=<bool>)'), never the token, key, rtmp URL or a body. Compiled (ON build imports WinHttpOpen from WINHTTP.dll; OFF build imports neither WINHTTP nor CRYPT32), no real network call made."
         verification:
           - kind: manual
             reference: "OBS runtime check (ON build): go live, stop, quit OBS while live; the log has exactly one 'session started' and one 'session ended (success=true)' per session and no token or key; kill OBS while live, restart and go live: 'ending a previous session before a new start' appears first (not run in this session, TASK-28)"
