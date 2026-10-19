@@ -475,12 +475,20 @@ nodes:
       - src/ui/VerticalCanvasDock.cpp
       - src/ui/CanvasPreview.hpp
       - src/ui/CanvasPreview.cpp
+      - src/ui/VerticalSceneList.hpp
+      - src/ui/VerticalSceneList.cpp
     works_when:
       - id: ui-vertical-dock.preview
         behavior: "The dock (id avanatro_streammulticast_vertical) previews the owned canvas through an obs_display whose draw callback takes a canvas ref per frame via OwnedCanvas::get_ref() and renders nothing when it is null; the canvas is fitted into the widget without stretching. The display is destroyed before the canvas ref owner and the widget go away (FRONTEND EXIT, module unload, destructor). Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: manual
             reference: "OBS runtime check: preview shows the V canvas scene, resizing the dock keeps 9:16 without stretching, switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-10)"
+            result: pending
+      - id: ui-vertical-dock.scene-list
+        behavior: "The Scenes tab lists the scenes of the owned canvas only (obs_canvas_enum_scenes) and marks the one on channel 0. Add creates a uniquely named scene (obs_canvas_scene_create); Rename (obs_source_set_name) rejects empty and duplicate names; Remove asks for confirmation, refuses the last scene, moves channel 0 to another scene when needed and calls obs_canvas_scene_remove only after checking obs_source_get_canvas(scene) is the owned canvas; Set active uses obs_canvas_set_channel(owned, 0, scene), the channel OwnedCanvas saves and restores. The list refreshes on the canvas signals source_add/source_remove/source_rename/channel_change (queued, coalesced) and on collection events; canvas, scene and source refs are taken and released within one UI-thread function, and the signals are disconnected before the canvas is released (canvas_remove, collection changing, SCRIPTING_SHUTDOWN, unload). Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: add, rename, remove and set active change the preview; the active scene survives an OBS restart; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-11)"
             result: pending
     status: building
   - id: plugin-entry

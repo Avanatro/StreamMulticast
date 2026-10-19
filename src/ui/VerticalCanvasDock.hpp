@@ -14,6 +14,7 @@ namespace smulti {
 
 class CanvasPreview;
 class OwnedCanvas;
+class VerticalSceneList;
 
 /**
  * Second dock ("StreamMulticast Vertical", id avanatro_streammulticast_vertical):
@@ -33,8 +34,15 @@ public:
 	/** Barrier against an in-flight preview draw (see CanvasPreview::flush). */
 	void flush_preview();
 
+	/** Rebuild the scene list (UI thread). Call after OwnedCanvas::ensure(). */
+	void refresh_scenes();
+
+	/** Disconnect the scene list from the canvas signals; any thread. Call before the canvas is released. */
+	void detach_scene_signals();
+
 private:
 	CanvasPreview *m_preview = nullptr;
+	VerticalSceneList *m_scenes = nullptr;
 	QTabWidget *m_tabs = nullptr;
 };
 

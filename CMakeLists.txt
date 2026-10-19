@@ -98,6 +98,7 @@ target_sources(
     src/ui/EndpointDialog.cpp
     src/ui/CanvasPreview.cpp
     src/ui/VerticalCanvasDock.cpp
+    src/ui/VerticalSceneList.cpp
 )
 
 # Include directories

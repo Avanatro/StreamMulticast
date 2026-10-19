@@ -64,6 +64,19 @@ static void flush_vertical_preview()
 		g_vertical_dock->flush_preview();
 }
 
+/* Scene list disconnects from the owned canvas signals (thread safe). Must precede any release of the canvas. */
+static void detach_vertical_scene_signals()
+{
+	if (g_vertical_dock)
+		g_vertical_dock->detach_scene_signals();
+}
+
+static void refresh_vertical_scenes()
+{
+	if (g_vertical_dock)
+		g_vertical_dock->refresh_scenes();
+}
+
 /* libobs "canvas_remove" (global signal, emitted synchronously by obs_canvas_remove BEFORE the
  * caller releases its own ref; libobs obs-canvas.c:560-572). Drop our weak ref so get_ref() returns
  * null, then wait for any in-flight draw, so the frontend's later release is the final one and runs
@@ -76,6 +89,7 @@ static void on_canvas_remove(void *, calldata_t *cd)
 	const char *uuid = canvas ? obs_canvas_get_uuid(canvas) : nullptr;
 	if (!uuid || g_owned_canvas->uuid() != uuid)
 		return;
+	detach_vertical_scene_signals(); // before the canvas can go away
 	g_owned_canvas->release();
 	flush_vertical_preview();
 }
@@ -83,6 +97,7 @@ static void on_canvas_remove(void *, calldata_t *cd)
 /* The preview display must die before any canvas reference is released and before the widget goes. */
 static void shutdown_vertical_preview()
 {
+	detach_vertical_scene_signals();
 	if (g_vertical_dock)
 		g_vertical_dock->shutdown_preview();
 }
@@ -91,8 +106,10 @@ static void shutdown_vertical_preview()
 /* Runs on the UI thread (queued from the libobs video_reset signal). */
 static void ensure_owned_canvas_task(void *)
 {
-	if (g_module_alive.load() && g_owned_canvas)
+	if (g_module_alive.load() && g_owned_canvas) {
 		g_owned_canvas->ensure();
+		refresh_vertical_scenes();
+	}
 }
 
 /* obs_reset_video() frees every canvas mix; rebuild ours after a main video
@@ -125,12 +142,16 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		shutdown_vertical_preview();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
 	    event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
-		if (g_owned_canvas)
+		if (g_owned_canvas) {
 			g_owned_canvas->ensure();
+			refresh_vertical_scenes();
+		}
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
 			g_owned_canvas->on_collection_changing(*g_registry);
 		flush_vertical_preview();
+		refresh_vertical_scenes(); // clears the list: the canvas is gone until the next ensure()
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		obs_log(LOG_INFO, "OBS main stream started — triggering linked endpoints");
 		/* Skip endpoints that would stream to the same server+key as the main

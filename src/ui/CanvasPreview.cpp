@@ -68,10 +68,11 @@ void CanvasPreview::flush()
 void CanvasPreview::create_display()
 {
 #ifdef _WIN32
-	std::lock_guard<std::mutex> lock(m_display_mutex);
-	if (m_display || m_shutdown)
+	if (m_shutdown) // UI thread only field, same thread as shutdown()
 		return;
 
+	/* winId() creates the native window and may dispatch window messages that re-enter
+	 * resizeEvent()/showEvent() and so create_display(). Take the (non-recursive) lock only after. */
 	const WId id = winId(); // forces the native window to exist
 	QWindow *window = windowHandle();
 	if (!id || !window || !window->isExposed())
@@ -79,6 +80,10 @@ void CanvasPreview::create_display()
 
 	const QSize size = pixel_size(this);
 	if (size.width() <= 0 || size.height() <= 0)
+		return;
+
+	std::lock_guard<std::mutex> lock(m_display_mutex);
+	if (m_display || m_shutdown)
 		return;
 
 	gs_init_data info = {};
