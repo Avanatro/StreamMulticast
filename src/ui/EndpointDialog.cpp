@@ -133,6 +133,8 @@ void EndpointDialog::setup_ui()
 
 	/* Video canvas: empty ref = OBS main canvas, otherwise uuid + name of a canvas */
 	m_canvas_cb = new QComboBox(this);
+	m_canvas_cb->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	m_canvas_cb->setMinimumContentsLength(16);
 	populate_canvas_combo();
 	form->addRow(tr("Video canvas:"), m_canvas_cb);
 

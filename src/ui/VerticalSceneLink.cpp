@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
+#include <algorithm>
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QTableWidget>
@@ -77,6 +78,7 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	m_table = new QTableWidget(0, 2, this);
 	m_table->setHorizontalHeaderLabels({tr("Main scene"), tr("Vertical scene")});
 	m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+	m_table->horizontalHeader()->setMinimumSectionSize(120); // keep the dropdown text from being clipped
 	m_table->verticalHeader()->setVisible(false);
 	m_table->setSelectionMode(QAbstractItemView::NoSelection);
 	m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -139,6 +141,9 @@ void VerticalSceneLink::refresh()
 		m_table->setItem(row, 0, new QTableWidgetItem(main_name));
 
 		auto *combo = new QComboBox(m_table);
+		/* No colours here: the OBS theme styles the combo. Only guarantee it has room for its text. */
+		combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+		combo->setMinimumContentsLength(12);
 		combo->addItem(tr("(auto)"), KindAuto);
 		combo->addItem(tr("(keep current)"), KindKeep);
 		for (const std::string &v : verticals) {
@@ -178,6 +183,9 @@ void VerticalSceneLink::refresh()
 						  combo->itemData(index, kSceneNameRole).toString());
 			});
 		m_table->setCellWidget(row, 1, combo);
+		/* The theme gives combos a fixed height plus margins; a default-height row would squash the text. */
+		m_table->setRowHeight(row, std::max(m_table->verticalHeader()->defaultSectionSize(),
+						    combo->sizeHint().height() + 4));
 		++row;
 	}
 

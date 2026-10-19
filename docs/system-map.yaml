@@ -574,6 +574,12 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: switching the main scene switches the vertical preview; mapping a main scene to another V scene or (keep current) in the Links tab changes the behaviour; renaming a scene keeps its mapping (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
             result: pending
+      - id: ui-vertical-dock.dropdowns-readable
+        behavior: "Dropdowns in the vertical dock (Links tab combos in table cells) and the endpoint dialog (Video canvas) carry no hard-coded colours, so the OBS theme styles them. Table-cell combos get a minimum contents length, a minimum column width and a row height from the combo sizeHint, so the theme's fixed input height plus margins cannot squash the selected text. Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: dropdown text is readable in the Links tab and in the endpoint dialog Video canvas selector with the OBS dark (Yami) and light themes (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-25)"
+            result: pending
     status: building
   - id: plugin-entry
     lane: entry
