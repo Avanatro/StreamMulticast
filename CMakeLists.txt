@@ -77,6 +77,7 @@ target_sources(
     src/core/LayoutMath.cpp
     src/core/SceneLink.cpp
     src/core/CanvasScaleRef.cpp
+    src/core/VerticalRecord.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/LinkedStart.cpp
@@ -89,6 +90,7 @@ target_sources(
     src/pipeline/CanvasLookup.cpp
     src/pipeline/CanvasSceneNames.cpp
     src/pipeline/OwnedCanvas.cpp
+    src/pipeline/VerticalRecorder.cpp
     src/pipeline/EncoderFactory.cpp
     src/pipeline/OutputController.cpp
     src/pipeline/ControllerReaper.cpp

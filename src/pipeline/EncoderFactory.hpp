@@ -8,7 +8,10 @@ GPLv2 — see LICENSE for full text.
 #pragma once
 
 #include "../core/Endpoint.hpp"
+#include "../core/VerticalRecord.hpp"
 
+#include <cstddef>
+#include <set>
 #include <vector>
 #include <string>
 
@@ -72,6 +75,26 @@ public:
 	 */
 	obs_encoder_t *create_audio_encoder(const Endpoint &ep,
 	                                    const std::string &name_hint) const;
+
+	/**
+	 * AAC encoder on the main audio, mix `mixer_idx` (0 = track 1). Used by
+	 * create_audio_encoder and by the vertical recorder. Caller releases.
+	 */
+	obs_encoder_t *create_aac_encoder(const std::string &name, int bitrate_kbps, size_t mixer_idx) const;
+
+	/**
+	 * Quality-based video encoder for a recording (choose_vertical_record_encoder),
+	 * attached to `video` (a canvas's own video_t). Same lifetime rule as
+	 * create_video_encoder: the caller keeps the owning canvas alive while the
+	 * encoder is in use and releases the encoder. Null video or a failed
+	 * create logs and returns nullptr.
+	 */
+	obs_encoder_t *create_record_video_encoder(const RecordEncoderChoice &choice,
+	                                           const std::string &name,
+	                                           video_t *video) const;
+
+	/** Registered encoder type ids (enumerated once per process). */
+	static const std::set<std::string> &available_encoder_types();
 
 	/**
 	 * Query which encoder backends are available on this machine.

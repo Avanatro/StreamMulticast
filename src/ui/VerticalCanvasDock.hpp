@@ -10,6 +10,11 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QTabWidget>
 #include <QtWidgets/QWidget>
 
+class QCheckBox;
+class QLabel;
+class QLineEdit;
+class QPushButton;
+
 namespace smulti {
 
 class CanvasPreview;
@@ -17,17 +22,18 @@ class OwnedCanvas;
 class VerticalItemList;
 class VerticalSceneLink;
 class VerticalSceneList;
+class VerticalRecorder;
 
 /**
  * Second dock ("StreamMulticast Vertical", id avanatro_streammulticast_vertical):
- * live preview of the owned vertical canvas on top, a tab area below that later
- * tasks fill with the scene list and source controls.
+ * live preview of the owned vertical canvas on top, the "Record vertical" button,
+ * and tabs for scenes, sources, links and the vertical recording settings.
  */
 class VerticalCanvasDock : public QWidget {
 	Q_OBJECT
 
 public:
-	explicit VerticalCanvasDock(OwnedCanvas &canvas, QWidget *parent = nullptr);
+	VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, QWidget *parent = nullptr);
 	~VerticalCanvasDock() override = default;
 
 	/** Tear the preview display down before the canvas or the dock go away. */
@@ -46,6 +52,15 @@ public:
 	void detach_scene_signals();
 
 private:
+	QWidget *build_record_tab();
+	void update_record_ui(); ///< UI thread: button state from the recorder
+	void on_record_settings_changed();
+
+	VerticalRecorder &m_recorder;
+	QPushButton *m_record = nullptr;
+	QCheckBox *m_record_with_main = nullptr;
+	QLineEdit *m_record_folder = nullptr;
+	QLabel *m_record_target = nullptr;
 	CanvasPreview *m_preview = nullptr;
 	VerticalSceneList *m_scenes = nullptr;
 	VerticalItemList *m_items = nullptr;

@@ -169,6 +169,9 @@ nodes:
       - id: encoder-factory.fallback
         behavior: "Unavailable GPU backend falls back to x264 with a log line."
         verification: []
+      - id: encoder-factory.record-encoder
+        behavior: "create_record_video_encoder builds the vertical recording encoder from a RecordEncoderChoice (rate_control plus quality key; x264 preset veryfast, profile high) on the caller's video_t, with the same set_video and lifetime rule as create_video_encoder; create_aac_encoder (name, bitrate, mix) is shared by endpoints and the recorder; available_encoder_types exposes the once-enumerated id set. Only compiled locally."
+        verification: []
     status: building
   - id: canvas-selection
     lane: pipeline
@@ -464,6 +467,88 @@ nodes:
             reference: "OBS runtime check: GetCanvasList video settings of StreamMulticast Vertical are non-null while Aitum Vertical is inactive (not run in this session)"
             result: pending
     status: building
+  - id: vertical-recording
+    lane: pipeline
+    goal: "The owned vertical canvas can be recorded to a file, by hand, by hotkey or together with the main recording."
+    owns: [recording.vertical-output, recording.vertical-settings]
+    needs: [owned-vertical-canvas, encoder-factory, controller-reaper]
+    code:
+      - src/core/VerticalRecord.hpp
+      - src/core/VerticalRecord.cpp
+      - src/pipeline/VerticalRecorder.hpp
+      - src/pipeline/VerticalRecorder.cpp
+      - tests/test_vertical_record.cpp
+    works_when:
+      - id: vertical-recording.target-and-encoder
+        behavior: "Pure decisions: the folder is the configured one, else '<main recording path of the active profile>/Vertical'; it is refused when empty, not absolute (drive letter or UNC) or on drive C:. The file is '<folder>/%CCYY-%MM-%DD %hh-%mm-%ss Vertical.mkv' (' (N)' appended when it exists), the remux target replaces the extension with .mp4. The encoder is obs_nvenc_hevc_tex, then jim_hevc_nvenc, with rate_control CQP and cqp 20, else obs_x264 with CRF 20. Settings (record_with_main default true, folder default empty) round-trip through obs_data."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_default_folder_is_main_path_vertical
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_refuses_drive_c
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_refuses_unknown_or_relative_folder
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_file_name_format
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_file_path_avoids_existing_files
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_remux_target_is_mp4
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_encoder_prefers_nvenc_hevc
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_encoder_falls_back_to_x264_crf
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_settings_roundtrip_and_defaults
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
+            checked_at: 2026-10-19
+      - id: vertical-recording.record-file
+        behavior: "VerticalRecorder::start (UI thread) resolves the folder (obs_frontend_get_current_record_output_path; a refusal is logged and shown in the dock), creates it (os_mkdirs), takes a strong ref of the owned canvas and creates the video encoder on obs_canvas_get_video (EncoderFactory::create_record_video_encoder, 1080x1920 at the canvas fps), AAC 160 kbps from mix 0 (track 1, EncoderFactory::create_aac_encoder, shared with endpoints) and an ffmpeg_muxer output with the MKV path. A graceful stop calls obs_output_stop; the output's stop signal posts finish() to the UI thread (session-tagged); with code OBS_OUTPUT_SUCCESS and AutoRemux=true in the profile's [Video] section the file is remuxed to MP4 on a worker thread (media_remux_job_*; cancelled and joined on unload; the MKV is kept). Started by the dock button 'Record vertical', the frontend hotkey 'StreamMulticast: Start/Stop vertical recording' (binding saved with the settings in <module config>/vertical-record.json) or OBS_FRONTEND_EVENT_RECORDING_STARTED when 'Record vertical together with main recording' is on; RECORDING_STOPPING stops only a recording started that way. Only compiled locally (plugin target built; dumpbin shows media_remux_job_create, obs_hotkey_register_frontend, obs_canvas_get_video, obs_frontend_get_profile_config), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: start the main recording; <recording path>/Vertical gets '<date> Vertical.mkv' 1080x1920 HEVC with track 1 audio; stopping the main recording stops it and, with automatic remux on, an MP4 appears; the dock button and the hotkey start and stop it alone; a C: folder is refused with a log line (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-27)"
+            result: pending
+      - id: vertical-recording.lifetime
+        behavior: "Same rules as OutputController: the canvas ref is held while recording and released LAST, after the output and both encoders, in a ControllerReaper job (never on the graphics thread). stop_now (forced, non-blocking: stop signal disconnected outside the mutex, session detached, force_stop and releases on the reaper) runs on canvas_remove of the owned canvas, SCENE_COLLECTION_CHANGING, SCRIPTING_SHUTDOWN, EXIT and unload; unload saves the hotkey binding, unregisters the hotkey and shuts the recorder down before the UI-thread post context is deleted, so no libobs thread can post into a freed recorder."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: while the vertical recording runs, switch the scene collection and quit OBS; the log shows 'vertical recording: stopped (...)', the MKV is playable and no crash file is written (not run in this session; plugin target compiled, TASK-27)"
+            result: pending
+    status: building
   - id: controller-reaper
     lane: pipeline
     goal: "Blocking output teardown never runs on the UI thread."
@@ -629,7 +714,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math, scene-link]
+    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -700,6 +785,12 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: switching the main scene switches the vertical preview; mapping a main scene to another V scene or (keep current) in the Links tab changes the behaviour; renaming a scene keeps its mapping (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
             result: pending
+      - id: ui-vertical-dock.record-vertical
+        behavior: "Below the preview a checkable 'Record vertical' button toggles VerticalRecorder (checked plus the theme class text-danger while recording, disabled 'Stopping vertical recording...' while stopping, refusal reason as tooltip); a 'Record' tab holds 'Record vertical together with main recording' (default on), the folder (line edit plus Browse..., empty = default) and the resolved target or refusal reason. No colours are hard-coded. The recorder calls back on the UI thread through a QPointer-guarded listener. Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: the button shows the checked, theme-red 'Stop vertical recording' state while recording under the Yami and light themes; the Record tab shows the target folder and refuses a C: folder (not run in this session; plugin target compiled, TASK-27)"
+            result: pending
       - id: ui-vertical-dock.dropdowns-readable
         behavior: "Dropdowns in the vertical dock (Links tab combos in table cells) and the endpoint dialog (Video canvas) carry no hard-coded colours, so the OBS theme styles them. Table-cell combos get a minimum contents length, a minimum column width and a row height from the combo sizeHint, so the theme's fixed input height plus margins cannot squash the selected text. Only compiled locally, not run in OBS."
         verification:
@@ -711,7 +802,7 @@ nodes:
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h

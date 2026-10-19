@@ -19,6 +19,7 @@ set(SMULTI_TEST_SOURCES
     test_layout_math.cpp
     test_scene_link.cpp
     test_canvas_scale_ref.cpp
+    test_vertical_record.cpp
 )
 
 add_executable(
@@ -34,6 +35,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/LayoutMath.cpp
   ${CMAKE_SOURCE_DIR}/src/core/SceneLink.cpp
   ${CMAKE_SOURCE_DIR}/src/core/CanvasScaleRef.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/VerticalRecord.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/HealthSampler.hpp"
 #include "pipeline/OutputController.hpp"
 #include "pipeline/OwnedCanvas.hpp"
+#include "pipeline/VerticalRecorder.hpp"
 #include "ui/MultistreamDock.hpp"
 #include "ui/VerticalCanvasDock.hpp"
 
@@ -37,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPointer>
 #include <QTimer>
 #include <atomic>
+#include <functional>
 #include <memory>
 
 OBS_DECLARE_MODULE()
@@ -50,6 +52,12 @@ static std::unique_ptr<smulti::ConfigStore>      g_config_store;
 static std::unique_ptr<smulti::EndpointRegistry> g_registry;
 static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
+static std::unique_ptr<smulti::VerticalRecorder> g_vertical_recorder; /* shut down before g_owned_canvas goes, destroyed after the dock */
+/* UI-thread context for calls posted from libobs threads (vertical recorder "stop" signal, hotkey).
+ * Deleted in unload only after every poster is disconnected; deleting it drops pending posts. */
+static QObject *                                 g_ui_context = nullptr;
+static obs_hotkey_id                             g_record_hotkey = OBS_INVALID_HOTKEY_ID;
+static bool                                      g_record_settings_saved = false;
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
 static std::atomic<bool> g_module_alive{false};
 /* Qt may destroy the vertical dock on its own at OBS exit, so track it with a guarded pointer. */
@@ -57,6 +65,41 @@ static QPointer<smulti::VerticalCanvasDock>      g_vertical_dock;
 static bool                                      g_vertical_dock_registered = false;
 
 static constexpr const char *kVerticalDockId = "avanatro_streammulticast_vertical";
+
+/* Any thread: run `fn` on the UI thread (dropped when the context is already gone). */
+static void post_to_ui(std::function<void()> fn)
+{
+	QObject *context = g_ui_context;
+	if (context)
+		QMetaObject::invokeMethod(context, std::move(fn), Qt::QueuedConnection);
+}
+
+/* Forced, non-blocking stop of the vertical recording (canvas going away, shutdown). UI thread. */
+static void stop_vertical_recording(const char *reason)
+{
+	if (g_vertical_recorder)
+		g_vertical_recorder->stop_now(reason);
+}
+
+/* Frontend hotkey "StreamMulticast: Start/Stop vertical recording" (hotkey thread). */
+static void on_record_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || !g_module_alive.load())
+		return;
+	post_to_ui([]() {
+		if (g_module_alive.load() && g_vertical_recorder)
+			g_vertical_recorder->toggle();
+	});
+}
+
+/* Hotkey binding and recording settings, written once on shutdown (and on every settings edit). */
+static void save_record_settings_once()
+{
+	if (g_record_settings_saved || !g_vertical_recorder)
+		return;
+	g_vertical_recorder->save_settings_file();
+	g_record_settings_saved = true;
+}
 
 /* Barrier: after this returns no preview draw holds a canvas ref. */
 static void flush_vertical_preview()
@@ -194,6 +237,7 @@ static void on_canvas_remove(void *, calldata_t *cd)
 	const char *uuid = canvas ? obs_canvas_get_uuid(canvas) : nullptr;
 	if (!uuid || g_owned_canvas->uuid() != uuid)
 		return;
+	stop_vertical_recording("vertical canvas removed"); // its canvas ref is released last, on the reaper
 	detach_vertical_scene_signals(); // before the canvas can go away
 	g_owned_canvas->release();
 	flush_vertical_preview();
@@ -251,6 +295,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		/* First shutdown signal OBS gives us. Flush the config now: obs_module_unload comes
 		 * after OBSBasic::ClearSceneData, which has crashed OBS on exit (2026-10-19). */
 		flush_config();
+		save_record_settings_once();
+		stop_vertical_recording("OBS is shutting down");
 		cancel_pending_follow();
 		disconnect_transition_start();
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
@@ -269,7 +315,14 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			g_owned_canvas->follow_program_scene();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
 		refresh_vertical_links();
+	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
+		if (g_vertical_recorder)
+			g_vertical_recorder->on_main_recording_started();
+	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPING) {
+		if (g_vertical_recorder)
+			g_vertical_recorder->on_main_recording_stopping();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		stop_vertical_recording("scene collection changing"); // before the owned canvas reference goes
 		cancel_pending_follow();
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
@@ -311,6 +364,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			if (ctrl && ctrl->is_running())
 				ctrl->stop();
 		}
+		stop_vertical_recording("OBS exit");
 		cancel_pending_follow();
 		disconnect_transition_start();
 		shutdown_vertical_preview();
@@ -343,6 +397,15 @@ bool obs_module_load()
 
 	/* 3b. Owned vertical canvas adapter — needs the registry to stop bound endpoints. */
 	g_owned_canvas = std::make_unique<smulti::OwnedCanvas>();
+
+	/* 3c. Vertical recording of the owned canvas; its teardown jobs run on the reaper. */
+	g_ui_context = new QObject(); // UI thread
+	g_vertical_recorder = std::make_unique<smulti::VerticalRecorder>(*g_owned_canvas, *g_reaper, post_to_ui);
+	g_record_hotkey = obs_hotkey_register_frontend("StreamMulticast.VerticalRecord",
+						       "StreamMulticast: Start/Stop vertical recording", on_record_hotkey,
+						       nullptr);
+	if (g_record_hotkey != OBS_INVALID_HOTKEY_ID)
+		g_vertical_recorder->set_hotkey(g_record_hotkey);
 
 	/* 4. Boot health sampler — starts background 2-Hz polling thread */
 	g_health_sampler = std::make_unique<smulti::HealthSampler>(*g_registry);
@@ -397,7 +460,7 @@ bool obs_module_load()
 
 	/* 7. Vertical canvas dock. Registered after the owned canvas adapter exists; the canvas
 	 * itself may not exist yet (ensure() runs on FINISHED_LOADING) and the preview copes. */
-	g_vertical_dock = new smulti::VerticalCanvasDock(*g_owned_canvas);
+	g_vertical_dock = new smulti::VerticalCanvasDock(*g_owned_canvas, *g_vertical_recorder);
 	g_vertical_dock_registered =
 		obs_frontend_add_dock_by_id(kVerticalDockId, "StreamMulticast Vertical", g_vertical_dock.data());
 	if (!g_vertical_dock_registered) {
@@ -446,6 +509,18 @@ void obs_module_unload()
 	delete g_follow_timer;
 	g_follow_timer = nullptr;
 
+	/* Vertical recording: save the hotkey binding while it is registered, then no libobs thread can post
+	 * anymore (hotkey unregistered, output "stop" signal disconnected by shutdown), then drop pending posts.
+	 * The recorder object itself lives until the dock is gone; its reaper jobs drain in g_reaper->shutdown(). */
+	save_record_settings_once();
+	if (g_record_hotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(g_record_hotkey);
+	g_record_hotkey = OBS_INVALID_HOTKEY_ID;
+	if (g_vertical_recorder)
+		g_vertical_recorder->shutdown();
+	delete g_ui_context;
+	g_ui_context = nullptr;
+
 	/* Destroy the preview display first: its draw callback uses g_owned_canvas. */
 	shutdown_vertical_preview();
 
@@ -476,6 +551,9 @@ void obs_module_unload()
 		obs_frontend_remove_dock(kVerticalDockId);
 	g_vertical_dock_registered = false;
 	g_vertical_dock.clear();
+
+	/* The dock referenced the recorder. After shutdown() it refuses start() and never touches the owned canvas. */
+	g_vertical_recorder.reset();
 
 	/* Destroying the registry enqueues every remaining OutputController to
 	 * the reaper (see EndpointRegistry::~EndpointRegistry) instead of

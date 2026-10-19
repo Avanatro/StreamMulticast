@@ -88,6 +88,11 @@ bool EncoderFactory::is_encoder_available(const std::string &type_id)
 	return available_encoder_ids().count(type_id) != 0;
 }
 
+const std::set<std::string> &EncoderFactory::available_encoder_types()
+{
+	return available_encoder_ids();
+}
+
 /* -----------------------------------------------------------------------
  * available_backends()
  * ----------------------------------------------------------------------- */
@@ -221,10 +226,16 @@ obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
 obs_encoder_t *EncoderFactory::create_audio_encoder(const Endpoint &ep,
                                                      const std::string &name_hint) const
 {
-	obs_data_t *settings = obs_data_create();
-	obs_data_set_int(settings, "bitrate", ep.audio_bitrate_kbps);
+	/* mixer_idx = 0 → main OBS audio mix */
+	return create_aac_encoder(name_hint + "_audio_" + ep.id, ep.audio_bitrate_kbps, 0);
+}
 
-	std::string encoder_name = name_hint + "_audio_" + ep.id;
+obs_encoder_t *EncoderFactory::create_aac_encoder(const std::string &encoder_name,
+                                                   int bitrate_kbps,
+                                                   size_t mixer_idx) const
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_int(settings, "bitrate", bitrate_kbps);
 
 	// AVANATRO-VERIFY: obs_audio_encoder_create signature — 5 args in OBS 30:
 	// (id, name, settings, mixer_idx, hotkey_data).  Confirm OBS 31 is identical.
@@ -232,7 +243,7 @@ obs_encoder_t *EncoderFactory::create_audio_encoder(const Endpoint &ep,
 		"ffmpeg_aac",
 		encoder_name.c_str(),
 		settings,
-		0,       /* mixer_idx = 0 → main OBS audio mix */
+		mixer_idx,
 		nullptr  /* hotkey_data */
 	);
 
@@ -245,8 +256,43 @@ obs_encoder_t *EncoderFactory::create_audio_encoder(const Endpoint &ep,
 
 	obs_encoder_set_audio(enc, obs_get_audio());
 
-	obs_log(LOG_INFO, "EncoderFactory: created audio encoder '%s' (%d kbps AAC)",
-	        encoder_name.c_str(), ep.audio_bitrate_kbps);
+	obs_log(LOG_INFO, "EncoderFactory: created audio encoder '%s' (%d kbps AAC, mix %zu)",
+	        encoder_name.c_str(), bitrate_kbps, mixer_idx);
+	return enc;
+}
+
+obs_encoder_t *EncoderFactory::create_record_video_encoder(const RecordEncoderChoice &choice,
+                                                            const std::string &encoder_name,
+                                                            video_t *video) const
+{
+	if (!video) {
+		obs_log(LOG_ERROR, "EncoderFactory: create_record_video_encoder called without a video pipeline");
+		return nullptr;
+	}
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "rate_control", choice.rate_control.c_str());
+	obs_data_set_int(settings, choice.quality_key.c_str(), choice.quality);
+	if (choice.type_id == "obs_x264") {
+		obs_data_set_string(settings, "preset", "veryfast");
+		obs_data_set_string(settings, "profile", "high");
+	}
+
+	obs_encoder_t *enc = obs_video_encoder_create(choice.type_id.c_str(), encoder_name.c_str(), settings,
+	                                              nullptr /* hotkey_data */);
+	obs_data_release(settings);
+
+	if (!enc) {
+		obs_log(LOG_ERROR, "EncoderFactory: obs_video_encoder_create failed for type '%s'",
+		        choice.type_id.c_str());
+		return nullptr;
+	}
+
+	/* Same rule as create_video_encoder: the canvas the frames come from decides the encoded size. */
+	obs_encoder_set_video(enc, video);
+
+	obs_log(LOG_INFO, "EncoderFactory: created recording encoder '%s' (type=%s, %s %d)",
+	        encoder_name.c_str(), choice.type_id.c_str(), choice.rate_control.c_str(), choice.quality);
 	return enc;
 }
 
