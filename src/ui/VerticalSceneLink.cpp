@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalSceneLink.hpp"
 
 #include "../core/SceneLink.hpp"
+#include "../core/VerticalTransition.hpp"
 #include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
@@ -17,8 +18,13 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
 #include <algorithm>
+#include <QtWidgets/QFileDialog>
+#include <QtWidgets/QFormLayout>
+#include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QLineEdit>
+#include <QtWidgets/QPushButton>
 #include <QtWidgets/QTableWidget>
 #include <QtWidgets/QVBoxLayout>
 
@@ -31,6 +37,8 @@ namespace {
 
 enum Kind { KindAuto = 0, KindKeep = 1, KindScene = 2 };
 constexpr int kSceneNameRole = Qt::UserRole + 1;
+constexpr int kTransitionModeRole = Qt::UserRole;     ///< VerticalTransitionMode as int
+constexpr int kTransitionNameRole = Qt::UserRole + 1; ///< frontend transition name (custom mode)
 
 /** Name of the current program scene ("" when none). Releases the ref it takes. */
 std::string program_scene_name()
@@ -60,6 +68,21 @@ std::vector<std::string> main_scene_names()
 	return out;
 }
 
+/** Names of the frontend transitions. Releases every ref it takes. */
+std::vector<std::string> frontend_transition_names()
+{
+	std::vector<std::string> out;
+	obs_frontend_source_list list = {};
+	obs_frontend_get_transitions(&list);
+	for (size_t i = 0; i < list.sources.num; ++i) {
+		const char *name = obs_source_get_name(list.sources.array[i]);
+		if (name)
+			out.emplace_back(name);
+	}
+	obs_frontend_source_list_free(&list);
+	return out;
+}
+
 } // namespace
 
 VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWidget(parent), m_canvas(canvas)
@@ -75,10 +98,26 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	m_follow->setToolTip(tip);
 	layout->addWidget(m_follow);
 
-	m_wait_stinger = new QCheckBox(tr("Wait for stinger transition point"), this);
-	m_wait_stinger->setToolTip(tr("Off: the vertical canvas switches at the same moment the main transition starts. "
-				      "On: with a stinger transition it switches at the stinger's transition point instead."));
-	layout->addWidget(m_wait_stinger);
+	auto *form = new QFormLayout();
+	form->setContentsMargins(0, 0, 0, 0);
+	m_transition = new QComboBox(this);
+	m_transition->setToolTip(tr("Follow main: the vertical canvas uses the same transition (type, settings and "
+				    "duration) as the main canvas and starts it at the same moment. Cut: always instant. "
+				    "A named transition: always that one."));
+	form->addRow(tr("Transition:"), m_transition);
+
+	auto *stinger_row = new QHBoxLayout();
+	m_stinger_path = new QLineEdit(this);
+	m_stinger_path->setPlaceholderText(tr("(auto)"));
+	m_stinger_path->setClearButtonEnabled(true);
+	m_stinger_path->setToolTip(tr("Video for a stinger transition on the vertical canvas. Empty (auto): "
+				      "\"<stinger>-vertical.<ext>\" or \"stinger-vertical.<ext>\" next to the main stinger "
+				      "file; without one the 16:9 stinger is used."));
+	auto *browse = new QPushButton(tr("Browse..."), this);
+	stinger_row->addWidget(m_stinger_path, 1);
+	stinger_row->addWidget(browse);
+	form->addRow(tr("Vertical stinger video:"), stinger_row);
+	layout->addLayout(form);
 
 	m_table = new QTableWidget(0, 2, this);
 	m_table->setHorizontalHeaderLabels({tr("Main scene"), tr("Vertical scene")});
@@ -96,7 +135,10 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	layout->addWidget(m_status);
 
 	connect(m_follow, &QCheckBox::toggled, this, &VerticalSceneLink::on_follow_toggled);
-	connect(m_wait_stinger, &QCheckBox::toggled, this, &VerticalSceneLink::on_wait_stinger_toggled);
+	connect(m_transition, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&VerticalSceneLink::on_transition_changed);
+	connect(m_stinger_path, &QLineEdit::editingFinished, this, &VerticalSceneLink::on_stinger_path_changed);
+	connect(browse, &QPushButton::clicked, this, &VerticalSceneLink::on_browse_stinger);
 
 	refresh();
 }
@@ -138,10 +180,29 @@ void VerticalSceneLink::refresh()
 	m_follow->blockSignals(true);
 	m_follow->setChecked(settings.enabled);
 	m_follow->blockSignals(false);
-	m_wait_stinger->blockSignals(true);
-	m_wait_stinger->setChecked(settings.wait_for_stinger);
-	m_wait_stinger->setEnabled(settings.enabled);
-	m_wait_stinger->blockSignals(false);
+
+	const VerticalTransitionSettings transition = m_canvas.transition_settings();
+	m_transition->blockSignals(true);
+	m_transition->clear();
+	m_transition->addItem(tr("Follow main (default)"), static_cast<int>(VerticalTransitionMode::Follow));
+	m_transition->addItem(tr("Cut"), static_cast<int>(VerticalTransitionMode::Cut));
+	int transition_index = transition.mode == VerticalTransitionMode::Cut ? 1 : 0;
+	for (const std::string &name : frontend_transition_names()) {
+		m_transition->addItem(QString::fromStdString(name), static_cast<int>(VerticalTransitionMode::Custom));
+		m_transition->setItemData(m_transition->count() - 1, QString::fromStdString(name), kTransitionNameRole);
+		if (transition.mode == VerticalTransitionMode::Custom && transition.custom_name == name)
+			transition_index = m_transition->count() - 1;
+	}
+	if (transition.mode == VerticalTransitionMode::Custom && transition_index == 0) {
+		/* Saved transition no longer exists: keep it visible; the vertical canvas follows main meanwhile. */
+		const QString missing = QString::fromStdString(transition.custom_name);
+		m_transition->addItem(tr("%1 (missing)").arg(missing), static_cast<int>(VerticalTransitionMode::Custom));
+		m_transition->setItemData(m_transition->count() - 1, missing, kTransitionNameRole);
+		transition_index = m_transition->count() - 1;
+	}
+	m_transition->setCurrentIndex(transition_index);
+	m_transition->blockSignals(false);
+	m_stinger_path->setText(QString::fromStdString(transition.stinger_path));
 
 	m_table->setRowCount(0);
 	m_table->setRowCount(static_cast<int>(mains.size()));
@@ -211,7 +272,6 @@ void VerticalSceneLink::on_follow_toggled(bool checked)
 	SceneLinkSettings settings = m_canvas.link_settings();
 	settings.enabled = checked;
 	m_canvas.set_link_settings(settings);
-	m_wait_stinger->setEnabled(checked);
 	for (int r = 0; r < m_table->rowCount(); ++r) {
 		if (QWidget *w = m_table->cellWidget(r, 1))
 			w->setEnabled(checked);
@@ -219,13 +279,43 @@ void VerticalSceneLink::on_follow_toggled(bool checked)
 	m_canvas.follow_program_scene(); // takes effect now, not only at the next scene change
 }
 
-void VerticalSceneLink::on_wait_stinger_toggled(bool checked)
+void VerticalSceneLink::on_transition_changed(int index)
+{
+	if (m_shutdown.load() || m_refreshing || index < 0)
+		return;
+	VerticalTransitionSettings settings = m_canvas.transition_settings();
+	settings.mode = static_cast<VerticalTransitionMode>(m_transition->itemData(index, kTransitionModeRole).toInt());
+	settings.custom_name = settings.mode == VerticalTransitionMode::Custom
+				       ? m_transition->itemData(index, kTransitionNameRole).toString().toStdString()
+				       : std::string();
+	m_canvas.set_transition_settings(settings); // persisted with the collection
+	m_canvas.prepare_transition();             // load it before the next switch
+}
+
+void VerticalSceneLink::on_stinger_path_changed()
 {
 	if (m_shutdown.load() || m_refreshing)
 		return;
-	SceneLinkSettings settings = m_canvas.link_settings();
-	settings.wait_for_stinger = checked;
-	m_canvas.set_link_settings(settings); // applies from the next transition; persisted with the collection
+	VerticalTransitionSettings settings = m_canvas.transition_settings();
+	const std::string path = m_stinger_path->text().trimmed().toStdString();
+	if (path == settings.stinger_path)
+		return;
+	settings.stinger_path = path; // "" = auto
+	m_canvas.set_transition_settings(settings);
+	m_canvas.prepare_transition();
+}
+
+void VerticalSceneLink::on_browse_stinger()
+{
+	if (m_shutdown.load())
+		return;
+	/* The dialog runs an event loop: no libobs reference is held across it. */
+	const QString file = QFileDialog::getOpenFileName(this, tr("Vertical stinger video"), m_stinger_path->text(),
+							  tr("Video files (*.webm *.mov *.mp4 *.mkv *.avi);;All files (*)"));
+	if (m_shutdown.load() || file.isEmpty())
+		return;
+	m_stinger_path->setText(file);
+	on_stinger_path_changed();
 }
 
 void VerticalSceneLink::on_choice_changed(const QString &main_scene, int kind, const QString &vertical_scene)

@@ -23,6 +23,7 @@ set(SMULTI_TEST_SOURCES
     test_streamlabs_tiktok.cpp
     test_preview_edit.cpp
     test_item_actions.cpp
+    test_vertical_transition.cpp
 )
 
 add_executable(
@@ -42,6 +43,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/StreamlabsTikTok.cpp
   ${CMAKE_SOURCE_DIR}/src/core/PreviewEdit.cpp
   ${CMAKE_SOURCE_DIR}/src/core/ItemActions.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/VerticalTransition.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

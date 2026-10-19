@@ -35,20 +35,6 @@ namespace {
 constexpr const char *kSignals[] = {"source_add", "source_remove", "source_rename", "channel_change"};
 constexpr const char *kNewSceneBase = "V Scene";
 
-
-/** Name of the scene on channel 0 ("" when none). Releases the ref it takes. */
-std::string active_scene_name(obs_canvas_t *canvas)
-{
-	std::string out;
-	obs_source_t *src = obs_canvas_get_channel(canvas, 0);
-	if (src) {
-		const char *n = obs_source_get_name(src);
-		out = n ? n : "";
-		obs_source_release(src);
-	}
-	return out;
-}
-
 } // namespace
 
 VerticalSceneList::VerticalSceneList(OwnedCanvas &canvas, QWidget *parent) : QWidget(parent), m_canvas(canvas)
@@ -187,7 +173,7 @@ void VerticalSceneList::refresh()
 		have_canvas = true;
 		connect_signals(canvas);
 		scenes = canvas_scene_names(canvas);
-		active = active_scene_name(canvas);
+		active = OwnedCanvas::active_scene_name(canvas); // destination while a transition runs
 		obs_canvas_release(canvas);
 	} else {
 		detach_signals();
@@ -257,11 +243,11 @@ void VerticalSceneList::on_add()
 	const bool created = scene != nullptr;
 	if (scene) {
 		/* The canvas keeps its own refs (SCENE_REF); a first scene becomes the active one. */
-		obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+		obs_source_t *current = OwnedCanvas::active_scene_ref(canvas);
 		if (current)
 			obs_source_release(current);
 		else
-			obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
+			m_canvas.switch_scene(canvas, obs_scene_get_source(scene), SceneSwitch::Instant);
 		obs_scene_release(scene);
 	}
 	obs_canvas_release(canvas);
@@ -356,14 +342,15 @@ void VerticalSceneList::on_remove()
 			error = tr("The last scene cannot be removed; add another scene first.");
 		} else {
 			const std::string removing = name.toStdString();
-			if (active_scene_name(canvas) == removing) {
-				/* Hand channel 0 to another scene first so the preview never loses its scene. */
+			if (OwnedCanvas::active_scene_name(canvas) == removing) {
+				/* Hand over to another scene first (instantly) so the preview never loses its scene. */
 				for (const std::string &other : scenes) {
 					if (other == removing)
 						continue;
 					obs_scene_t *next = obs_canvas_get_scene_by_name(canvas, other.c_str());
 					if (next) {
-						obs_canvas_set_channel(canvas, 0, obs_scene_get_source(next));
+						m_canvas.switch_scene(canvas, obs_scene_get_source(next),
+								      SceneSwitch::Instant);
 						obs_scene_release(next);
 						break;
 					}
@@ -398,12 +385,13 @@ void VerticalSceneList::on_set_active()
 		return;
 	}
 
-	/* Same mechanism OwnedCanvas uses: the scene on channel 0 is what OwnedCanvas::on_save_load
-	 * stores in the collection and ensure() restores. */
+	/* Same mechanism OwnedCanvas uses: the active scene is what OwnedCanvas::on_save_load stores in the
+	 * collection and ensure() restores. Animated with the vertical transition setting (follow main: the
+	 * current main transition and duration; cut: instant; custom: that transition). */
 	QString error;
 	obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, name.toUtf8().constData());
 	if (scene) {
-		obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
+		m_canvas.switch_scene(canvas, obs_scene_get_source(scene), SceneSwitch::Manual);
 		obs_scene_release(scene);
 	} else {
 		error = tr("The scene no longer exists.");

@@ -77,25 +77,6 @@ SMULTI_TEST(scene_link_rename_migrates_key_and_value)
 	EXPECT_TRUE(!smulti::rename_scene_in_links(s, "Nothing", "Else"));
 }
 
-SMULTI_TEST(scene_link_stinger_delay_uses_transition_point)
-{
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, 380, 60, 1), 380);
-	/* frame based: 30 frames at 60 fps = 500 ms; at 30000/1001 fps = 1001 ms */
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 60, 1), 500);
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 30000, 1001), 1001);
-	/* unusable input never delays, huge values are capped */
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 0, 1), 0);
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, -5, 60, 1), 0);
-	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, 999999, 60, 1), 120000);
-}
-
-SMULTI_TEST(scene_link_non_stinger_switches_immediately)
-{
-	EXPECT_EQ(smulti::linked_switch_delay_ms("fade_transition", 0, 380, 60, 1), 0);
-	EXPECT_EQ(smulti::linked_switch_delay_ms("cut_transition", 0, 380, 60, 1), 0);
-	EXPECT_EQ(smulti::linked_switch_delay_ms("", 0, 380, 60, 1), 0);
-}
-
 SMULTI_TEST(scene_link_save_load_roundtrip)
 {
 	SceneLinkSettings s;
@@ -121,34 +102,19 @@ SMULTI_TEST(scene_link_load_defaults_when_keys_missing)
 	EXPECT_TRUE(back.explicit_map.empty());
 }
 
-SMULTI_TEST(scene_link_switch_immediate_by_default)
+SMULTI_TEST(scene_link_ignores_removed_wait_stinger_key)
 {
-	SceneLinkSettings s; // wait_for_stinger defaults to false
-	EXPECT_EQ(s.wait_for_stinger, false);
-	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "obs_stinger_transition", 0, 380, 60, 1), 0);
-	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "fade_transition", 0, 380, 60, 1), 0);
-}
-
-SMULTI_TEST(scene_link_wait_for_stinger_keeps_delay)
-{
-	SceneLinkSettings s;
-	s.wait_for_stinger = true;
-	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "obs_stinger_transition", 0, 380, 60, 1), 380);
-	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "fade_transition", 0, 380, 60, 1), 0);
-}
-
-SMULTI_TEST(scene_link_wait_for_stinger_persisted)
-{
-	SceneLinkSettings s;
-	s.wait_for_stinger = true;
+	/* The "wait for stinger transition point" option is gone (TASK-31): a saved key is ignored and not
+	 * written back. */
 	obs_data_t *data = obs_data_create();
-	smulti::scene_link_save(data, s);
-	EXPECT_TRUE(obs_data_has_user_value(data, smulti::kSceneLinkWaitStingerKey));
+	obs_data_set_bool(data, "streammulticast_vertical_link_wait_stinger", true);
+	obs_data_set_bool(data, smulti::kSceneLinkEnabledKey, false);
 	SceneLinkSettings back = smulti::scene_link_load(data);
-	EXPECT_EQ(back.wait_for_stinger, true);
 	obs_data_release(data);
+	EXPECT_EQ(back.enabled, false);
 
-	obs_data_t *empty = obs_data_create();
-	EXPECT_EQ(smulti::scene_link_load(empty).wait_for_stinger, false);
-	obs_data_release(empty);
+	obs_data_t *out = obs_data_create();
+	smulti::scene_link_save(out, back);
+	EXPECT_EQ(obs_data_has_user_value(out, "streammulticast_vertical_link_wait_stinger"), false);
+	obs_data_release(out);
 }

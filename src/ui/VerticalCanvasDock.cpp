@@ -11,6 +11,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalItemList.hpp"
 #include "VerticalSceneLink.hpp"
 #include "VerticalSceneList.hpp"
+#include "../pipeline/OwnedCanvas.hpp"
 #include "../pipeline/VerticalRecorder.hpp"
 
 #include <QFileDialog>
@@ -27,6 +28,7 @@ namespace smulti {
 
 VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, QWidget *parent)
 	: QWidget(parent),
+	  m_canvas(canvas),
 	  m_recorder(recorder)
 {
 	setObjectName("StreamMulticastVerticalDock");
@@ -82,6 +84,24 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 
 	/* The recorder calls back on the UI thread; the dock may be destroyed by Qt first at OBS exit. */
 	QPointer<VerticalCanvasDock> self(this);
+
+	/* A scene switch changes the transition's child, not channel 0, so no canvas channel_change fires:
+	 * OwnedCanvas reports it (UI thread). Queued, so a list never rebuilds inside its own action. */
+	m_canvas.set_active_scene_listener([self]() {
+		if (!self)
+			return;
+		QMetaObject::invokeMethod(
+			self.data(),
+			[self]() {
+				if (!self || self->m_shut_down)
+					return;
+				if (self->m_scenes)
+					self->m_scenes->refresh();
+				if (self->m_items)
+					self->m_items->refresh();
+			},
+			Qt::QueuedConnection);
+	});
 	m_recorder.set_state_listener([self]() {
 		if (self)
 			self->update_record_ui();
@@ -215,6 +235,8 @@ void VerticalCanvasDock::detach_scene_signals()
 
 void VerticalCanvasDock::shutdown_preview()
 {
+	m_shut_down = true;
+	m_canvas.set_active_scene_listener(nullptr);
 	if (m_scenes)
 		m_scenes->shutdown();
 	if (m_items)

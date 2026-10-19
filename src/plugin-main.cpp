@@ -39,7 +39,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMainWindow>
 #include <QAction>
 #include <QPointer>
-#include <QTimer>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -156,40 +155,15 @@ static void refresh_vertical_links()
 		g_vertical_dock->refresh_links();
 }
 
-/* Pending delayed scene-link switch (stinger). UI thread only; holds a scene NAME, never a libobs
- * reference. Created in obs_module_load (UI thread), also the context object for queued calls. */
-static QTimer *g_follow_timer = nullptr;
-static std::string g_follow_target;
-
-static void cancel_pending_follow()
-{
-	if (g_follow_timer)
-		g_follow_timer->stop();
-}
-
-/* UI thread: switch the vertical canvas to the scene linked to `main_scene` after `delay_ms`.
- * A newer transition replaces a pending one. */
-static void schedule_follow(const std::string &main_scene, int delay_ms)
-{
-	if (!g_module_alive.load() || !g_owned_canvas || !g_follow_timer)
-		return;
-	if (delay_ms <= 0) {
-		cancel_pending_follow();
-		g_owned_canvas->follow_scene(main_scene);
-		return;
-	}
-	g_follow_target = main_scene;
-	g_follow_timer->start(delay_ms);
-}
-
 /* libobs global "source_transition_start". obs_transition_start emits it after the destination is
- * set as OBS_TRANSITION_SOURCE_B (libobs obs-source-transition.c:362-368), i.e. BEFORE the
+ * set as OBS_TRANSITION_SOURCE_B (libobs obs-source-transition.c:351-368), i.e. BEFORE the
  * transition runs; the frontend's SCENE_CHANGED only follows at transition end (OBSBasic::
- * TransitionStopped), or at once for the force/cut path. The callback runs on the thread that
- * started the transition, so it only reads names and queues to the UI thread. Fires for whatever
- * transition is on output channel 0, so a per-scene override transition is covered too.
- * By default the vertical canvas switches right away (simultaneous with the main transition); only
- * the link option "wait for stinger transition point" delays it to the stinger's point. */
+ * TransitionStopped), or at once for the force/cut path. It fires for whatever transition is on output
+ * channel 0, so a per-scene override transition is covered (OBSBasic::OverrideTransition puts it there
+ * first). Private sources never emit it, so the plugin's own vertical transition does not re-enter.
+ * The callback runs on the thread that started the transition: it copies plain values (type, name,
+ * settings json, destination scene and its override) and queues them to the UI thread, where the vertical
+ * transition starts (same type, settings copy and duration; TASK-31). */
 static void on_transition_start(void *, calldata_t *cd)
 {
 	if (!g_module_alive.load() || !g_owned_canvas)
@@ -207,19 +181,38 @@ static void on_transition_start(void *, calldata_t *cd)
 	obs_source_t *dest = obs_transition_get_source(transition, OBS_TRANSITION_SOURCE_B); // fade-to-black: null
 	if (!dest)
 		return;
-	const char *name = obs_source_get_name(dest);
-	const std::string main_scene = name ? name : "";
+	smulti::MainTransitionStart start;
+	const char *dest_name = obs_source_get_name(dest);
+	start.dest_scene = dest_name ? dest_name : "";
+	/* Per-scene override, as OBSBasic::GetOverrideTransition / GetOverrideTransitionDuration read it. */
+	obs_data_t *priv = obs_source_get_private_settings(dest);
+	if (priv) {
+		const char *ov = obs_data_get_string(priv, "transition");
+		start.override_name = ov ? ov : "";
+		start.override_duration_ms = obs_data_has_user_value(priv, "transition_duration")
+						     ? obs_data_get_int(priv, "transition_duration")
+						     : 300;
+		obs_data_release(priv);
+	}
 	obs_source_release(dest);
-	if (main_scene.empty())
+	if (start.dest_scene.empty())
 		return;
 
-	const int delay_ms = g_owned_canvas->switch_delay_ms(transition); // 0 unless waiting for a stinger
+	const char *id = obs_source_get_id(transition);
+	const char *name = obs_source_get_name(transition);
+	start.id = id ? id : "";
+	start.name = name ? name : "";
+	obs_data_t *settings = obs_source_get_settings(transition);
+	if (settings) {
+		const char *json = obs_data_get_json(settings);
+		start.settings_json = json ? json : "";
+		obs_data_release(settings);
+	}
 
-	QTimer *context = g_follow_timer;
-	if (!context)
-		return;
-	QMetaObject::invokeMethod(
-		context, [main_scene, delay_ms]() { schedule_follow(main_scene, delay_ms); }, Qt::QueuedConnection);
+	post_to_ui([start]() {
+		if (g_module_alive.load() && g_owned_canvas)
+			g_owned_canvas->on_main_transition_start(start);
+	});
 }
 
 static void disconnect_transition_start()
@@ -233,7 +226,6 @@ static void ensure_owned_canvas_and_follow(bool follow)
 {
 	if (!g_owned_canvas)
 		return;
-	cancel_pending_follow();
 	g_owned_canvas->ensure();
 	if (follow)
 		g_owned_canvas->follow_program_scene();
@@ -326,22 +318,31 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		flush_config();
 		save_record_settings_once();
 		stop_vertical_recording("OBS is shutting down");
-		cancel_pending_follow();
 		disconnect_transition_start();
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
+		/* The vertical transition holds vertical scene refs: let go before the frontend clears the scenes. */
+		if (g_owned_canvas)
+			g_owned_canvas->release_transition();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
 		ensure_owned_canvas_and_follow(true);
 	} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 		ensure_owned_canvas_and_follow(false);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
 		/* Authoritative: the transition is over (or it was a cut / studio-mode swap / missed signal).
-		 * Drop a pending anticipated switch and put the canvas on the linked scene of the now-current
-		 * program scene; a no-op when it is already there. Studio preview fires another event. */
-		cancel_pending_follow();
+		 * Put the canvas on the linked scene of the now-current program scene, instantly; a no-op when
+		 * it is already there or the vertical transition already runs towards it. Studio preview fires
+		 * another event. */
 		if (g_owned_canvas)
 			g_owned_canvas->follow_program_scene();
+	} else if (event == OBS_FRONTEND_EVENT_TRANSITION_CHANGED ||
+		   event == OBS_FRONTEND_EVENT_TRANSITION_LIST_CHANGED) {
+		/* Load the next transition (a stinger video) ahead of its first use, and list it in the Links tab. */
+		if (g_owned_canvas)
+			g_owned_canvas->prepare_transition();
+		if (event == OBS_FRONTEND_EVENT_TRANSITION_LIST_CHANGED)
+			refresh_vertical_links();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
 		refresh_vertical_links();
 	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STARTED) {
@@ -353,7 +354,6 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
 		stop_provider_endpoints(); // ends a Streamlabs TikTok session (TASK-28)
 		stop_vertical_recording("scene collection changing"); // before the owned canvas reference goes
-		cancel_pending_follow();
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
 			g_owned_canvas->on_collection_changing(*g_registry);
@@ -397,7 +397,6 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		}
 		shutdown_streamlabs(); // after the stops above queued their session ends
 		stop_vertical_recording("OBS exit");
-		cancel_pending_follow();
 		disconnect_transition_start();
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
@@ -436,6 +435,7 @@ bool obs_module_load()
 	g_streamlabs = std::make_unique<smulti::StreamlabsClient>(post_to_ui);
 	smulti::set_streamlabs_client(g_streamlabs.get());
 #endif
+	g_owned_canvas->set_ui_poster(post_to_ui); // vertical transition: reload after each run
 	g_vertical_recorder = std::make_unique<smulti::VerticalRecorder>(*g_owned_canvas, *g_reaper, post_to_ui);
 	g_record_hotkey = obs_hotkey_register_frontend("StreamMulticast.VerticalRecord",
 						       "StreamMulticast: Start/Stop vertical recording", on_record_hotkey,
@@ -456,13 +456,6 @@ bool obs_module_load()
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
-	g_follow_timer = new QTimer(); // UI thread; context for queued calls from on_transition_start
-	g_follow_timer->setSingleShot(true);
-	QObject::connect(g_follow_timer, &QTimer::timeout, []() {
-		/* Re-resolve everything now: the canvas or the links may have changed meanwhile. */
-		if (g_module_alive.load() && g_owned_canvas)
-			g_owned_canvas->follow_scene(g_follow_target);
-	});
 	signal_handler_connect(obs_get_signal_handler(), "source_transition_start", on_transition_start, nullptr);
 
 	/* 6. Create and register the dock widget
@@ -540,10 +533,6 @@ void obs_module_unload()
 				ctrl->stop();
 		}
 	}
-
-	cancel_pending_follow();
-	delete g_follow_timer;
-	g_follow_timer = nullptr;
 
 	/* Vertical recording: save the hotkey binding while it is registered, then no libobs thread can post
 	 * anymore (hotkey unregistered, output "stop" signal disconnected by shutdown), then drop pending posts.

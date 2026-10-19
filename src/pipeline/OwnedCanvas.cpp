@@ -17,6 +17,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <obs.h>
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 
 #include <optional>
 #include <utility>
@@ -28,6 +29,56 @@ namespace {
 
 constexpr const char *kDefaultSceneName = "V Main";
 constexpr const char *kSceneSaveKey = "streammulticast_vertical_scene";
+constexpr const char *kTransitionName = "StreamMulticast Vertical Transition";
+constexpr uint32_t kFallbackWidth = 1080;
+constexpr uint32_t kFallbackHeight = 1920;
+
+/** The one place channel 0 of the owned canvas is read (strong ref or null). */
+obs_source_t *channel_source(obs_canvas_t *canvas)
+{
+	return canvas ? obs_canvas_get_channel(canvas, 0) : nullptr;
+}
+
+/** Scene shown by a channel source: unwraps a transition (destination while it runs). New ref or null. */
+obs_source_t *unwrap_scene(obs_source_t *channel)
+{
+	if (!channel)
+		return nullptr;
+	if (obs_source_get_type(channel) == OBS_SOURCE_TYPE_TRANSITION)
+		return obs_transition_get_active_source(channel); // B while transitioning, else A
+	return obs_source_get_ref(channel);
+}
+
+bool transition_running(obs_source_t *transition)
+{
+	const float t = obs_transition_get_time(transition);
+	return t > 0.0f && t < 1.0f;
+}
+
+bool file_exists(const std::string &path)
+{
+	return !path.empty() && os_file_exists(path.c_str());
+}
+
+/** Current frontend transition as a TransitionDesc; *settings_out is a new ref (release it) or null. */
+TransitionDesc current_frontend_transition(obs_data_t **settings_out)
+{
+	TransitionDesc desc;
+	*settings_out = nullptr;
+	obs_source_t *tr = obs_frontend_get_current_transition();
+	if (tr) {
+		const char *id = obs_source_get_id(tr);
+		const char *name = obs_source_get_name(tr);
+		desc.id = id ? id : "";
+		desc.name = name ? name : "";
+		*settings_out = obs_source_get_settings(tr);
+		desc.settings = *settings_out;
+		obs_source_release(tr);
+	}
+	const int duration = obs_frontend_get_transition_duration();
+	desc.duration_ms = duration > 0 ? static_cast<uint32_t>(duration) : 0u;
+	return desc;
+}
 
 struct SceneScan {
 	size_t count = 0;
@@ -256,6 +307,7 @@ void OwnedCanvas::ensure()
 	remember(canvas);
 	if (obs_canvas_has_video(canvas)) {
 		repair_scale_refs(canvas);
+		prepare_transition_on(canvas); // transition on channel 0 with the type it will use next
 		ensure_active_scene(canvas);
 	}
 	obs_canvas_release(canvas);
@@ -268,8 +320,8 @@ void OwnedCanvas::ensure_active_scene(obs_canvas_t *canvas)
 
 	if (scan.count > 0) {
 		/* A restored canvas has its scenes but no channel assignment (libobs
-		 * does not persist it). Only fill an empty channel 0. */
-		obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+		 * does not persist it). Only fill an empty one. */
+		obs_source_t *current = active_scene_ref(canvas);
 		if (current) {
 			obs_source_release(current);
 			return;
@@ -285,7 +337,7 @@ void OwnedCanvas::ensure_active_scene(obs_canvas_t *canvas)
 			scene = obs_canvas_get_scene_by_name(canvas, scan.first_name.c_str());
 		if (!scene)
 			return;
-		obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
+		switch_scene(canvas, obs_scene_get_source(scene), SceneSwitch::Instant);
 		obs_log(LOG_INFO, "owned canvas: restored scene '%s' on channel 0",
 			obs_source_get_name(obs_scene_get_source(scene)));
 		obs_scene_release(scene);
@@ -297,8 +349,8 @@ void OwnedCanvas::ensure_active_scene(obs_canvas_t *canvas)
 		obs_log(LOG_WARNING, "owned canvas: could not create scene '%s'", kDefaultSceneName);
 		return;
 	}
-	obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
-	obs_scene_release(scene); // the canvas holds its own refs (SCENE_REF + channel)
+	switch_scene(canvas, obs_scene_get_source(scene), SceneSwitch::Instant);
+	obs_scene_release(scene); // the canvas holds its own refs (SCENE_REF), the transition holds one too
 	obs_log(LOG_INFO, "owned canvas: created empty scene '%s'", kDefaultSceneName);
 }
 
@@ -327,6 +379,7 @@ void OwnedCanvas::on_collection_changing(EndpointRegistry &registry)
 
 void OwnedCanvas::release()
 {
+	release_transition(); // needs the weak ref to clear channel 0 first
 	obs_weak_canvas_t *weak = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -361,21 +414,18 @@ void OwnedCanvas::on_save_load(obs_data_t *data, bool saving)
 	if (!saving) {
 		const char *name = obs_data_get_string(data, kSceneSaveKey);
 		SceneLinkSettings links = scene_link_load(data);
+		VerticalTransitionSettings transition = vertical_transition_load(data);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_scene_name = name ? name : "";
 		m_links = std::move(links);
+		m_transition_settings = std::move(transition);
 		return;
 	}
 
 	obs_canvas_t *c = get_ref();
 	std::string name;
 	if (c) {
-		obs_source_t *src = obs_canvas_get_channel(c, 0);
-		if (src) {
-			const char *n = obs_source_get_name(src);
-			name = n ? n : "";
-			obs_source_release(src);
-		}
+		name = active_scene_name(c); // the destination while a transition runs
 		obs_canvas_release(c);
 	}
 	std::lock_guard<std::mutex> lock(m_mutex);
@@ -384,6 +434,7 @@ void OwnedCanvas::on_save_load(obs_data_t *data, bool saving)
 	if (!m_scene_name.empty())
 		obs_data_set_string(data, kSceneSaveKey, m_scene_name.c_str());
 	scene_link_save(data, m_links);
+	vertical_transition_save(data, m_transition_settings);
 }
 
 std::string OwnedCanvas::uuid() const
@@ -410,31 +461,6 @@ void OwnedCanvas::on_scene_renamed(const std::string &old_name, const std::strin
 	rename_scene_in_links(m_links, old_name, new_name);
 }
 
-int OwnedCanvas::switch_delay_ms(obs_source_t *transition) const
-{
-	const SceneLinkSettings settings = link_settings();
-	if (!transition || !settings.wait_for_stinger)
-		return 0;
-
-	const char *id = obs_source_get_id(transition);
-	const std::string transition_id = id ? id : "";
-	std::int64_t tp_type = 0;
-	std::int64_t point = 0;
-	if (transition_id == kStingerTransitionId) {
-		obs_data_t *settings = obs_source_get_settings(transition);
-		if (settings) {
-			tp_type = obs_data_get_int(settings, "tp_type");
-			point = obs_data_get_int(settings, "transition_point");
-			obs_data_release(settings);
-		}
-	}
-
-	obs_video_info ovi = {};
-	if (!obs_get_video_info(&ovi))
-		return 0;
-	return linked_switch_delay_ms(settings, transition_id, tp_type, point, ovi.fps_num, ovi.fps_den);
-}
-
 void OwnedCanvas::follow_program_scene()
 {
 	std::string main_name;
@@ -459,28 +485,304 @@ void OwnedCanvas::follow_scene(const std::string &main_name)
 
 	if (obs_canvas_has_video(canvas)) {
 		const std::vector<std::string> verticals = canvas_scene_names(canvas);
-
 		const std::optional<std::string> target = resolve_linked_scene(main_name, settings, verticals);
-		if (target) {
-			std::string active;
-			obs_source_t *current = obs_canvas_get_channel(canvas, 0);
-			if (current) {
-				const char *n = obs_source_get_name(current);
-				active = n ? n : "";
-				obs_source_release(current);
-			}
-			if (active != *target) {
-				obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, target->c_str());
-				if (scene) {
-					obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
-					obs_scene_release(scene);
-					obs_log(LOG_INFO, "scene link: \"%s\" -> \"%s\"", main_name.c_str(),
-						target->c_str());
-				}
+		/* Already active or already the destination of the running vertical transition: nothing to do. */
+		if (target && active_scene_name(canvas) != *target) {
+			obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, target->c_str());
+			if (scene) {
+				switch_scene(canvas, obs_scene_get_source(scene), SceneSwitch::Instant);
+				obs_scene_release(scene);
+				obs_log(LOG_INFO, "scene link: \"%s\" -> \"%s\"", main_name.c_str(), target->c_str());
 			}
 		}
 	}
 	obs_canvas_release(canvas);
+}
+
+/* ---- vertical scene transition (TASK-31) ------------------------------------ */
+
+obs_source_t *OwnedCanvas::active_scene_ref(obs_canvas_t *canvas)
+{
+	obs_source_t *channel = channel_source(canvas);
+	obs_source_t *scene = unwrap_scene(channel);
+	obs_source_release(channel);
+	return scene;
+}
+
+std::string OwnedCanvas::active_scene_name(obs_canvas_t *canvas)
+{
+	std::string out;
+	obs_source_t *scene = active_scene_ref(canvas);
+	if (scene) {
+		const char *n = obs_source_get_name(scene);
+		out = n ? n : "";
+		obs_source_release(scene);
+	}
+	return out;
+}
+
+bool OwnedCanvas::is_owned(obs_canvas_t *canvas) const
+{
+	const char *u = canvas ? obs_canvas_get_uuid(canvas) : nullptr;
+	return u && *u && uuid() == u;
+}
+
+VerticalTransitionSettings OwnedCanvas::transition_settings() const
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_transition_settings;
+}
+
+void OwnedCanvas::set_transition_settings(const VerticalTransitionSettings &settings)
+{
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_transition_settings = settings;
+}
+
+void OwnedCanvas::set_active_scene_listener(std::function<void()> listener)
+{
+	m_active_listener = std::move(listener);
+}
+
+VerticalTransitionPlan OwnedCanvas::plan_for(const TransitionDesc &main) const
+{
+	const VerticalTransitionSettings settings = transition_settings();
+	TransitionDesc custom;
+	obs_data_t *custom_settings = nullptr;
+	bool have_custom = false;
+	if (settings.mode == VerticalTransitionMode::Custom && !settings.custom_name.empty()) {
+		obs_frontend_source_list list = {};
+		obs_frontend_get_transitions(&list);
+		for (size_t i = 0; i < list.sources.num && !have_custom; ++i) {
+			obs_source_t *tr = list.sources.array[i];
+			const char *name = obs_source_get_name(tr);
+			if (!name || settings.custom_name != name)
+				continue;
+			const char *id = obs_source_get_id(tr);
+			custom.id = id ? id : "";
+			custom.name = name;
+			custom_settings = obs_source_get_settings(tr);
+			custom.settings = custom_settings;
+			const int duration = obs_frontend_get_transition_duration();
+			custom.duration_ms = duration > 0 ? static_cast<uint32_t>(duration) : 0u;
+			have_custom = true;
+		}
+		obs_frontend_source_list_free(&list);
+		if (!have_custom)
+			obs_log(LOG_WARNING, "vertical transition: custom transition '%s' not found, following main",
+				settings.custom_name.c_str());
+	}
+	VerticalTransitionPlan plan =
+		decide_vertical_transition(settings, main, have_custom ? &custom : nullptr, file_exists);
+	if (custom_settings)
+		obs_data_release(custom_settings);
+	return plan;
+}
+
+VerticalTransitionPlan OwnedCanvas::plan_for_current_transition() const
+{
+	obs_data_t *settings = nullptr;
+	const TransitionDesc main = current_frontend_transition(&settings);
+	VerticalTransitionPlan plan = plan_for(main);
+	if (settings)
+		obs_data_release(settings);
+	return plan;
+}
+
+obs_source_t *OwnedCanvas::ensure_transition(obs_canvas_t *canvas, const std::string &id)
+{
+	obs_source_t *channel = channel_source(canvas);
+	if (m_transition && channel == m_transition && m_transition_id == id) {
+		obs_source_release(channel);
+		return m_transition;
+	}
+
+	obs_source_t *created = obs_source_create_private(id.c_str(), kTransitionName, nullptr);
+	if (!created) {
+		obs_log(LOG_WARNING, "vertical transition: could not create a '%s' transition", id.c_str());
+		const bool ours = m_transition && channel == m_transition;
+		obs_source_release(channel);
+		return ours ? m_transition : nullptr; // keep the old type rather than none
+	}
+
+	obs_video_info ovi = {};
+	const bool have_size = obs_canvas_get_video_info(canvas, &ovi) && ovi.base_width && ovi.base_height;
+	obs_transition_set_size(created, have_size ? ovi.base_width : kFallbackWidth,
+				have_size ? ovi.base_height : kFallbackHeight);
+	obs_transition_set_alignment(created, OBS_ALIGN_CENTER);
+
+	/* New one first, showing the scene the canvas shows now (destination of a running transition). */
+	obs_source_t *keep = unwrap_scene(channel);
+	if (keep)
+		obs_transition_set(created, keep);
+	obs_canvas_set_channel(canvas, 0, created);
+
+	/* After a run, load what the next switch will use (a per-scene override may have changed the type). */
+	signal_handler_connect(obs_source_get_signal_handler(created), "transition_stop", &OwnedCanvas::on_transition_stop,
+			       this);
+
+	obs_source_t *old = m_transition;
+	m_transition = created; // our creation ref
+	m_transition_id = id;
+	m_applied_json.clear();
+	drop_transition_ref(old); // UI thread; channel 0 already holds the new one
+	obs_source_release(keep);
+	obs_source_release(channel);
+	obs_log(LOG_INFO, "vertical transition: '%s' transition on '%s'", id.c_str(), kOwnedVerticalCanvasName);
+	return m_transition;
+}
+
+obs_source_t *OwnedCanvas::configure_transition(obs_canvas_t *canvas, const VerticalTransitionPlan &plan)
+{
+	obs_source_t *transition = ensure_transition(canvas, plan.id);
+	if (!transition || m_transition_id != plan.id)
+		return transition;
+	if (plan.settings_json != m_applied_json) {
+		/* Only on change: a stinger rebuilds its media source on every update. */
+		obs_data_t *data = obs_data_create_from_json(plan.settings_json.c_str());
+		if (data) {
+			obs_source_update(transition, data);
+			obs_data_release(data);
+		}
+		m_applied_json = plan.settings_json;
+	}
+	obs_transition_set_scale_type(transition,
+				      plan.scale_aspect ? OBS_TRANSITION_SCALE_ASPECT : OBS_TRANSITION_SCALE_MAX_ONLY);
+	return transition;
+}
+
+bool OwnedCanvas::apply_plan(obs_canvas_t *canvas, const VerticalTransitionPlan &plan, obs_source_t *scene)
+{
+	if (!scene)
+		return false;
+	obs_source_t *transition = nullptr;
+	if (plan.instant) {
+		transition = ensure_transition(canvas, m_transition ? m_transition_id : std::string(kCutTransitionId));
+		if (transition)
+			obs_transition_set(transition, scene);
+	} else {
+		transition = configure_transition(canvas, plan);
+		/* Returns false only when the scene is already shown and nothing runs: nothing to do then. */
+		if (transition)
+			obs_transition_start(transition, OBS_TRANSITION_MODE_AUTO, plan.duration_ms, scene);
+	}
+	if (!transition) {
+		/* No transition could be created: show the scene directly (active_scene_ref copes with both). */
+		obs_canvas_set_channel(canvas, 0, scene);
+	}
+	if (m_active_listener)
+		m_active_listener();
+	return true;
+}
+
+bool OwnedCanvas::switch_scene(obs_canvas_t *canvas, obs_source_t *scene, SceneSwitch how)
+{
+	if (!canvas || !scene || !is_owned(canvas))
+		return false;
+	if (how == SceneSwitch::Instant)
+		return apply_plan(canvas, VerticalTransitionPlan{}, scene);
+	return apply_plan(canvas, plan_for_current_transition(), scene);
+}
+
+void OwnedCanvas::on_main_transition_start(const MainTransitionStart &start)
+{
+	const SceneLinkSettings links = link_settings();
+	if (!links.enabled || start.dest_scene.empty())
+		return;
+	obs_canvas_t *canvas = get_ref();
+	if (!canvas)
+		return;
+
+	if (obs_canvas_has_video(canvas)) {
+		const std::optional<std::string> target =
+			resolve_linked_scene(start.dest_scene, links, canvas_scene_names(canvas));
+		if (target && active_scene_name(canvas) != *target) {
+			obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, target->c_str());
+			if (scene) {
+				obs_data_t *settings = obs_data_create_from_json(start.settings_json.c_str());
+				TransitionDesc main;
+				main.id = start.id;
+				main.name = start.name;
+				main.settings = settings;
+				main.duration_ms = main_transition_duration_ms(start.name, start.override_name,
+									       start.override_duration_ms,
+									       obs_frontend_get_transition_duration());
+				const VerticalTransitionPlan plan = plan_for(main);
+				if (settings)
+					obs_data_release(settings);
+				apply_plan(canvas, plan, obs_scene_get_source(scene));
+				obs_scene_release(scene);
+				obs_log(LOG_INFO, "scene link: \"%s\" -> \"%s\" (%s, %u ms)", start.dest_scene.c_str(),
+					target->c_str(), plan.instant ? "instant" : plan.id.c_str(), plan.duration_ms);
+			}
+		}
+	}
+	obs_canvas_release(canvas);
+}
+
+void OwnedCanvas::prepare_transition()
+{
+	obs_canvas_t *canvas = get_ref();
+	if (!canvas)
+		return;
+	if (obs_canvas_has_video(canvas))
+		prepare_transition_on(canvas);
+	obs_canvas_release(canvas);
+}
+
+void OwnedCanvas::prepare_transition_on(obs_canvas_t *canvas)
+{
+	if (m_transition && transition_running(m_transition))
+		return; // never swap or reload a running transition
+	const VerticalTransitionPlan plan = plan_for_current_transition();
+	if (plan.instant)
+		ensure_transition(canvas, m_transition ? m_transition_id : std::string(kCutTransitionId));
+	else
+		configure_transition(canvas, plan);
+}
+
+void OwnedCanvas::release_transition()
+{
+	obs_source_t *transition = m_transition;
+	m_transition = nullptr;
+	m_transition_id.clear();
+	m_applied_json.clear();
+	if (!transition)
+		return;
+
+	obs_canvas_t *canvas = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		canvas = m_weak ? obs_weak_canvas_get_canvas(m_weak) : nullptr;
+	}
+	if (canvas) {
+		obs_source_t *channel = channel_source(canvas);
+		if (channel == transition)
+			obs_canvas_set_channel(canvas, 0, nullptr);
+		obs_source_release(channel);
+		obs_canvas_release(canvas); // never the last one: see get_ref()
+	}
+	obs_transition_set(transition, nullptr); // drop the scene refs now
+	drop_transition_ref(transition);         // UI thread, after channel 0 let go of it
+}
+
+void OwnedCanvas::drop_transition_ref(obs_source_t *transition)
+{
+	if (!transition)
+		return;
+	/* Disconnect waits for an in-flight callback (signal dispatch holds the handler mutex). */
+	signal_handler_disconnect(obs_source_get_signal_handler(transition), "transition_stop",
+				  &OwnedCanvas::on_transition_stop, this);
+	obs_source_release(transition);
+}
+
+void OwnedCanvas::on_transition_stop(void *param, calldata_t *)
+{
+	/* Graphics thread: only post. Pending posts are dropped before this object is destroyed (unload deletes
+	 * the UI context first). */
+	auto *self = static_cast<OwnedCanvas *>(param);
+	if (self->m_post)
+		self->m_post([self]() { self->prepare_transition(); });
 }
 
 } // namespace smulti

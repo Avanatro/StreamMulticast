@@ -12,7 +12,9 @@ GPLv2 — see LICENSE for full text.
 #include <atomic>
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
+class QLineEdit;
 class QShowEvent;
 class QTableWidget;
 
@@ -22,13 +24,16 @@ class OwnedCanvas;
 
 /**
  * "Links" tab of the vertical dock: which vertical scene follows which main
- * scene. Edits go to OwnedCanvas::set_link_settings (persisted with the scene
- * collection); the pure resolution lives in core/SceneLink.
+ * scene, and which transition the vertical canvas uses (follow main / cut / a
+ * frontend transition, plus the vertical stinger video). Edits go to
+ * OwnedCanvas::set_link_settings / set_transition_settings (persisted with the
+ * scene collection); the pure rules live in core/SceneLink and core/VerticalTransition.
  *
  * Reference rules: this widget connects no libobs signals and keeps no libobs
- * reference. refresh() takes and releases the canvas ref and the main scene
- * list inside one UI-thread call. It runs on show, on frontend scene list
- * changes and when the Scenes tab changed something (VerticalCanvasDock).
+ * reference. refresh() takes and releases the canvas ref, the main scene list
+ * and the frontend transition list inside one UI-thread call. It runs on show,
+ * on frontend scene or transition list changes and when the Scenes tab changed
+ * something (VerticalCanvasDock).
  * After shutdown() every entry point returns early.
  */
 class VerticalSceneLink : public QWidget {
@@ -49,13 +54,16 @@ protected:
 
 private slots:
 	void on_follow_toggled(bool checked);
-	void on_wait_stinger_toggled(bool checked);
+	void on_transition_changed(int index);
+	void on_stinger_path_changed();
+	void on_browse_stinger();
 	void on_choice_changed(const QString &main_scene, int kind, const QString &vertical_scene);
 
 private:
 	OwnedCanvas &m_canvas;
 	QCheckBox *m_follow = nullptr;
-	QCheckBox *m_wait_stinger = nullptr;
+	QComboBox *m_transition = nullptr;
+	QLineEdit *m_stinger_path = nullptr;
 	QTableWidget *m_table = nullptr;
 	QLabel *m_status = nullptr;
 	bool m_refreshing = false;

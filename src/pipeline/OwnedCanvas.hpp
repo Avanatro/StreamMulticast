@@ -8,7 +8,10 @@ GPLv2 — see LICENSE for full text.
 #pragma once
 
 #include "../core/SceneLink.hpp"
+#include "../core/VerticalTransition.hpp"
 
+#include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -28,6 +31,25 @@ namespace smulti {
 
 class EndpointRegistry;
 
+/** How OwnedCanvas::switch_scene changes the active vertical scene. */
+enum class SceneSwitch {
+	Instant, ///< obs_transition_set: restore, scene removal hand-off, catch-up after a main switch
+	Manual,  ///< "Set active" in the dock: the vertical transition setting (follow main / cut / custom)
+};
+
+/**
+ * What the libobs source_transition_start handler captured from the main transition (any thread), handed
+ * to the UI thread as plain values: no libobs reference crosses the queue.
+ */
+struct MainTransitionStart {
+	std::string id;            ///< transition type id
+	std::string name;          ///< transition name (frontend)
+	std::string settings_json; ///< its settings
+	std::string dest_scene;    ///< destination main scene name
+	std::string override_name; ///< the destination scene's per-scene override transition ("" none)
+	int64_t override_duration_ms = 0;
+};
+
 /**
  * OBS adapter for the plugin-owned canvas "StreamMulticast Vertical".
  *
@@ -40,6 +62,14 @@ class EndpointRegistry;
  *
  * The canvas is held through a weak reference, so this class never extends
  * its lifetime; get_ref() hands out a strong reference per use.
+ *
+ * Channel 0 holds a plugin-owned private transition ("StreamMulticast Vertical Transition", canvas base
+ * size, centre alignment) whose active child is the vertical scene (TASK-31). Every reader of "the active
+ * vertical scene" goes through active_scene_ref() (the destination while a transition runs); every switch
+ * goes through switch_scene() / follow_scene() / on_main_transition_start(). The transition reference is
+ * UI-thread state: created in ensure(), recreated when the type changes (new one first, active scene copied,
+ * channel 0 set, old one released), released after channel 0 is cleared by release_transition() (canvas
+ * removal, collection change, scripting shutdown, exit, unload) — always on the UI thread.
  */
 class OwnedCanvas {
 public:
@@ -85,33 +115,87 @@ public:
 	void on_scene_renamed(const std::string &old_name, const std::string &new_name);
 
 	/**
-	 * Switch channel 0 of the owned canvas to the scene linked to the current program scene.
-	 * UI thread only. Takes and releases every reference inside the call. No-op when the link is
-	 * disabled, nothing matches, the canvas is missing or the linked scene is already active.
+	 * Make the scene linked to the current program scene the active vertical scene, instantly (catch-up:
+	 * collection load, SCENE_CHANGED after a cut or a missed transition_start). UI thread only. Takes and
+	 * releases every reference inside the call. No-op when the link is disabled, nothing matches, the canvas
+	 * is missing or the linked scene is already active (or already the destination of a running transition).
 	 */
 	void follow_program_scene();
 
-	/** Same as follow_program_scene() but for an explicit main scene name (delayed stinger switch). UI thread only. */
+	/** Same as follow_program_scene() but for an explicit main scene name. UI thread only. */
 	void follow_scene(const std::string &main_scene);
 
+	/* ---- vertical scene transition (TASK-31) ---- */
+
 	/**
-	 * Milliseconds after transition_start at which the vertical switch should happen: 0 (simultaneous)
-	 * unless the link setting "wait for stinger transition point" is on and `transition` is a stinger,
-	 * then its transition point. Any thread (reads source settings and the guarded link settings only).
+	 * Strong ref to the active vertical scene of `canvas` (caller releases with obs_source_release) or null.
+	 * Unwraps the channel 0 transition; while it runs, the DESTINATION scene. The only reader of channel 0.
 	 */
-	int switch_delay_ms(obs_source_t *transition) const;
+	static obs_source_t *active_scene_ref(obs_canvas_t *canvas);
+
+	/** Name of active_scene_ref(canvas), "" when none. */
+	static std::string active_scene_name(obs_canvas_t *canvas);
+
+	/**
+	 * Make `scene` (a scene of the owned canvas `canvas`) the active vertical scene. UI thread only.
+	 * False when `canvas` is not the owned canvas.
+	 */
+	bool switch_scene(obs_canvas_t *canvas, obs_source_t *scene, SceneSwitch how);
+
+	/**
+	 * The main transition on output channel 0 just started (queued from source_transition_start): start the
+	 * vertical transition to the linked scene now (follow main: same type, settings copy, duration). UI thread.
+	 */
+	void on_main_transition_start(const MainTransitionStart &start);
+
+	/**
+	 * Bring the vertical transition to the type and settings it will use next (current frontend transition,
+	 * or the custom one), so a stinger is loaded before it plays. Skipped while it runs. UI thread only.
+	 */
+	void prepare_transition();
+
+	/** Clear channel 0 (while the canvas lives) and release the transition. UI thread only, idempotent. */
+	void release_transition();
+
+	/** Vertical transition settings (mutex guarded, any thread). Persisted by the next save callback. */
+	VerticalTransitionSettings transition_settings() const;
+	void set_transition_settings(const VerticalTransitionSettings &settings);
+
+	/** Called on the UI thread after a switch changed the active vertical scene (the channel does not change). */
+	void set_active_scene_listener(std::function<void()> listener);
+
+	/** Runs a function on the UI thread later (plugin-main's post_to_ui). Set once at load, before ensure(). */
+	using UiPoster = std::function<void(std::function<void()>)>;
+	void set_ui_poster(UiPoster post) { m_post = std::move(post); }
 
 private:
 	void remember(obs_canvas_t *canvas);
 	void disconnect_rename(obs_weak_canvas_t *weak);
 	static void on_canvas_rename(void *param, calldata_t *cd);
 	void ensure_active_scene(obs_canvas_t *canvas);
+	void prepare_transition_on(obs_canvas_t *canvas);
+	VerticalTransitionPlan plan_for(const TransitionDesc &main) const;
+	VerticalTransitionPlan plan_for_current_transition() const;
+	obs_source_t *ensure_transition(obs_canvas_t *canvas, const std::string &id);
+	obs_source_t *configure_transition(obs_canvas_t *canvas, const VerticalTransitionPlan &plan);
+	bool apply_plan(obs_canvas_t *canvas, const VerticalTransitionPlan &plan, obs_source_t *scene);
+	bool is_owned(obs_canvas_t *canvas) const;
+	void drop_transition_ref(obs_source_t *transition);
+	static void on_transition_stop(void *param, calldata_t *cd);
 
 	mutable std::mutex m_mutex;
 	obs_weak_canvas_t *m_weak = nullptr;
 	std::string m_uuid;
 	std::string m_scene_name; ///< scene wanted on channel 0 (loaded from or saved to the collection)
 	SceneLinkSettings m_links; ///< loaded from / saved to the collection (guarded by m_mutex)
+	VerticalTransitionSettings m_transition_settings; ///< loaded from / saved to the collection (m_mutex)
+
+	/* UI thread only. */
+	obs_source_t *m_transition = nullptr; ///< strong ref, also on channel 0 of the owned canvas
+	std::string m_transition_id;
+	std::string m_applied_json; ///< settings last applied to m_transition (avoids reloading a stinger)
+	std::function<void()> m_active_listener;
+	UiPoster m_post; ///< written once at load; read by on_transition_stop (graphics thread)
 };
 
 } // namespace smulti

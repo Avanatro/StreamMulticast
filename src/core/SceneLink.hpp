@@ -7,7 +7,6 @@ GPLv2 — see LICENSE for full text.
 
 #pragma once
 
-#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -22,18 +21,16 @@ namespace smulti {
 /** Save-callback keys (scene collection data). */
 inline constexpr const char *kSceneLinkMapKey = "streammulticast_vertical_links";
 inline constexpr const char *kSceneLinkEnabledKey = "streammulticast_vertical_link_enabled";
-inline constexpr const char *kSceneLinkWaitStingerKey = "streammulticast_vertical_link_wait_stinger";
 
 /**
  * Link between the main program scene and the scene on channel 0 of the owned
  * vertical canvas. `explicit_map` maps main scene name -> vertical scene name;
  * "" means "keep the current vertical scene". No entry means "auto".
- * `wait_for_stinger`: delay the vertical switch to the stinger's transition point; off (the default)
- * switches the vertical canvas at transition_start, simultaneously with the main transition.
+ * How the switch animates is VerticalTransition's job (the old "wait for stinger transition point"
+ * option and its key streammulticast_vertical_link_wait_stinger are gone; a saved key is ignored).
  */
 struct SceneLinkSettings {
 	bool enabled = true;
-	bool wait_for_stinger = false;
 	std::map<std::string, std::string> explicit_map;
 };
 
@@ -48,30 +45,13 @@ struct SceneLinkSettings {
 std::optional<std::string> resolve_linked_scene(const std::string &main_scene, const SceneLinkSettings &settings,
 						const std::vector<std::string> &vertical_scenes);
 
-/** Stinger transition source id (obs-transitions). */
-inline constexpr const char *kStingerTransitionId = "obs_stinger_transition";
-
-/**
- * Delay in ms before the vertical switch, so it lands when a stinger covers the main program.
- * The caller starts the delay at the libobs transition_start signal (OBS emits the frontend
- * SCENE_CHANGED only when the transition has finished). Only a stinger delays: its "transition_point" is
- * milliseconds when `tp_type` is 0 and a frame count when 1 (converted with the main fps). Any other
- * transition, an unusable fps or a non-positive point switches immediately (0). Capped at 120000 ms.
- */
-int linked_switch_delay_ms(const std::string &transition_id, std::int64_t tp_type, std::int64_t transition_point,
-			   std::uint32_t fps_num, std::uint32_t fps_den);
-
-/** Same, gated by the link settings: 0 (switch at transition_start) unless `wait_for_stinger` is on. */
-int linked_switch_delay_ms(const SceneLinkSettings &settings, const std::string &transition_id, std::int64_t tp_type,
-			   std::int64_t transition_point, std::uint32_t fps_num, std::uint32_t fps_den);
-
 /** A scene was renamed: re-key / re-target explicit entries. Returns true when anything changed. */
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name);
 
-/** Write enabled flag, stinger option and map into collection data. */
+/** Write enabled flag and map into collection data. */
 void scene_link_save(obs_data_t *data, const SceneLinkSettings &settings);
 
-/** Read settings from collection data; missing keys yield the defaults (enabled, no stinger wait, empty map). */
+/** Read settings from collection data; missing keys yield the defaults (enabled, empty map). */
 SceneLinkSettings scene_link_load(obs_data_t *data);
 
 } // namespace smulti

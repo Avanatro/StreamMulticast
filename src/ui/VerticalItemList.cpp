@@ -291,7 +291,7 @@ bool VerticalItemList::with_scene_impl(const std::string *required_uuid, const S
 		return false;
 
 	bool called = false;
-	obs_source_t *source = obs_canvas_get_channel(canvas, 0);
+	obs_source_t *source = OwnedCanvas::active_scene_ref(canvas); // destination while a transition runs
 	obs_scene_t *scene = source ? obs_scene_from_source(source) : nullptr; // no ref; valid while source is held
 	const char *active_uuid_c = source ? obs_source_get_uuid(source) : nullptr;
 	const std::string active_uuid = active_uuid_c ? active_uuid_c : "";
@@ -539,7 +539,7 @@ void VerticalItemList::refresh()
 	if (canvas) {
 		have_canvas = true;
 		connect_canvas_signals(canvas);
-		obs_source_t *source = obs_canvas_get_channel(canvas, 0);
+		obs_source_t *source = OwnedCanvas::active_scene_ref(canvas); // destination while a transition runs
 		obs_scene_t *scene = source ? obs_scene_from_source(source) : nullptr;
 		if (scene) {
 			have_scene = true;

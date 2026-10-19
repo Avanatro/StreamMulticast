@@ -257,7 +257,7 @@ nodes:
       - tests/test_scene_link.cpp
     works_when:
       - id: scene-link.resolve
-        behavior: "resolve_linked_scene(main, settings, vertical scenes): link off -> keep; explicit entry naming an existing scene -> it; explicit empty -> keep; explicit entry naming a missing scene -> default rule; default rule is vertical 'V <main>', then vertical '<main>', else keep. Renames migrate explicit keys and values (rename_scene_in_links); linked_switch_delay_ms returns the stinger's transition_point in ms (frames converted with the main fps) and 0 for every other transition; settings round-trip through obs_data (keys streammulticast_vertical_links, streammulticast_vertical_link_enabled)."
+        behavior: "resolve_linked_scene(main, settings, vertical scenes): link off -> keep; explicit entry naming an existing scene -> it; explicit empty -> keep; explicit entry naming a missing scene -> default rule; default rule is vertical 'V <main>', then vertical '<main>', else keep. Renames migrate explicit keys and values (rename_scene_in_links); settings round-trip through obs_data (keys streammulticast_vertical_links, streammulticast_vertical_link_enabled)."
         verification:
           - kind: automated
             reference: tests/test_scene_link.cpp
@@ -277,45 +277,77 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed before implementation (configure error, missing SceneLink.cpp), 10/10 passed after (TASK-23)"
             checked_at: 2026-10-19
-          - kind: automated
-            reference: tests/test_scene_link.cpp
-            check: scene_link_stinger_delay_uses_transition_point
-            result: passed
-            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; 12/12 passed after fix round 1 (TASK-23)"
-            checked_at: 2026-10-19
-          - kind: automated
-            reference: tests/test_scene_link.cpp
-            check: scene_link_non_stinger_switches_immediately
-            result: passed
-            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; 12/12 passed after fix round 1 (TASK-23)"
-            checked_at: 2026-10-19
-      - id: scene-link.immediate-switch-default
-        behavior: "SceneLinkSettings.wait_for_stinger defaults to false and round-trips through obs_data (key streammulticast_vertical_link_wait_stinger, missing -> false). linked_switch_delay_ms(settings, ...) returns 0 (switch at transition_start, simultaneous with the main transition) unless wait_for_stinger is on; then it returns the stinger delay of linked_switch_delay_ms(id, ...)."
+      - id: scene-link.wait-stinger-removed
+        behavior: "The TASK-27 option 'wait for stinger transition point' (SceneLinkSettings.wait_for_stinger, linked_switch_delay_ms) is removed by owner decision (TASK-31, DoD v7 DOD-14): the vertical canvas now runs its own transition (vertical-transition). A saved key streammulticast_vertical_link_wait_stinger is ignored on load and not written back."
         verification:
           - kind: automated
             reference: tests/test_scene_link.cpp
-            check: scene_link_switch_immediate_by_default
+            check: scene_link_ignores_removed_wait_stinger_key
             result: passed
-            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed to compile before implementation (no SceneLinkSettings::wait_for_stinger), 15/15 passed after (TASK-27)"
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; 11/11 passed (TASK-31)"
+            checked_at: 2026-10-19
+    status: building
+  - id: vertical-transition
+    lane: core
+    goal: "The vertical canvas switches scenes with the same transition as the main canvas (or cut, or a chosen one), with a vertical stinger video when one exists."
+    owns: [transition.vertical-decision]
+    needs: []
+    code:
+      - src/core/VerticalTransition.hpp
+      - src/core/VerticalTransition.cpp
+      - tests/test_vertical_transition.cpp
+    works_when:
+      - id: vertical-transition.decide
+        behavior: "OBS-free (obs-data only). decide_vertical_transition(settings, main, custom, exists): mode cut, an empty id or cut_transition -> instant; follow -> main's type id, a copy of its settings (main settings only read) and its duration; custom -> the named frontend transition (null -> follow main). Stinger (obs_stinger_transition): 'path' becomes the configured vertical file when it exists, else '<stem>-vertical.<ext>', else 'stinger-vertical.<ext>' in the same folder; none found -> the 16:9 path is kept and scale_aspect is set; with track_matte_enabled, 'track_matte_path' gets '<stem>-vertical.<ext>' when it exists; transition_point and every other key are copied unchanged. main_transition_duration_ms: the destination scene's override duration when the started transition is its override, else the frontend duration. Settings keys streammulticast_vertical_transition_mode (follow|cut|custom, unknown -> follow), streammulticast_vertical_transition_custom, streammulticast_vertical_stinger_path (empty = auto) round-trip through obs_data; the removed wait-for-stinger key is ignored."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_follow_copies_type_and_duration
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
             checked_at: 2026-10-19
           - kind: automated
-            reference: tests/test_scene_link.cpp
-            check: scene_link_wait_for_stinger_keeps_delay
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_cut_is_instant
             result: passed
-            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed to compile before implementation (no SceneLinkSettings::wait_for_stinger), 15/15 passed after (TASK-27)"
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
             checked_at: 2026-10-19
           - kind: automated
-            reference: tests/test_scene_link.cpp
-            check: scene_link_wait_for_stinger_persisted
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_stinger_uses_vertical_file
             result: passed
-            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed to compile before implementation (no SceneLinkSettings::wait_for_stinger), 15/15 passed after (TASK-27)"
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_stinger_autodetect_suffix
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_stinger_fallback_aspect
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_custom_mode
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_vertical_transition.cpp
+            check: vertical_transition_mode_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_transition_, local run 2026-10-19; 6/7 failed against a stub VerticalTransition.cpp (vertical_transition_cut_is_instant equals the stub's instant default), 7/7 passed after; full ctest 145/145 (TASK-31)"
             checked_at: 2026-10-19
     status: building
   - id: owned-vertical-canvas
     lane: pipeline
     goal: "The plugin owns exactly one vertical canvas and endpoints on it stop cleanly when it goes away."
     owns: [canvas.owned-vertical-identity]
-    needs: [canvas-selection, endpoint-model, scene-link]
+    needs: [canvas-selection, endpoint-model, scene-link, vertical-transition]
     code:
       - src/core/OwnedCanvasPolicy.hpp
       - src/core/OwnedCanvasPolicy.cpp
@@ -386,7 +418,7 @@ nodes:
             reference: "OBS runtime check: restart OBS, then change Settings > Video; the V canvas preview renders its scene both times (not run in this session)"
             result: pending
       - id: owned-vertical-canvas.scene-link-switch
-        behavior: "OwnedCanvas::follow_program_scene() reads the program scene (obs_frontend_get_current_scene), resolves the linked vertical scene with resolve_linked_scene and calls obs_canvas_set_channel(owned, 0, scene) on the owned canvas only, logging one line 'scene link: \"<main>\" -> \"<vertical>\"'; nothing happens when the link is off, nothing matches or the scene is already active. Triggered by OBS_FRONTEND_EVENT_SCENE_CHANGED (program scene; studio preview ignored) and after ensure() on FINISHED_LOADING and SCENE_COLLECTION_CHANGED only (profile change and video reset rebuild the canvas but do not switch, so a manual Set active survives). The frontend emits SCENE_CHANGED only when a transition has finished (OBSBasic::TransitionStopped) or at once for cuts, so it is the authoritative trigger: it cancels any pending timer and switches immediately if the canvas is not already on the linked scene. To switch together with the main transition, the global libobs signal source_transition_start (emitted by obs_transition_start after the destination is set as OBS_TRANSITION_SOURCE_B, for whatever transition is on output channel 0, so per-scene override transitions are covered) is handled: the callback reads the destination scene name and queues it to the UI thread for every transition on channel 0; by default (link option wait_for_stinger off, TASK-27) the switch happens at once there; with the option on, a stinger delays it by its transition_point (linked_switch_delay_ms with the settings; 0 for other transitions) through a single-shot QTimer that holds the scene name only; a newer transition replaces it; it is cancelled on SCENE_CHANGED, collection change, exit, scripting shutdown and unload, and the signal is disconnected on exit, scripting shutdown and unload. Manual (T-bar) transitions are treated like automatic ones. Link settings are saved in the collection data by the existing save callback. Scene renames migrate the entries: owned-canvas scenes via the owned canvas's own source_rename signal (connected in OwnedCanvas::remember, disconnected in release), because libobs emits the global source_rename for main canvases only; main scenes via the global signal. Only compiled locally (plugin target built), not run in OBS."
+        behavior: "Switching goes through OwnedCanvas (TASK-31 replaced TASK-27's direct obs_canvas_set_channel and the wait-for-stinger timer). The global libobs signal source_transition_start (emitted by obs_transition_start after the destination is set as OBS_TRANSITION_SOURCE_B, for whatever transition is on output channel 0, so per-scene override transitions are covered; private sources never emit it) is handled for the program transition only: the callback copies type id, name, settings json, destination scene name and the destination's override transition name/duration (private settings 'transition' / 'transition_duration', default 300) and posts them to the UI thread, where on_main_transition_start resolves the linked vertical scene (resolve_linked_scene) and starts the vertical transition (vertical-transition plan; owned canvas only; log line 'scene link: \"<main>\" -> \"<vertical>\" (<type|instant>, <ms> ms)'). OBS_FRONTEND_EVENT_SCENE_CHANGED (program scene; after the transition or at once for cuts / force switches) and collection load call follow_program_scene(), which switches instantly only when the active vertical scene (destination of a running vertical transition included) is not already the linked one. Manual (T-bar) transitions are treated like automatic ones. Link settings are saved in the collection data by the existing save callback. Scene renames migrate the entries: owned-canvas scenes via the owned canvas's own source_rename signal (connected in OwnedCanvas::remember, disconnected in release), main scenes via the global signal. Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: manual
             reference: "OBS runtime check: switch the main scene between Gaming, Just Chatting, Dev/Coding, BRB; the vertical preview follows with the V scene; restart OBS and the links persist (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
@@ -474,6 +506,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: GetCanvasList video settings of StreamMulticast Vertical are non-null while Aitum Vertical is inactive (not run in this session)"
+            result: pending
+      - id: owned-vertical-canvas.transition
+        behavior: "Channel 0 of the owned canvas holds a private transition 'StreamMulticast Vertical Transition' (obs_source_create_private, size = canvas base size 1080x1920, alignment centre) whose active child is the vertical scene. OwnedCanvas::active_scene_ref(canvas) is the only reader of channel 0 (rg: obs_canvas_get_channel appears once, in OwnedCanvas.cpp) and unwraps it (obs_transition_get_active_source: the destination while it runs); the scene list, the Sources list, preview editing (with_scene_impl), restore and the save callback (streammulticast_vertical_scene = destination) use it. Switches: instant (obs_transition_set) for restore, first scene, scene removal hand-off and catch-up; animated (obs_transition_start AUTO with the plan's duration) for the main transition_start and for Set active (follow: current frontend transition and duration; cut: instant; custom: that transition). Type change: create the new one, obs_transition_set it to the current scene, set channel 0, then release the old one, all on the UI thread. Settings are applied with obs_source_update only when they changed (a stinger rebuilds its media on every update); prepare_transition() loads the next type and settings ahead of use on ensure(), TRANSITION_CHANGED / TRANSITION_LIST_CHANGED, Links tab edits and after each vertical run (transition_stop signal, posted to the UI thread), never while it runs. Teardown: release_transition() clears channel 0 while the canvas lives, then releases the transition on the UI thread (canvas_remove, SCENE_COLLECTION_CHANGING, SCRIPTING_SHUTDOWN, EXIT, unload). Since channel 0 no longer changes on a switch, OwnedCanvas calls an active-scene listener that the dock uses to refresh the Scenes and Sources tabs (queued, QPointer-guarded, cleared in shutdown_preview). Only compiled locally (plugin target built with SMULTI_STREAMLABS_TIKTOK OFF and ON), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): switch Gaming -> Just Chatting with the stinger as the main transition; the stinger plays on both canvases at the same time, the vertical one with E:\\Stream\\Avanatro\\stinger-vertical.webm; Set active in the dock animates the same way; switching collections and closing OBS write no crash file (not run in this session; plugin target compiled, TASK-31)"
             result: pending
     status: building
   - id: vertical-recording
@@ -741,7 +779,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit, item-actions]
+    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -807,7 +845,7 @@ nodes:
             reference: "OBS runtime check: import V Just Chatting from Aitum Vertical (Aitum disabled); the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source and its items are drawn, GetSceneItemList shows finite scales, Aitum still lists its four V scenes with unchanged names, and closing OBS right after the import writes no crash file (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-26)"
             result: pending
       - id: ui-vertical-dock.scene-link
-        behavior: "The Links tab has a 'Follow main scene' checkbox, a 'Wait for stinger transition point' checkbox (SceneLinkSettings.wait_for_stinger, default off, disabled while following is off, applies from the next transition) and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings; follow_program_scene() runs at once on the checkbox toggle and when the edited row is the current program scene (other rows leave a manual Set active alone). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."
+        behavior: "The Links tab has a 'Follow main scene' checkbox, a 'Transition:' combo (Follow main (default) / Cut / each frontend transition by name; a saved name that no longer exists shows as '<name> (missing)'; written with OwnedCanvas::set_transition_settings, then prepare_transition()), a 'Vertical stinger video' line edit with placeholder (auto) (empty = auto-detect) and Browse..., and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings; follow_program_scene() runs at once on the checkbox toggle and when the edited row is the current program scene (other rows leave a manual Set active alone). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED / TRANSITION_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: manual
             reference: "OBS runtime check: switching the main scene switches the vertical preview; mapping a main scene to another V scene or (keep current) in the Links tab changes the behaviour; renaming a scene keeps its mapping (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"

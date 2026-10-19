@@ -108,7 +108,9 @@ private:
 	void update_record_ui(); ///< UI thread: button state from the recorder
 	void on_record_settings_changed();
 
+	OwnedCanvas &m_canvas;
 	VerticalRecorder &m_recorder;
+	bool m_shut_down = false; ///< shutdown_preview() ran: no more refreshes
 	VerticalSelection *m_selection = nullptr; ///< child; re-parented last so it is deleted after the widgets
 	QPushButton *m_record = nullptr;
 	QCheckBox *m_record_with_main = nullptr;
