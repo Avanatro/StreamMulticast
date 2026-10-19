@@ -19,6 +19,8 @@ struct obs_data;
 typedef struct obs_data obs_data_t;
 struct calldata;
 typedef struct calldata calldata_t;
+struct obs_source;
+typedef struct obs_source obs_source_t;
 struct obs_weak_canvas;
 typedef struct obs_weak_canvas obs_weak_canvas_t;
 
@@ -86,11 +88,14 @@ public:
 	 */
 	void follow_program_scene();
 
+	/** Same as follow_program_scene() but for an explicit main scene name (delayed stinger switch). UI thread only. */
+	void follow_scene(const std::string &main_scene);
+
 	/**
-	 * Milliseconds to wait before follow_program_scene() after a program scene change: the
-	 * stinger's transition point when the current transition is a stinger, else 0. UI thread only.
+	 * Milliseconds after transition_start at which the vertical switch should happen: the stinger's
+	 * transition point when `transition` is a stinger, else 0. Any thread (reads source settings only).
 	 */
-	int follow_delay_ms() const;
+	static int switch_delay_ms(obs_source_t *transition);
 
 private:
 	void remember(obs_canvas_t *canvas);

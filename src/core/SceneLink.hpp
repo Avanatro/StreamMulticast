@@ -48,8 +48,9 @@ std::optional<std::string> resolve_linked_scene(const std::string &main_scene, c
 inline constexpr const char *kStingerTransitionId = "obs_stinger_transition";
 
 /**
- * Delay in ms before the vertical switch, so it lands when a stinger covers the main program
- * (OBS emits SCENE_CHANGED at transition START). Only a stinger delays: its "transition_point" is
+ * Delay in ms before the vertical switch, so it lands when a stinger covers the main program.
+ * The caller starts the delay at the libobs transition_start signal (OBS emits the frontend
+ * SCENE_CHANGED only when the transition has finished). Only a stinger delays: its "transition_point" is
  * milliseconds when `tp_type` is 0 and a frame count when 1 (converted with the main fps). Any other
  * transition, an unusable fps or a non-positive point switches immediately (0). Capped at 120000 ms.
  */

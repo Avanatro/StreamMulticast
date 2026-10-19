@@ -84,8 +84,10 @@ static void refresh_vertical_links()
 		g_vertical_dock->refresh_links();
 }
 
-/* Pending delayed scene-link switch (stinger). UI thread only; no libobs refs are captured. */
+/* Pending delayed scene-link switch (stinger). UI thread only; holds a scene NAME, never a libobs
+ * reference. Created in obs_module_load (UI thread), also the context object for queued calls. */
 static QTimer *g_follow_timer = nullptr;
+static std::string g_follow_target;
 
 static void cancel_pending_follow()
 {
@@ -93,28 +95,64 @@ static void cancel_pending_follow()
 		g_follow_timer->stop();
 }
 
-/* SCENE_CHANGED fires at transition START: with a stinger, wait for its transition point so the
- * vertical canvas switches while the main output is covered. A newer change replaces a pending one. */
-static void schedule_follow()
+/* UI thread: switch the vertical canvas to the scene linked to `main_scene` after `delay_ms`.
+ * A newer transition replaces a pending one. */
+static void schedule_follow(const std::string &main_scene, int delay_ms)
 {
-	if (!g_owned_canvas)
+	if (!g_module_alive.load() || !g_owned_canvas || !g_follow_timer)
 		return;
-	const int delay_ms = g_owned_canvas->follow_delay_ms();
 	if (delay_ms <= 0) {
 		cancel_pending_follow();
-		g_owned_canvas->follow_program_scene();
+		g_owned_canvas->follow_scene(main_scene);
 		return;
 	}
-	if (!g_follow_timer) {
-		g_follow_timer = new QTimer();
-		g_follow_timer->setSingleShot(true);
-		QObject::connect(g_follow_timer, &QTimer::timeout, []() {
-			/* Re-resolve everything now: the program scene or the canvas may have changed. */
-			if (g_module_alive.load() && g_owned_canvas)
-				g_owned_canvas->follow_program_scene();
-		});
-	}
+	g_follow_target = main_scene;
 	g_follow_timer->start(delay_ms);
+}
+
+/* libobs global "source_transition_start". obs_transition_start emits it after the destination is
+ * set as OBS_TRANSITION_SOURCE_B (libobs obs-source-transition.c:362-368), i.e. BEFORE the
+ * transition runs; the frontend's SCENE_CHANGED only follows at transition end (OBSBasic::
+ * TransitionStopped), or at once for the force/cut path. The callback runs on the thread that
+ * started the transition, so it only reads names and queues to the UI thread. Fires for whatever
+ * transition is on output channel 0, so a per-scene override transition is covered too. */
+static void on_transition_start(void *, calldata_t *cd)
+{
+	if (!g_module_alive.load() || !g_owned_canvas)
+		return;
+	auto *transition = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
+	if (!transition)
+		return;
+
+	obs_source_t *program_output = obs_get_output_source(0);
+	const bool is_program = program_output == transition;
+	obs_source_release(program_output);
+	if (!is_program)
+		return;
+
+	obs_source_t *dest = obs_transition_get_source(transition, OBS_TRANSITION_SOURCE_B); // fade-to-black: null
+	if (!dest)
+		return;
+	const char *name = obs_source_get_name(dest);
+	const std::string main_scene = name ? name : "";
+	obs_source_release(dest);
+	if (main_scene.empty())
+		return;
+
+	const int delay_ms = smulti::OwnedCanvas::switch_delay_ms(transition);
+	if (delay_ms <= 0)
+		return; // no stinger: SCENE_CHANGED switches, nothing to anticipate
+
+	QTimer *context = g_follow_timer;
+	if (!context)
+		return;
+	QMetaObject::invokeMethod(
+		context, [main_scene, delay_ms]() { schedule_follow(main_scene, delay_ms); }, Qt::QueuedConnection);
+}
+
+static void disconnect_transition_start()
+{
+	signal_handler_disconnect(obs_get_signal_handler(), "source_transition_start", on_transition_start, nullptr);
 }
 
 /* Rebuild the owned canvas; optionally put it on the scene linked to the current program scene
@@ -202,6 +240,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		return;
 
 	if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+		cancel_pending_follow();
+		disconnect_transition_start();
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
@@ -210,8 +250,12 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 		ensure_owned_canvas_and_follow(false);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
-		/* Program scene only (studio mode preview fires PREVIEW_SCENE_CHANGED, ignored). */
-		schedule_follow();
+		/* Authoritative: the transition is over (or it was a cut / studio-mode swap / missed signal).
+		 * Drop a pending anticipated switch and put the canvas on the linked scene of the now-current
+		 * program scene; a no-op when it is already there. Studio preview fires another event. */
+		cancel_pending_follow();
+		if (g_owned_canvas)
+			g_owned_canvas->follow_program_scene();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
 		refresh_vertical_links();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
@@ -256,6 +300,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 				ctrl->stop();
 		}
 		cancel_pending_follow();
+		disconnect_transition_start();
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
@@ -300,6 +345,14 @@ bool obs_module_load()
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
+	g_follow_timer = new QTimer(); // UI thread; context for queued calls from on_transition_start
+	g_follow_timer->setSingleShot(true);
+	QObject::connect(g_follow_timer, &QTimer::timeout, []() {
+		/* Re-resolve everything now: the canvas or the links may have changed meanwhile. */
+		if (g_module_alive.load() && g_owned_canvas)
+			g_owned_canvas->follow_scene(g_follow_target);
+	});
+	signal_handler_connect(obs_get_signal_handler(), "source_transition_start", on_transition_start, nullptr);
 
 	/* 6. Create and register the dock widget
 	 * obs_frontend_add_dock_by_id was added in OBS 30.0.
@@ -356,6 +409,7 @@ void obs_module_unload()
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
+	disconnect_transition_start();
 	obs_frontend_remove_save_callback(on_save_load, nullptr);
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 

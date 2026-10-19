@@ -345,9 +345,8 @@ void OwnedCanvas::on_scene_renamed(const std::string &old_name, const std::strin
 	rename_scene_in_links(m_links, old_name, new_name);
 }
 
-int OwnedCanvas::follow_delay_ms() const
+int OwnedCanvas::switch_delay_ms(obs_source_t *transition)
 {
-	obs_source_t *transition = obs_frontend_get_current_transition();
 	if (!transition)
 		return 0;
 
@@ -363,7 +362,6 @@ int OwnedCanvas::follow_delay_ms() const
 			obs_data_release(settings);
 		}
 	}
-	obs_source_release(transition);
 
 	obs_video_info ovi = {};
 	if (!obs_get_video_info(&ovi))
@@ -373,10 +371,6 @@ int OwnedCanvas::follow_delay_ms() const
 
 void OwnedCanvas::follow_program_scene()
 {
-	const SceneLinkSettings settings = link_settings();
-	if (!settings.enabled)
-		return;
-
 	std::string main_name;
 	obs_source_t *program = obs_frontend_get_current_scene();
 	if (program) {
@@ -384,7 +378,13 @@ void OwnedCanvas::follow_program_scene()
 		main_name = n ? n : "";
 		obs_source_release(program);
 	}
-	if (main_name.empty())
+	follow_scene(main_name);
+}
+
+void OwnedCanvas::follow_scene(const std::string &main_name)
+{
+	const SceneLinkSettings settings = link_settings();
+	if (!settings.enabled || main_name.empty())
 		return;
 
 	obs_canvas_t *canvas = get_ref();
