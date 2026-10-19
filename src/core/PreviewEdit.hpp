@@ -11,6 +11,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 /**
@@ -115,6 +116,27 @@ Item resize(const Item &start, Handle h, Vec2 target, bool shift);
 
 /** Arrow-key nudge: dx/dy in {-1,0,1}, 1 canvas px, 10 with shift. */
 Vec2 nudge(Vec2 pos, int dx, int dy, bool shift);
+
+/**
+ * Consecutive arrow nudges of one item form one undo step: the step (transform before the first nudge)
+ * is captured only when nudge_begins_step returns true. A burst ends after kNudgeBurstIdleMs without a
+ * nudge, on another item or scene, or explicitly (drag, undo, selection change) via end_nudge_burst.
+ */
+constexpr int64_t kNudgeBurstIdleMs = 1000;
+struct NudgeBurst {
+	bool active = false;
+	std::string scene_uuid;
+	int64_t id = 0;
+	int64_t last_ms = 0;
+};
+bool nudge_begins_step(NudgeBurst &burst, const std::string &scene_uuid, int64_t id, int64_t now_ms);
+void end_nudge_burst(NudgeBurst &burst);
+
+/** A drag goes on only while the left button is held; a move without it means the release was lost. */
+inline bool drag_continues(bool left_button_held)
+{
+	return left_button_held;
+}
 
 enum class Cursor { Arrow, Move, SizeHor, SizeVer, SizeFDiag, SizeBDiag };
 /** Resize cursor for a handle on an item rotated by rot degrees (Move for None). */

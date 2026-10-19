@@ -269,3 +269,29 @@ SMULTI_TEST(preview_edit_nudge)
 	EXPECT_TRUE(near_v(pe::nudge({10, 10}, -1, 1, true), {0, 20}));
 	EXPECT_TRUE(near_v(pe::nudge({10, 10}, 0, 0, false), {10, 10}));
 }
+
+SMULTI_TEST(preview_edit_nudge_burst_coalesces_undo)
+{
+	pe::NudgeBurst b;
+	/* first nudge of a burst captures the undo step, the next ones within 1 s do not */
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-a", 5, 1000));
+	EXPECT_TRUE(!pe::nudge_begins_step(b, "scene-a", 5, 1200));
+	EXPECT_TRUE(!pe::nudge_begins_step(b, "scene-a", 5, 2100)); // 900 ms after the previous one
+	/* idle for 1 s or more: new step */
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-a", 5, 3100));
+	/* another item or another scene: new step */
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-a", 6, 3200));
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-b", 6, 3300));
+	/* a drag (or undo) ends the burst */
+	pe::end_nudge_burst(b);
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-b", 6, 3400));
+	/* clock going backwards never merges */
+	EXPECT_TRUE(pe::nudge_begins_step(b, "scene-b", 6, 100));
+}
+
+SMULTI_TEST(preview_edit_drag_needs_left_button)
+{
+	/* a move event without the left button (release lost to Alt+Tab or a popup) ends the drag */
+	EXPECT_TRUE(pe::drag_continues(true));
+	EXPECT_TRUE(!pe::drag_continues(false));
+}

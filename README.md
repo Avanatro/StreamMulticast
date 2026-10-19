@@ -109,7 +109,7 @@ Pair with [Stream Health Doctor](https://tools.avanatro.com/stream-health/) for 
 
 ### Editing the vertical canvas in its preview
 
-The **StreamMulticast Vertical** dock preview can be edited like the OBS main preview: click an item to select it (the Sources tab row follows, and selecting a row highlights the item), drag to move it (snaps to the canvas edges, the centre lines and other items' edges; hold **Ctrl** to move freely), drag a corner handle to resize with the aspect ratio kept (**Shift** = free) or an edge handle to resize one axis. Arrow keys nudge by 1 px (**Shift** = 10 px), **Esc** cancels a running drag, **Ctrl+Z** undoes the last drag or nudge (one step only; the OBS undo history covers the main canvas only). **Delete** does nothing in this preview. Locked and hidden items cannot be clicked; rotation, alignment and crop are kept as they are (use the transform panel or OBS for those).
+The **StreamMulticast Vertical** dock preview can be edited like the OBS main preview: click an item to select it (the Sources tab row follows, and selecting a row highlights the item), drag to move it (snaps to the canvas edges, the centre lines and other items' edges; hold **Ctrl** to move freely), drag a corner handle to resize with the aspect ratio kept (**Shift** = free) or an edge handle to resize one axis. Arrow keys nudge by 1 px (**Shift** = 10 px), **Esc** cancels a running drag, **Ctrl+Z** undoes the last drag or the last series of arrow nudges (one step only; the OBS undo history covers the main canvas only). **Delete** does nothing in this preview. Locked and hidden items cannot be clicked; rotation, alignment and crop are kept as they are (use the transform panel or OBS for those).
 
 ### TikTok Bridge handoff format
 

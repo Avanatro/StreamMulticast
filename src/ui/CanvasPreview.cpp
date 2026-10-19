@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 
+#include <QtGui/QFocusEvent>
 #include <QtGui/QHideEvent>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
@@ -34,7 +35,8 @@ constexpr uint32_t kFallbackWidth = 1080;
 constexpr uint32_t kFallbackHeight = 1920;
 constexpr uint32_t kBackgroundColor = 0xFF1A1A1A; // opaque dark grey, also the letterbox bars
 
-/* Overlay sizes in logical widget px (the draw converts them to canvas units). */
+/* Overlay sizes in logical widget px; the draw scales them by the device pixel ratio and converts them
+ * to canvas units, so they match the hit radius (kHandleRadiusPx * dpr). */
 constexpr float kSelectLinePx = 2.0f;
 constexpr float kHoverLinePx = 1.0f;
 constexpr float kHandleDrawPx = 4.0f; ///< half side of a handle square (hit radius is larger, see PreviewEdit)
@@ -59,11 +61,13 @@ CanvasPreview::CanvasPreview(OwnedCanvas &canvas, VerticalSelection &selection, 
 	setMinimumSize(160, 160);
 	setMouseTracking(true); // hover outline and cursor shapes
 	setFocusPolicy(Qt::ClickFocus); // arrow keys / Escape / Ctrl+Z after a click
+	m_clock.start();
 	connect(&m_selection, &VerticalSelection::changed, this, [this] {
 		/* Another item (or none) is selected now, e.g. from the list or after a scene change: a running
 		 * drag no longer belongs to the selection. Keep what was dragged, stop. */
 		if (m_drag.mode != DragMode::None && m_selection.item_in(m_drag.scene_uuid) != m_drag.id)
 			finish_drag(false);
+		preview_edit::end_nudge_burst(m_nudge_burst);
 		refresh_overlay();
 	});
 }
@@ -78,6 +82,7 @@ void CanvasPreview::shutdown()
 	m_shutdown = true;
 	m_drag = Drag{};
 	m_undo = Undo{};
+	preview_edit::end_nudge_burst(m_nudge_burst);
 	m_hover_id = 0;
 	m_access = nullptr; // never reach the scene access (and the list behind it) again
 	{
@@ -169,6 +174,7 @@ void CanvasPreview::showEvent(QShowEvent *event)
 void CanvasPreview::hideEvent(QHideEvent *event)
 {
 	QWidget::hideEvent(event);
+	finish_drag(false); // the release can no longer arrive here
 	std::lock_guard<std::mutex> lock(m_display_mutex);
 	if (m_display)
 		obs_display_set_enabled(m_display, false);
@@ -224,10 +230,16 @@ void CanvasPreview::draw(void *param, uint32_t cx, uint32_t cy)
 			gs_ortho(0.0f, static_cast<float>(cw), 0.0f, static_cast<float>(ch), -100.0f, 100.0f);
 			gs_set_viewport(vp.x, vp.y, vp.w, vp.h);
 			obs_canvas_render(canvas);
-			const float canvas_per_px = (static_cast<float>(cw) / static_cast<float>(vp.w) +
-						     static_cast<float>(ch) / static_cast<float>(vp.h)) *
-						    0.5f;
-			draw_overlay(ov, canvas_per_px);
+
+			/* Overlay over the whole display with the same canvas mapping, so handles and outlines past the
+			 * canvas edge are not clipped by the letterbox viewport (like OBSBasicPreview). */
+			const float upx_x = static_cast<float>(cw) / static_cast<float>(vp.w); // canvas units per device px
+			const float upx_y = static_cast<float>(ch) / static_cast<float>(vp.h);
+			gs_ortho(-static_cast<float>(vp.x) * upx_x, (static_cast<float>(cx) - static_cast<float>(vp.x)) * upx_x,
+				 -static_cast<float>(vp.y) * upx_y, (static_cast<float>(cy) - static_cast<float>(vp.y)) * upx_y,
+				 -100.0f, 100.0f);
+			gs_set_viewport(0, 0, static_cast<int>(cx), static_cast<int>(cy));
+			draw_overlay(ov, (upx_x + upx_y) * 0.5f * ov.dpr);
 			gs_projection_pop();
 			gs_viewport_pop();
 		}
@@ -483,7 +495,11 @@ preview_edit::Vec2 CanvasPreview::event_pos(const QMouseEvent *event) const
 
 void CanvasPreview::set_selected_overlay(const preview_edit::Item *item)
 {
+	if (item && !item->visible)
+		item = nullptr; // OBS does not outline hidden items
+	const float dpr = static_cast<float>(devicePixelRatioF());
 	std::lock_guard<std::mutex> lock(m_overlay_mutex);
+	m_overlay.dpr = dpr;
 	m_overlay.selected = item != nullptr;
 	if (item) {
 		m_overlay.selected_locked = item->locked;
@@ -501,7 +517,11 @@ void CanvasPreview::refresh_overlay()
 		hover = nullptr;
 	if (m_drag.mode != DragMode::None && sel)
 		return; // the drag owns the selected geometry until release
+	if (sel && !sel->visible)
+		sel = nullptr; // stays selected (list, panel), but OBS does not outline hidden items
+	const float dpr = static_cast<float>(devicePixelRatioF());
 	std::lock_guard<std::mutex> lock(m_overlay_mutex);
+	m_overlay.dpr = dpr;
 	m_overlay.selected = sel != nullptr;
 	if (sel) {
 		m_overlay.selected_locked = sel->locked;
@@ -525,8 +545,12 @@ bool CanvasPreview::event(QEvent *event)
 	if (event->type() == QEvent::ShortcutOverride && editing_allowed()) {
 		auto *ke = static_cast<QKeyEvent *>(event);
 		const int key = ke->key();
-		const bool ctrl_z = key == Qt::Key_Z && (ke->modifiers() & Qt::ControlModifier);
-		if (ctrl_z || key == Qt::Key_Escape || key == Qt::Key_Delete || key == Qt::Key_Backspace ||
+		const Qt::KeyboardModifiers mods = ke->modifiers() & ~Qt::KeypadModifier;
+		/* Ctrl+Z = our undo; Ctrl+Y and Ctrl+Shift+Z (OBS main redo) are claimed as no-ops. */
+		const bool ctrl_z = key == Qt::Key_Z &&
+				    (mods == Qt::ControlModifier || mods == (Qt::ControlModifier | Qt::ShiftModifier));
+		const bool ctrl_y = key == Qt::Key_Y && mods == Qt::ControlModifier;
+		if (ctrl_z || ctrl_y || key == Qt::Key_Escape || key == Qt::Key_Delete || key == Qt::Key_Backspace ||
 		    key == Qt::Key_Left || key == Qt::Key_Right || key == Qt::Key_Up || key == Qt::Key_Down) {
 			ke->accept();
 			return true;
@@ -595,6 +619,7 @@ void CanvasPreview::mousePressEvent(QMouseEvent *event)
 		if (it.id != drag.id)
 			drag.others.push_back(it);
 	m_drag = std::move(drag);
+	preview_edit::end_nudge_burst(m_nudge_burst);
 	set_selected_overlay(&m_drag.start);
 }
 
@@ -606,6 +631,12 @@ void CanvasPreview::mouseMoveEvent(QMouseEvent *event)
 	}
 	const preview_edit::Vec2 wp = event_pos(event);
 	if (m_drag.mode == DragMode::None) {
+		update_hover(wp);
+		return;
+	}
+	if (!preview_edit::drag_continues((event->buttons() & Qt::LeftButton) != 0)) {
+		/* The release went elsewhere (Alt+Tab, a popup took the grab): end the drag, never move on hover. */
+		finish_drag(false);
 		update_hover(wp);
 		return;
 	}
@@ -672,12 +703,18 @@ void CanvasPreview::nudge_selected(int dx, int dy, bool shift)
 		return;
 	preview_edit::Item next = *sel;
 	next.pos = preview_edit::nudge(sel->pos, dx, dy, shift);
-	if (!write_item(snap.scene_uuid, next))
+	if (!write_item(snap.scene_uuid, next)) {
+		preview_edit::end_nudge_burst(m_nudge_burst);
 		return;
-	m_undo.valid = true;
-	m_undo.scene_uuid = snap.scene_uuid;
-	m_undo.id = sel->id;
-	m_undo.before = *sel;
+	}
+	/* One undo step per burst: capture the transform before the first nudge only. */
+	if (preview_edit::nudge_begins_step(m_nudge_burst, snap.scene_uuid, sel->id, m_clock.elapsed()) ||
+	    !m_undo.valid) {
+		m_undo.valid = true;
+		m_undo.scene_uuid = snap.scene_uuid;
+		m_undo.id = sel->id;
+		m_undo.before = *sel;
+	}
 	refresh_overlay();
 	notify_edit();
 }
@@ -688,6 +725,7 @@ void CanvasPreview::undo_last()
 		return;
 	const Undo undo = m_undo;
 	m_undo = Undo{};
+	preview_edit::end_nudge_burst(m_nudge_burst);
 	write_item(undo.scene_uuid, undo.before); // refused when the scene changed or the item is gone
 	refresh_overlay();
 	notify_edit();
@@ -705,13 +743,19 @@ void CanvasPreview::keyPressEvent(QKeyEvent *event)
 		finish_drag(true);
 		break;
 	case Qt::Key_Z:
-		if (!(event->modifiers() & Qt::ControlModifier)) {
+	case Qt::Key_Y: {
+		const Qt::KeyboardModifiers mods = event->modifiers() & ~Qt::KeypadModifier;
+		const bool undo = event->key() == Qt::Key_Z && mods == Qt::ControlModifier;
+		const bool redo = (event->key() == Qt::Key_Y && mods == Qt::ControlModifier) ||
+				  (event->key() == Qt::Key_Z && mods == (Qt::ControlModifier | Qt::ShiftModifier));
+		if (!undo && !redo) {
 			QWidget::keyPressEvent(event);
 			return;
 		}
-		if (m_drag.mode == DragMode::None)
+		if (undo && m_drag.mode == DragMode::None)
 			undo_last();
-		break;
+		break; // redo: no-op here, so OBS's main-canvas redo never fires from the preview
+	}
 	case Qt::Key_Left:
 	case Qt::Key_Right:
 	case Qt::Key_Up:
@@ -761,6 +805,12 @@ void CanvasPreview::update_hover(const preview_edit::Vec2 &widget_px)
 		m_hover_id = hit;
 		refresh_overlay();
 	}
+}
+
+void CanvasPreview::focusOutEvent(QFocusEvent *event)
+{
+	QWidget::focusOutEvent(event);
+	finish_drag(false); // a lost focus usually means the release goes elsewhere
 }
 
 void CanvasPreview::leaveEvent(QEvent *event)

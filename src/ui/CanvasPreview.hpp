@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/PreviewEdit.hpp"
 
+#include <QtCore/QElapsedTimer>
 #include <QtWidgets/QWidget>
 
 #include <array>
@@ -100,6 +101,7 @@ protected:
 	void mouseReleaseEvent(QMouseEvent *event) override;
 	void keyPressEvent(QKeyEvent *event) override;
 	void leaveEvent(QEvent *event) override;
+	void focusOutEvent(QFocusEvent *event) override;
 
 private:
 	using Corners = std::array<preview_edit::Vec2, 4>;
@@ -139,6 +141,7 @@ private:
 		Corners selected_corners{};
 		bool hovered = false;
 		Corners hovered_corners{};
+		float dpr = 1.0f; ///< device px per logical px, so line/handle sizes match the hit radius
 	};
 
 	void create_display();
@@ -172,6 +175,8 @@ private:
 	/* UI thread only */
 	Drag m_drag;
 	Undo m_undo;
+	preview_edit::NudgeBurst m_nudge_burst; ///< consecutive arrow nudges share one undo step
+	QElapsedTimer m_clock;                  ///< monotonic ms for the nudge burst
 	int64_t m_hover_id = 0;
 
 	std::mutex m_overlay_mutex; ///< guards m_overlay (UI writes, graphics thread copies)

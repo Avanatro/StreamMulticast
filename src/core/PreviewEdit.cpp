@@ -315,6 +315,23 @@ Vec2 nudge(Vec2 pos, int dx, int dy, bool shift)
 	return {pos.x + static_cast<float>(dx) * step, pos.y + static_cast<float>(dy) * step};
 }
 
+bool nudge_begins_step(NudgeBurst &burst, const std::string &scene_uuid, int64_t id, int64_t now_ms)
+{
+	const int64_t idle = now_ms - burst.last_ms;
+	const bool same = burst.active && burst.scene_uuid == scene_uuid && burst.id == id && idle >= 0 &&
+			  idle < kNudgeBurstIdleMs;
+	burst.active = true;
+	burst.scene_uuid = scene_uuid;
+	burst.id = id;
+	burst.last_ms = now_ms;
+	return !same;
+}
+
+void end_nudge_burst(NudgeBurst &burst)
+{
+	burst = NudgeBurst{};
+}
+
 Cursor handle_cursor(Handle h, float rot)
 {
 	if (h == Handle::None)
