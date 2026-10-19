@@ -50,11 +50,35 @@ static std::unique_ptr<smulti::EndpointRegistry> g_registry;
 static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
+static std::atomic<bool> g_module_alive{false};
 /* Qt may destroy the vertical dock on its own at OBS exit, so track it with a guarded pointer. */
 static QPointer<smulti::VerticalCanvasDock>      g_vertical_dock;
 static bool                                      g_vertical_dock_registered = false;
 
 static constexpr const char *kVerticalDockId = "avanatro_streammulticast_vertical";
+
+/* Barrier: after this returns no preview draw holds a canvas ref. */
+static void flush_vertical_preview()
+{
+	if (g_vertical_dock)
+		g_vertical_dock->flush_preview();
+}
+
+/* libobs "canvas_remove" (global signal, emitted synchronously by obs_canvas_remove BEFORE the
+ * caller releases its own ref; libobs obs-canvas.c:560-572). Drop our weak ref so get_ref() returns
+ * null, then wait for any in-flight draw, so the frontend's later release is the final one and runs
+ * on the UI thread, never inside the graphics thread's draw. */
+static void on_canvas_remove(void *, calldata_t *cd)
+{
+	if (!g_module_alive.load() || !g_owned_canvas)
+		return;
+	auto *canvas = static_cast<obs_canvas_t *>(calldata_ptr(cd, "canvas"));
+	const char *uuid = canvas ? obs_canvas_get_uuid(canvas) : nullptr;
+	if (!uuid || g_owned_canvas->uuid() != uuid)
+		return;
+	g_owned_canvas->release();
+	flush_vertical_preview();
+}
 
 /* The preview display must die before any canvas reference is released and before the widget goes. */
 static void shutdown_vertical_preview()
@@ -63,7 +87,6 @@ static void shutdown_vertical_preview()
 		g_vertical_dock->shutdown_preview();
 }
 
-static std::atomic<bool> g_module_alive{false};
 
 /* Runs on the UI thread (queued from the libobs video_reset signal). */
 static void ensure_owned_canvas_task(void *)
@@ -96,13 +119,18 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	if (!g_registry)
 		return;
 
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
+	if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
+		 * emitted, but after this event, so the display must go now. */
+		shutdown_vertical_preview();
+	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
 	    event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 		if (g_owned_canvas)
 			g_owned_canvas->ensure();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
 		if (g_owned_canvas)
 			g_owned_canvas->on_collection_changing(*g_registry);
+		flush_vertical_preview();
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STARTED) {
 		obs_log(LOG_INFO, "OBS main stream started — triggering linked endpoints");
 		/* Skip endpoints that would stream to the same server+key as the main
@@ -179,6 +207,7 @@ bool obs_module_load()
 	obs_frontend_add_save_callback(on_save_load, nullptr);
 	g_module_alive = true;
 	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
+	signal_handler_connect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 
 	/* 6. Create and register the dock widget
 	 * obs_frontend_add_dock_by_id was added in OBS 30.0.
@@ -233,6 +262,7 @@ void obs_module_unload()
 
 	g_module_alive = false;
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
+	signal_handler_disconnect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	obs_frontend_remove_save_callback(on_save_load, nullptr);
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 

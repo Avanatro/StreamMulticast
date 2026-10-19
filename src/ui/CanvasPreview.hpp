@@ -10,6 +10,7 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QWidget>
 
 #include <cstdint>
+#include <mutex>
 
 // libobs forward declaration
 struct obs_display;
@@ -43,12 +44,22 @@ public:
 	/** Destroy the display now and never create it again. UI thread; idempotent. */
 	void shutdown();
 
+	/**
+	 * Barrier: wait until no draw callback is running. Remove/re-add of the
+	 * callback takes the same lock the display holds while drawing, so on
+	 * return every canvas ref the draw took has been released. Call it after
+	 * dropping OwnedCanvas's reference and before the frontend releases its own,
+	 * so the final canvas release never happens on the graphics thread.
+	 */
+	void flush();
+
 	QPaintEngine *paintEngine() const override { return nullptr; }
 
 protected:
 	void showEvent(QShowEvent *event) override;
 	void resizeEvent(QResizeEvent *event) override;
 	void paintEvent(QPaintEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 
 private:
 	void create_display();
@@ -56,7 +67,9 @@ private:
 	static void draw(void *param, uint32_t cx, uint32_t cy);
 
 	OwnedCanvas &m_canvas;
+	std::mutex m_display_mutex; ///< guards m_display (flush may come from a libobs signal thread)
 	obs_display_t *m_display = nullptr;
+	bool m_screen_connected = false;
 	bool m_shutdown = false;
 };
 

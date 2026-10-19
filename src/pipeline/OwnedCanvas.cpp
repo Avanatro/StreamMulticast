@@ -234,7 +234,9 @@ obs_canvas_t *OwnedCanvas::get_ref() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	obs_canvas_t *c = m_weak ? obs_weak_canvas_get_canvas(m_weak) : nullptr;
-	/* A removed canvas can stay alive while an endpoint still pins it. */
+	/* A removed canvas can stay alive while an endpoint still pins it. The release below is never
+	 * the last one: plugin-main drops m_weak on the libobs canvas_remove signal, while the remover
+	 * still holds its own ref. */
 	if (c && obs_canvas_removed(c)) {
 		obs_canvas_release(c);
 		return nullptr;

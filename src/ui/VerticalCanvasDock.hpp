@@ -30,6 +30,9 @@ public:
 	/** Tear the preview display down before the canvas or the dock go away. */
 	void shutdown_preview();
 
+	/** Barrier against an in-flight preview draw (see CanvasPreview::flush). */
+	void flush_preview();
+
 private:
 	CanvasPreview *m_preview = nullptr;
 	QTabWidget *m_tabs = nullptr;

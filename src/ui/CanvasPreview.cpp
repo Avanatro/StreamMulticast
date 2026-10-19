@@ -13,6 +13,8 @@ GPLv2 — see LICENSE for full text.
 #include <obs.h>
 #include <graphics/graphics.h>
 
+#include <QtGui/QHideEvent>
+#include <QtGui/QScreen>
 #include <QtGui/QWindow>
 
 #include <cmath>
@@ -52,15 +54,28 @@ void CanvasPreview::shutdown()
 	destroy_display();
 }
 
+void CanvasPreview::flush()
+{
+	std::lock_guard<std::mutex> lock(m_display_mutex);
+	if (!m_display)
+		return;
+	/* Removal blocks on draw_callbacks_mutex, which render_display holds for the
+	 * whole draw (libobs obs-display.c). */
+	obs_display_remove_draw_callback(m_display, &CanvasPreview::draw, this);
+	obs_display_add_draw_callback(m_display, &CanvasPreview::draw, this);
+}
+
 void CanvasPreview::create_display()
 {
 #ifdef _WIN32
+	std::lock_guard<std::mutex> lock(m_display_mutex);
 	if (m_display || m_shutdown)
 		return;
 
 	const WId id = winId(); // forces the native window to exist
-	if (!id || !windowHandle())
-		return;
+	QWindow *window = windowHandle();
+	if (!id || !window || !window->isExposed())
+		return; // paint/resize/show retry
 
 	const QSize size = pixel_size(this);
 	if (size.width() <= 0 || size.height() <= 0)
@@ -74,13 +89,27 @@ void CanvasPreview::create_display()
 	info.window.hwnd = reinterpret_cast<void *>(id);
 
 	m_display = obs_display_create(&info, kBackgroundColor);
-	if (m_display)
+	if (m_display) {
+		obs_display_set_enabled(m_display, isVisible());
 		obs_display_add_draw_callback(m_display, &CanvasPreview::draw, this);
+	}
+
+	if (!m_screen_connected) {
+		m_screen_connected = true;
+		connect(window, &QWindow::screenChanged, this, [this](QScreen *) {
+			std::lock_guard<std::mutex> guard(m_display_mutex);
+			const QSize size = pixel_size(this);
+			if (m_display && size.width() > 0 && size.height() > 0)
+				obs_display_resize(m_display, static_cast<uint32_t>(size.width()),
+						   static_cast<uint32_t>(size.height()));
+		});
+	}
 #endif
 }
 
 void CanvasPreview::destroy_display()
 {
+	std::lock_guard<std::mutex> lock(m_display_mutex);
 	if (!m_display)
 		return;
 	/* obs_display_destroy takes the callback lock, so a draw in flight has
@@ -94,17 +123,26 @@ void CanvasPreview::showEvent(QShowEvent *event)
 {
 	QWidget::showEvent(event);
 	create_display();
+	std::lock_guard<std::mutex> lock(m_display_mutex);
+	if (m_display)
+		obs_display_set_enabled(m_display, true);
+}
+
+void CanvasPreview::hideEvent(QHideEvent *event)
+{
+	QWidget::hideEvent(event);
+	std::lock_guard<std::mutex> lock(m_display_mutex);
+	if (m_display)
+		obs_display_set_enabled(m_display, false);
 }
 
 void CanvasPreview::resizeEvent(QResizeEvent *event)
 {
 	QWidget::resizeEvent(event);
-	if (!m_display) {
-		create_display();
-		return;
-	}
+	create_display();
+	std::lock_guard<std::mutex> lock(m_display_mutex);
 	const QSize size = pixel_size(this);
-	if (size.width() > 0 && size.height() > 0)
+	if (m_display && size.width() > 0 && size.height() > 0)
 		obs_display_resize(m_display, static_cast<uint32_t>(size.width()),
 				   static_cast<uint32_t>(size.height()));
 }

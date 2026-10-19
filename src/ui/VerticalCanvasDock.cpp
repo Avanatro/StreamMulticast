@@ -32,6 +32,12 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, QWidget *parent) : Q
 	layout->addWidget(m_tabs, 2);
 }
 
+void VerticalCanvasDock::flush_preview()
+{
+	if (m_preview)
+		m_preview->flush();
+}
+
 void VerticalCanvasDock::shutdown_preview()
 {
 	if (m_preview)
