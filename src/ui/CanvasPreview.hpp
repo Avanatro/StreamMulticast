@@ -24,11 +24,17 @@ struct obs_display;
 typedef struct obs_display obs_display_t;
 struct obs_scene;
 typedef struct obs_scene obs_scene_t;
+struct obs_scene_item;
+typedef struct obs_scene_item obs_sceneitem_t;
+class QContextMenuEvent;
 
 namespace smulti {
 
 class OwnedCanvas;
 class VerticalSelection;
+
+/** Reads a scene item into the pure editor model (UI thread, item must be held by the caller). */
+preview_edit::Item read_preview_item(obs_sceneitem_t *item);
 
 /**
  * Runs fn(scene, scene_uuid) with the owned canvas' active scene on the UI thread (all references are
@@ -70,6 +76,12 @@ public:
 	/** Scene access used for hit tests and writes (UI thread). Without it the preview is view-only. */
 	void set_scene_access(PreviewSceneAccess access) { m_access = std::move(access); }
 
+	/** Right click on an item (already selected): fn(global position, item id). UI thread. */
+	void set_context_menu_handler(std::function<void(const QPoint &, int64_t)> handler)
+	{
+		m_context_handler = std::move(handler);
+	}
+
 	/** Called on the UI thread when an edit finished (drag release, Escape, undo, nudge). */
 	void set_edit_listener(std::function<void()> listener) { m_edit_listener = std::move(listener); }
 
@@ -100,6 +112,7 @@ protected:
 	void mouseMoveEvent(QMouseEvent *event) override;
 	void mouseReleaseEvent(QMouseEvent *event) override;
 	void keyPressEvent(QKeyEvent *event) override;
+	void contextMenuEvent(QContextMenuEvent *event) override;
 	void leaveEvent(QEvent *event) override;
 	void focusOutEvent(QFocusEvent *event) override;
 
@@ -166,6 +179,7 @@ private:
 	VerticalSelection &m_selection;
 	PreviewSceneAccess m_access;
 	std::function<void()> m_edit_listener;
+	std::function<void(const QPoint &, int64_t)> m_context_handler;
 
 	std::mutex m_display_mutex; ///< guards m_display (flush may come from a libobs signal thread)
 	obs_display_t *m_display = nullptr;

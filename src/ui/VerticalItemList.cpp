@@ -7,21 +7,28 @@ GPLv2 — see LICENSE for full text.
 
 #include "VerticalItemList.hpp"
 
+#include "CanvasPreview.hpp" // read_preview_item
 #include "VerticalCanvasDock.hpp" // VerticalSelection
+#include "../core/ItemActions.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
+#include <obs-frontend-api.h>
 
 #include <QtCore/QMetaObject>
 #include <QtCore/QTimer>
+#include <QtGui/QAction>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QListWidget>
+#include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QVBoxLayout>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -89,6 +96,106 @@ bool collect_input(void *param, obs_source_t *source)
 	return true;
 }
 
+/* Names of every source and scene (the OBS name space is shared), for unique default names. */
+bool collect_any_name(void *param, obs_source_t *source)
+{
+	const char *n = obs_source_get_name(source);
+	if (n && *n)
+		static_cast<InputNames *>(param)->names.emplace_back(n);
+	return true;
+}
+
+std::vector<std::string> all_source_names()
+{
+	InputNames out;
+	obs_enum_sources(collect_any_name, &out);
+	obs_enum_scenes(collect_any_name, &out);
+	return out.names;
+}
+
+bool name_taken(const std::string &name)
+{
+	obs_source_t *existing = obs_get_source_by_name(name.c_str());
+	if (existing)
+		obs_source_release(existing);
+	return existing != nullptr;
+}
+
+struct UsedOutside {
+	std::string owned_canvas_uuid;
+	std::string source_name;
+	bool found = false;
+};
+
+/* A scene outside the owned canvas that contains the source (by name, recursively). */
+bool scene_uses_source(void *param, obs_source_t *scene_source)
+{
+	auto *u = static_cast<UsedOutside *>(param);
+	obs_canvas_t *c = obs_source_get_canvas(scene_source); // strong ref or null
+	const char *uuid = c ? obs_canvas_get_uuid(c) : nullptr;
+	const bool owned = uuid && u->owned_canvas_uuid == uuid;
+	if (c)
+		obs_canvas_release(c);
+	if (owned)
+		return true;
+	obs_scene_t *scene = obs_scene_from_source(scene_source);
+	if (scene && obs_scene_find_source_recursive(scene, u->source_name.c_str())) {
+		u->found = true;
+		return false;
+	}
+	return true;
+}
+
+struct NewType {
+	std::string id;
+	QString label;
+};
+
+/* Input types a user can create: not disabled, not deprecated, with video or audio (like OBS's Add menu). */
+std::vector<NewType> creatable_types()
+{
+	std::vector<NewType> out;
+	const char *id = nullptr;
+	const char *unversioned = nullptr;
+	for (size_t i = 0; obs_enum_input_types2(i, &id, &unversioned); ++i) {
+		if (!id)
+			continue;
+		const uint32_t flags = obs_get_source_output_flags(id);
+		if (flags & (OBS_SOURCE_CAP_DISABLED | OBS_SOURCE_DEPRECATED))
+			continue;
+		if (!(flags & (OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO)))
+			continue;
+		const char *dn = obs_source_get_display_name(id);
+		out.push_back({id, QString::fromUtf8(dn && *dn ? dn : id)});
+	}
+	std::sort(out.begin(), out.end(),
+		  [](const NewType &a, const NewType &b) { return a.label.compare(b.label, Qt::CaseInsensitive) < 0; });
+	/* Two types may share a display name: keep them apart with their id. */
+	std::vector<QString> base;
+	for (const NewType &t : out)
+		base.push_back(t.label);
+	for (size_t i = 0; i < out.size(); ++i) {
+		const auto same = std::count(base.begin(), base.end(), base[i]);
+		if (same > 1)
+			out[i].label += QStringLiteral(" (%1)").arg(QString::fromStdString(out[i].id));
+	}
+	return out;
+}
+
+layout::Size owned_canvas_size(OwnedCanvas &owned)
+{
+	layout::Size s{1080, 1920};
+	obs_canvas_t *canvas = owned.get_ref();
+	if (!canvas)
+		return s;
+	obs_video_info ovi = {};
+	if (obs_canvas_has_video(canvas) && obs_canvas_get_video_info(canvas, &ovi) && ovi.base_width > 0 &&
+	    ovi.base_height > 0)
+		s = {ovi.base_width, ovi.base_height};
+	obs_canvas_release(canvas); // UI thread
+	return s;
+}
+
 } // namespace
 
 VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selection, QWidget *parent)
@@ -110,12 +217,26 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selec
 	auto *buttons = new QHBoxLayout();
 	buttons->setSpacing(4);
 	m_add_btn = new QPushButton(tr("Add source"), this);
+	auto *add_menu = new QMenu(m_add_btn);
+	connect(add_menu->addAction(tr("Existing source...")), &QAction::triggered, this,
+		&VerticalItemList::on_add_existing);
+	connect(add_menu->addAction(tr("New source...")), &QAction::triggered, this, &VerticalItemList::on_add_new);
+	m_add_btn->setMenu(add_menu);
 	m_remove_btn = new QPushButton(tr("Remove"), this);
 	m_up_btn = new QPushButton(tr("Up"), this);
 	m_down_btn = new QPushButton(tr("Down"), this);
 	for (QPushButton *b : {m_add_btn, m_remove_btn, m_up_btn, m_down_btn})
 		buttons->addWidget(b);
 	layout->addLayout(buttons);
+
+	auto *actions = new QHBoxLayout();
+	actions->setSpacing(4);
+	m_props_btn = new QPushButton(tr("Properties..."), this);
+	m_filters_btn = new QPushButton(tr("Filters..."), this);
+	m_rename_btn = new QPushButton(tr("Rename..."), this);
+	for (QPushButton *b : {m_props_btn, m_filters_btn, m_rename_btn})
+		actions->addWidget(b);
+	layout->addLayout(actions);
 
 	m_status = new QLabel(this);
 	m_status->setWordWrap(true);
@@ -128,10 +249,19 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selec
 		this);
 	layout->addWidget(m_editor);
 
-	connect(m_add_btn, &QPushButton::clicked, this, &VerticalItemList::on_add);
 	connect(m_remove_btn, &QPushButton::clicked, this, &VerticalItemList::on_remove);
 	connect(m_up_btn, &QPushButton::clicked, this, &VerticalItemList::on_up);
 	connect(m_down_btn, &QPushButton::clicked, this, &VerticalItemList::on_down);
+	connect(m_props_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Properties, selected_id()); });
+	connect(m_filters_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Filters, selected_id()); });
+	connect(m_rename_btn, &QPushButton::clicked, this, [this] { run_item_action(ItemAction::Rename, selected_id()); });
+	m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(m_list, &QListWidget::customContextMenuRequested, this,
+		[this](const QPoint &pos) { on_list_context_menu(pos); });
+	connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *row) {
+		if (row)
+			run_item_action(ItemAction::Properties, static_cast<int64_t>(row->data(kIdRole).toLongLong()));
+	});
 	connect(m_list, &QListWidget::currentRowChanged, this, [this] { on_selection_changed(); });
 	connect(m_list, &QListWidget::itemChanged, this, &VerticalItemList::on_item_changed);
 	connect(&m_selection, &VerticalSelection::changed, this, [this] { on_selection_model_changed(); });
@@ -494,6 +624,8 @@ void VerticalItemList::update_buttons()
 	m_remove_btn->setEnabled(scene_ok && has_sel);
 	m_up_btn->setEnabled(scene_ok && has_sel);
 	m_down_btn->setEnabled(scene_ok && has_sel);
+	for (QPushButton *b : {m_props_btn, m_filters_btn, m_rename_btn})
+		b->setEnabled(scene_ok && has_sel);
 }
 
 void VerticalItemList::on_selection_changed()
@@ -543,7 +675,7 @@ void VerticalItemList::on_selection_model_changed()
 
 /* ---- actions ---------------------------------------------------------- */
 
-void VerticalItemList::on_add()
+void VerticalItemList::on_add_existing()
 {
 	if (m_shutdown.load())
 		return;
@@ -657,6 +789,308 @@ void VerticalItemList::on_item_changed(QListWidgetItem *row)
 		m_pending_status = tr("The item no longer exists or the active scene changed.");
 		queue_refresh();
 	}
+}
+
+/* ---- new source ---------------------------------------------------------- */
+
+void VerticalItemList::on_add_new()
+{
+	if (m_shutdown.load())
+		return;
+	const std::string list_scene = m_list_scene_uuid; // the scene the user was looking at
+
+	const std::vector<NewType> types = creatable_types();
+	if (types.empty()) {
+		set_status(tr("OBS reports no source types to create."));
+		return;
+	}
+	QStringList labels;
+	for (const NewType &t : types)
+		labels << t.label;
+	bool ok = false;
+	const QString picked = QInputDialog::getItem(this, tr("New source"), tr("Source type:"), labels, 0, false, &ok);
+	if (m_shutdown.load() || !ok || picked.isEmpty())
+		return;
+	const int type_index = labels.indexOf(picked);
+	if (type_index < 0)
+		return;
+	const NewType type = types[static_cast<size_t>(type_index)];
+
+	/* No libobs ref is held while the dialogs are open; a duplicate or empty name asks again. */
+	QString display = type.label;
+	const char *dn = obs_source_get_display_name(type.id.c_str());
+	if (dn && *dn)
+		display = QString::fromUtf8(dn);
+	std::string name = item_actions::unique_name(display.toStdString(), all_source_names());
+	QString message = tr("Name of the new source (it is created as a normal OBS source and also appears in "
+			     "the main source list):");
+	for (;;) {
+		const QString typed = QInputDialog::getText(this, tr("New source"), message, QLineEdit::Normal,
+							    QString::fromStdString(name), &ok);
+		if (m_shutdown.load() || !ok)
+			return;
+		name = typed.trimmed().toStdString();
+		if (name.empty()) {
+			message = tr("The name must not be empty. Name of the new source:");
+			name = item_actions::unique_name(display.toStdString(), all_source_names());
+			continue;
+		}
+		if (name_taken(name)) {
+			message = tr("A source named \"%1\" already exists. Choose another name:")
+					  .arg(QString::fromStdString(name));
+			name = item_actions::unique_name(name, all_source_names());
+			continue;
+		}
+		break;
+	}
+
+	QString error;
+	int64_t new_id = 0;
+	const bool in_scene = with_scene(list_scene, [&](obs_scene_t *scene) {
+		obs_source_t *source = obs_source_create(type.id.c_str(), name.c_str(), nullptr, nullptr);
+		if (!source) {
+			error = tr("OBS could not create a source of this type.");
+			return;
+		}
+		obs_sceneitem_t *item = obs_scene_add(scene, source); // not ref'd for the caller
+		if (item)
+			new_id = obs_sceneitem_get_id(item);
+		else
+			error = tr("Could not add the new source to the scene.");
+		obs_source_release(source); // the scene item keeps it alive (an unadded source is destroyed)
+	});
+	if (!in_scene && error.isEmpty())
+		error = tr("The active scene changed or is missing; nothing was added.");
+
+	m_pending_select = new_id;
+	refresh();
+	set_status(error);
+	if (new_id != 0)
+		run_item_action(ItemAction::Properties, new_id);
+}
+
+/* ---- item actions ---------------------------------------------------------- */
+
+void VerticalItemList::on_list_context_menu(const QPoint &list_pos)
+{
+	QListWidgetItem *row = m_list->itemAt(list_pos);
+	if (!row)
+		return;
+	m_list->setCurrentItem(row); // writes the shared selection
+	show_item_menu(m_list->viewport()->mapToGlobal(list_pos), static_cast<int64_t>(row->data(kIdRole).toLongLong()));
+}
+
+void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id)
+{
+	if (m_shutdown.load() || item_id == 0)
+		return;
+	const std::string scene_uuid = m_list_scene_uuid;
+
+	bool locked = false;
+	bool interactive = false;
+	const bool exists = with_item(scene_uuid, item_id, [&](obs_sceneitem_t *item) {
+		locked = obs_sceneitem_locked(item);
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		interactive = src && (obs_source_get_output_flags(src) & OBS_SOURCE_INTERACTION) != 0;
+	});
+	if (!exists) {
+		set_status(tr("The item no longer exists or the active scene changed."));
+		return;
+	}
+
+	QMenu menu(this);
+	std::vector<std::pair<QAction *, ItemAction>> entries;
+	auto add = [&](QMenu &m, const QString &text, ItemAction a) { entries.emplace_back(m.addAction(text), a); };
+	add(menu, tr("Properties..."), ItemAction::Properties);
+	add(menu, tr("Filters..."), ItemAction::Filters);
+	if (interactive)
+		add(menu, tr("Interact..."), ItemAction::Interact);
+	add(menu, tr("Rename..."), ItemAction::Rename);
+	menu.addSeparator();
+	add(menu, locked ? tr("Unlock") : tr("Lock"), ItemAction::ToggleLock);
+	QMenu *transform = menu.addMenu(tr("Transform"));
+	add(*transform, tr("Fit to canvas"), ItemAction::Fit);
+	add(*transform, tr("Fill canvas"), ItemAction::Fill);
+	add(*transform, tr("Reset transform"), ItemAction::Reset);
+	transform->addSeparator();
+	add(*transform, tr("Center horizontally"), ItemAction::CenterH);
+	add(*transform, tr("Center vertically"), ItemAction::CenterV);
+	transform->setEnabled(!locked);
+
+	/* The menu is closed before anything runs: the action opens dialogs and resolves the item afresh. */
+	QAction *chosen = menu.exec(global_pos);
+	if (m_shutdown.load() || !chosen)
+		return;
+	for (const auto &e : entries) {
+		if (e.first == chosen) {
+			run_item_action(e.second, item_id);
+			return;
+		}
+	}
+}
+
+void VerticalItemList::run_item_action(ItemAction action, int64_t id)
+{
+	if (m_shutdown.load() || id == 0)
+		return;
+	const std::string scene_uuid = m_list_scene_uuid; // ids belong to this scene only
+	QString error;
+
+	switch (action) {
+	case ItemAction::Properties:
+	case ItemAction::Filters:
+	case ItemAction::Interact: {
+		bool refused = false;
+		const bool ok = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
+			obs_source_t *src = obs_sceneitem_get_source(item); // owned by the item
+			if (!src)
+				return;
+			if (action == ItemAction::Interact && !(obs_source_get_output_flags(src) & OBS_SOURCE_INTERACTION)) {
+				refused = true;
+				return;
+			}
+			/* The frontend opens OBS's own non-modal dialog and holds its own source reference. */
+			if (action == ItemAction::Properties)
+				obs_frontend_open_source_properties(src);
+			else if (action == ItemAction::Filters)
+				obs_frontend_open_source_filters(src);
+			else
+				obs_frontend_open_source_interaction(src);
+		});
+		if (!ok)
+			error = tr("The item no longer exists or the active scene changed.");
+		else if (refused)
+			error = tr("This source cannot be interacted with.");
+		break;
+	}
+	case ItemAction::Rename:
+		rename_item(scene_uuid, id);
+		return;
+	case ItemAction::ToggleLock: {
+		const bool ok = with_item(scene_uuid, id, [](obs_sceneitem_t *item) {
+			obs_sceneitem_set_locked(item, !obs_sceneitem_locked(item));
+		});
+		if (!ok)
+			error = tr("The item no longer exists or the active scene changed.");
+		break;
+	}
+	case ItemAction::Fit:
+	case ItemAction::Fill:
+	case ItemAction::Reset:
+	case ItemAction::CenterH:
+	case ItemAction::CenterV:
+		apply_transform(action, scene_uuid, id);
+		return;
+	}
+	if (!error.isEmpty())
+		set_status(error);
+}
+
+void VerticalItemList::apply_transform(ItemAction action, const std::string &scene_uuid, int64_t id)
+{
+	const layout::Size canvas = owned_canvas_size(m_canvas);
+	bool locked = false;
+	const bool ok = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
+		if (obs_sceneitem_locked(item)) {
+			locked = true;
+			return;
+		}
+		const preview_edit::Item model = read_preview_item(item);
+		obs_transform_info info = {};
+		obs_sceneitem_get_info2(item, &info);
+		obs_sceneitem_crop crop = {};
+		obs_sceneitem_get_crop(item, &crop);
+
+		if (action == ItemAction::CenterH || action == ItemAction::CenterV) {
+			const preview_edit::Vec2 p = action == ItemAction::CenterH
+							     ? item_actions::center_horizontally(model, canvas)
+							     : item_actions::center_vertically(model, canvas);
+			vec2_set(&info.pos, p.x, p.y);
+		} else {
+			const item_actions::Transform t = action == ItemAction::Fit    ? item_actions::fit_canvas(model, canvas)
+							   : action == ItemAction::Fill ? item_actions::fill_canvas(model, canvas)
+											: item_actions::reset_transform();
+			vec2_set(&info.pos, t.pos.x, t.pos.y);
+			info.rot = t.rot;
+			vec2_set(&info.scale, t.scale.x, t.scale.y);
+			info.alignment = t.alignment;
+			info.bounds_type = t.bounds_type == item_actions::BoundsType::ScaleInner   ? OBS_BOUNDS_SCALE_INNER
+					   : t.bounds_type == item_actions::BoundsType::ScaleOuter ? OBS_BOUNDS_SCALE_OUTER
+												   : OBS_BOUNDS_NONE;
+			vec2_set(&info.bounds, t.bounds.x, t.bounds.y);
+			info.bounds_alignment = t.bounds_alignment;
+			crop.left = t.crop.left;
+			crop.top = t.crop.top;
+			crop.right = t.crop.right;
+			crop.bottom = t.crop.bottom;
+		}
+		obs_sceneitem_defer_update_begin(item);
+		obs_sceneitem_set_info2(item, &info);
+		obs_sceneitem_set_crop(item, &crop);
+		obs_sceneitem_defer_update_end(item);
+	});
+	if (!ok)
+		set_status(tr("The item no longer exists or the active scene changed."));
+	else if (locked)
+		set_status(tr("The item is locked. Unlock it first."));
+	else
+		set_status(QString());
+	reload_editor(true);
+	notify_change();
+}
+
+void VerticalItemList::rename_item(const std::string &scene_uuid, int64_t id)
+{
+	std::string old_name;
+	bool shared = false;
+	const std::string owned_uuid = m_canvas.uuid();
+	const bool exists = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		const char *n = src ? obs_source_get_name(src) : nullptr;
+		old_name = n ? n : "";
+		UsedOutside u;
+		u.owned_canvas_uuid = owned_uuid;
+		u.source_name = old_name;
+		obs_enum_scenes(scene_uses_source, &u);
+		shared = u.found;
+	});
+	if (!exists || old_name.empty()) {
+		set_status(tr("The item no longer exists or the active scene changed."));
+		return;
+	}
+
+	/* No libobs ref is held while the dialog is open. */
+	QString text = tr("New name for the source:");
+	if (shared)
+		text += tr("\n\nThis source is shared with the main canvas: renaming it renames it there too.");
+	else
+		text += tr("\n\nSources are global in OBS: the new name shows everywhere the source is used.");
+	bool ok = false;
+	const QString typed = QInputDialog::getText(this, tr("Rename source"), text, QLineEdit::Normal,
+						    QString::fromStdString(old_name), &ok);
+	if (m_shutdown.load() || !ok)
+		return;
+	const std::string name = typed.trimmed().toStdString();
+	if (name.empty()) {
+		set_status(tr("The name must not be empty; nothing was renamed."));
+		return;
+	}
+	if (name == old_name)
+		return;
+	if (name_taken(name)) {
+		set_status(tr("A source named \"%1\" already exists; nothing was renamed.").arg(QString::fromStdString(name)));
+		return;
+	}
+	const bool renamed = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (src)
+			obs_source_set_name(src, name.c_str());
+	});
+	if (!renamed)
+		set_status(tr("The item no longer exists or the active scene changed; nothing was renamed."));
+	else
+		m_pending_select = id;
+	refresh();
 }
 
 } // namespace smulti

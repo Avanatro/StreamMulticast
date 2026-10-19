@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 
+#include <QtGui/QContextMenuEvent>
 #include <QtGui/QFocusEvent>
 #include <QtGui/QHideEvent>
 #include <QtGui/QKeyEvent>
@@ -343,9 +344,7 @@ const preview_edit::Item *CanvasPreview::Snapshot::find(int64_t id) const
 	return nullptr;
 }
 
-namespace {
-
-preview_edit::Item read_item(obs_sceneitem_t *item)
+preview_edit::Item read_preview_item(obs_sceneitem_t *item)
 {
 	preview_edit::Item out;
 	out.id = obs_sceneitem_get_id(item);
@@ -372,9 +371,11 @@ preview_edit::Item read_item(obs_sceneitem_t *item)
 	return out;
 }
 
+namespace {
+
 bool collect_items(obs_scene_t *, obs_sceneitem_t *item, void *param)
 {
-	static_cast<std::vector<preview_edit::Item> *>(param)->push_back(read_item(item));
+	static_cast<std::vector<preview_edit::Item> *>(param)->push_back(read_preview_item(item));
 	return true;
 }
 
@@ -557,6 +558,36 @@ bool CanvasPreview::event(QEvent *event)
 		}
 	}
 	return QWidget::event(event);
+}
+
+/* Right click: select the item under the cursor (the selected one wins inside its box, like a left click)
+ * and hand it to the dock's item menu. Nothing is kept: the handler resolves the item by id when it acts. */
+void CanvasPreview::contextMenuEvent(QContextMenuEvent *event)
+{
+	if (!editing_allowed() || !m_context_handler || m_drag.mode != DragMode::None) {
+		QWidget::contextMenuEvent(event);
+		return;
+	}
+	Snapshot snap;
+	if (!take_snapshot(snap))
+		return;
+	const preview_edit::Vec2 cp = preview_edit::widget_to_canvas(
+		current_view(),
+		{static_cast<float>(event->pos().x() * devicePixelRatioF()),
+		 static_cast<float>(event->pos().y() * devicePixelRatioF())});
+	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
+	int64_t hit = 0;
+	if (sel && !sel->locked && sel->visible && preview_edit::hit_item({*sel}, cp) == sel->id)
+		hit = sel->id;
+	if (hit == 0)
+		hit = preview_edit::hit_item(snap.items, cp);
+	if (hit == 0) {
+		event->accept();
+		return;
+	}
+	m_selection.set(snap.scene_uuid, hit);
+	event->accept();
+	m_context_handler(event->globalPos(), hit);
 }
 
 void CanvasPreview::mousePressEvent(QMouseEvent *event)

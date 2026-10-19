@@ -66,6 +66,10 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 	/* Preview editing goes through the list's scene access (same reference and INV-6 rules). Both are
 	 * children of this dock; the list refuses access after shutdown. */
 	m_preview->set_scene_access([this](const SceneFn &fn) { return m_items && m_items->with_active_scene(fn); });
+	m_preview->set_context_menu_handler([this](const QPoint &pos, int64_t id) {
+		if (m_items)
+			m_items->show_item_menu(pos, id);
+	});
 	m_preview->set_edit_listener([this]() {
 		if (m_items)
 			m_items->reload_editor(true);

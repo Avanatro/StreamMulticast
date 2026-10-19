@@ -111,6 +111,10 @@ Pair with [Stream Health Doctor](https://tools.avanatro.com/stream-health/) for 
 
 The **StreamMulticast Vertical** dock preview can be edited like the OBS main preview: click an item to select it (the Sources tab row follows, and selecting a row highlights the item), drag to move it (snaps to the canvas edges, the centre lines and other items' edges; hold **Ctrl** to move freely), drag a corner handle to resize with the aspect ratio kept (**Shift** = free) or an edge handle to resize one axis. Arrow keys nudge by 1 px (**Shift** = 10 px), **Esc** cancels a running drag, **Ctrl+Z** undoes the last drag or the last series of arrow nudges (one step only; the OBS undo history covers the main canvas only). **Delete** does nothing in this preview. Locked and hidden items cannot be clicked; rotation, alignment and crop are kept as they are (use the transform panel or OBS for those).
 
+### Editing sources from the vertical dock
+
+The **Sources** tab and a right-click on an item (in the list or in the preview) offer **Properties...** (also a double-click on a row), **Filters...**, **Interact...** (browser sources and other interactive types), **Rename...**, **Lock / Unlock** and a **Transform** submenu (**Fit to canvas**, **Fill canvas**, **Reset transform**, **Center horizontally**, **Center vertically**). **Add source** has two entries: **Existing source...** and **New source...** (pick a type, name it, and its properties open). Sources are global in OBS: a source created here also appears in the main source list, and renaming or changing the properties or filters of a source that the main canvas also uses changes it there too (the rename dialog says so). Only the scene items of the vertical canvas are ever added, removed or moved.
+
 ### TikTok Bridge handoff format
 
 Optional helper tools can pass TikTok RTMP data to StreamMulticast by writing:

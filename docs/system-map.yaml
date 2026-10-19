@@ -741,7 +741,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit]
+    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit, item-actions]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -829,6 +829,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: in V Gaming drag and resize the webcam in the vertical dock preview (corner keeps aspect, Shift free, edges one axis, snaps to edges and centre, Ctrl disables), the Sources row and transform values follow live; clicking a row highlights the item; arrows nudge, Escape cancels, Ctrl+Z undoes, Delete leaves the main canvas untouched; scene switch, collection switch and quitting OBS during/after a drag do not crash (not run in this session; plugin target compiled, TASK-29)"
+            result: pending
+      - id: ui-vertical-dock.edit-sources
+        behavior: "Sources can be edited from the vertical dock (TASK-30). The Sources tab has Properties..., Filters... and Rename... buttons and a right-click menu on the list and on the preview's item (the preview selects the item under the cursor first): Properties... (also double-click on a row) / Filters... / Interact... (only when the source has OBS_SOURCE_INTERACTION) call obs_frontend_open_source_properties / filters / interaction; Rename... asks with QInputDialog, rejects empty and duplicate names (obs_get_source_by_name) and calls obs_source_set_name, and its text says the source is shared with the main canvas when a scene outside the owned canvas contains it (renaming is global by design); Lock/Unlock uses obs_sceneitem_set_locked; the Transform submenu (Fit to canvas, Fill canvas, Reset transform, Center horizontally, Center vertically) computes with smulti::item_actions and writes in one defer_update block via obs_sceneitem_set_info2 + set_crop, refused for locked items. Add source is a menu: Existing source... (as before) and New source... (type picker over obs_enum_input_types2 without OBS_SOURCE_CAP_DISABLED / OBS_SOURCE_DEPRECATED and with video or audio output, default name = display name made unique, obs_source_create + obs_scene_add on the active scene of the owned canvas, our ref released, then the properties dialog opens); the created source is an ordinary global OBS input and also shows in the main source list. Every action resolves the item by scene uuid + id at click time on the owned canvas' active scene (INV-6 check in with_scene_impl), takes and releases its refs in the same function and never holds a libobs ref across a dialog; selection stays in VerticalSelection. Only compiled locally (plugin target built with SMULTI_STREAMLABS_TIKTOK OFF and ON), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: from the vertical dock open the webcam's properties and filters, rename a source (shared warning when the main canvas uses it), lock/unlock, apply the Transform presets, create a new Color Source and Browser source (Interact works for the browser) (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-30)"
             result: pending
     status: building
   - id: plugin-entry
@@ -1047,6 +1053,56 @@ nodes:
             check: preview_edit_drag_needs_left_button
             result: passed
             run: "ctest --test-dir build_tests -C Release -R preview_edit_, local run 2026-10-19; link failed before implementation (missing nudge_begins_step/end_nudge_burst), 16/16 passed after; full ctest 136/136 (TASK-29 fix round 1)"
+            checked_at: 2026-10-19
+    status: building
+  - id: item-actions
+    lane: core
+    goal: "Pure helpers for the vertical dock's item actions: transform presets and unique source names."
+    owns: [item-actions.math]
+    needs: [layout-math, preview-edit]
+    code:
+      - src/core/ItemActions.hpp
+      - src/core/ItemActions.cpp
+      - tests/test_item_actions.cpp
+    works_when:
+      - id: item-actions.math
+        behavior: "OBS-free and Qt-free. fit_canvas / fill_canvas return bounds SCALE_INNER / SCALE_OUTER of the canvas size at (0,0) with bounds alignment centre, rotation 0, alignment top-left and the item's crop and scale kept (a zero canvas yields no bounds). reset_transform is scale 1, position 0, no bounds, no crop, rotation 0, alignment top-left. center_horizontally / center_vertically shift the position so the axis-aligned extent of the item's corners (rotation and bounds included) is centred on the canvas on that axis only. unique_name returns the base or 'base 2', 'base 3', ... with exact comparison."
+        verification:
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_fit_canvas
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_fill_canvas
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_reset
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_center_h
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_center_v
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_unique_name
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
             checked_at: 2026-10-19
     status: building
   - id: release-staging

@@ -32,10 +32,14 @@ typedef struct obs_source obs_source_t;
 struct calldata;
 typedef struct calldata calldata_t;
 
+struct obs_scene_item;
+typedef struct obs_scene_item obs_sceneitem_t;
+
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
 class QLabel;
+class QPoint;
 
 namespace smulti {
 
@@ -47,7 +51,8 @@ using SceneFn = std::function<void(obs_scene_t *, const std::string &scene_uuid)
 
 /**
  * "Sources" tab of the vertical dock: the items of the ACTIVE scene (channel 0) of the owned canvas,
- * with add-existing-source, remove, move up/down, a visibility checkbox and the TransformEditor.
+ * with add (existing or brand-new source), remove, move up/down, a visibility checkbox, item actions
+ * (properties, filters, interact, rename, lock, transform presets) and the TransformEditor.
  *
  * Reference rules (same as VerticalSceneList, binding):
  *  - Every canvas, scene, source and scene item reference is taken and released inside one function
@@ -63,6 +68,10 @@ using SceneFn = std::function<void(obs_scene_t *, const std::string &scene_uuid)
  *    collection changing, SCRIPTING_SHUTDOWN, unload). The destructor repeats it.
  *  - Only the owned canvas is ever written (INV-6): every write re-checks that the scene belongs to
  *    the owned canvas. Added inputs are only referenced, never modified.
+ *  - Item actions (button row, context menu on the list and on the preview) resolve the item by scene uuid
+ *    + id at click time and open OBS's own dialogs through obs_frontend_open_source_*. Properties, filters
+ *    and rename act on the GLOBAL source, which the main canvas shares when it uses it too (rename warns).
+ *    "New source" creates an ordinary global input (it shows up in OBS's source lists as usual).
  *  - The selected row mirrors the dock's VerticalSelection (the single selection source, shared with
  *    the preview). A scene change or a removed item clears it.
  */
@@ -89,6 +98,9 @@ public:
 	 */
 	bool with_active_scene(const SceneFn &fn);
 
+	/** Context menu for one item (list or preview): picks an action and runs it. UI thread. */
+	void show_item_menu(const QPoint &global_pos, int64_t item_id);
+
 	/** Reload the transform panel now (force: also while a field has focus). UI thread. */
 	void reload_editor(bool force);
 
@@ -96,7 +108,8 @@ public:
 	void set_change_listener(std::function<void()> listener) { m_change_listener = std::move(listener); }
 
 private slots:
-	void on_add();
+	void on_add_existing();
+	void on_add_new();
 	void on_remove();
 	void on_up();
 	void on_down();
@@ -104,6 +117,12 @@ private slots:
 	void on_item_changed(QListWidgetItem *item);
 
 private:
+	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, Fit, Fill, Reset, CenterH, CenterV };
+
+	void run_item_action(ItemAction action, int64_t id);
+	void rename_item(const std::string &scene_uuid, int64_t id);
+	void apply_transform(ItemAction action, const std::string &scene_uuid, int64_t id);
+	void on_list_context_menu(const QPoint &list_pos);
 	bool with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn);
 	bool with_scene_impl(const std::string *required_uuid, const SceneFn &fn);
 	void on_selection_model_changed();
@@ -134,6 +153,9 @@ private:
 	QPushButton *m_remove_btn = nullptr;
 	QPushButton *m_up_btn = nullptr;
 	QPushButton *m_down_btn = nullptr;
+	QPushButton *m_props_btn = nullptr;
+	QPushButton *m_filters_btn = nullptr;
+	QPushButton *m_rename_btn = nullptr;
 	QLabel *m_status = nullptr;
 	TransformEditor *m_editor = nullptr;
 
