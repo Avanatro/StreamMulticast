@@ -465,11 +465,29 @@ nodes:
         behavior: "Dock registers once and is removed on unload."
         verification: []
     status: building
+  - id: ui-vertical-dock
+    lane: ui
+    goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
+    owns: [ui.vertical-dock]
+    needs: [owned-vertical-canvas, layout-math]
+    code:
+      - src/ui/VerticalCanvasDock.hpp
+      - src/ui/VerticalCanvasDock.cpp
+      - src/ui/CanvasPreview.hpp
+      - src/ui/CanvasPreview.cpp
+    works_when:
+      - id: ui-vertical-dock.preview
+        behavior: "The dock (id avanatro_streammulticast_vertical) previews the owned canvas through an obs_display whose draw callback takes a canvas ref per frame via OwnedCanvas::get_ref() and renders nothing when it is null; the canvas is fitted into the widget without stretching. The display is destroyed before the canvas ref owner and the widget go away (FRONTEND EXIT, module unload, destructor). Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: preview shows the V canvas scene, resizing the dock keeps 9:16 without stretching, switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-10)"
+            result: pending
+    status: building
   - id: plugin-entry
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, main-stream-linking, owned-vertical-canvas]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h

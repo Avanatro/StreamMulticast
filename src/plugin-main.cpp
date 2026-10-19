@@ -30,9 +30,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/OutputController.hpp"
 #include "pipeline/OwnedCanvas.hpp"
 #include "ui/MultistreamDock.hpp"
+#include "ui/VerticalCanvasDock.hpp"
 
 #include <QMainWindow>
 #include <QAction>
+#include <QPointer>
 #include <atomic>
 #include <memory>
 
@@ -48,6 +50,18 @@ static std::unique_ptr<smulti::EndpointRegistry> g_registry;
 static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
+/* Qt may destroy the vertical dock on its own at OBS exit, so track it with a guarded pointer. */
+static QPointer<smulti::VerticalCanvasDock>      g_vertical_dock;
+static bool                                      g_vertical_dock_registered = false;
+
+static constexpr const char *kVerticalDockId = "avanatro_streammulticast_vertical";
+
+/* The preview display must die before any canvas reference is released and before the widget goes. */
+static void shutdown_vertical_preview()
+{
+	if (g_vertical_dock)
+		g_vertical_dock->shutdown_preview();
+}
 
 static std::atomic<bool> g_module_alive{false};
 
@@ -123,6 +137,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			if (ctrl && ctrl->is_running())
 				ctrl->stop();
 		}
+		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
 		if (g_health_sampler)
@@ -194,6 +209,17 @@ bool obs_module_load()
 		g_dock = nullptr;
 	}
 
+	/* 7. Vertical canvas dock. Registered after the owned canvas adapter exists; the canvas
+	 * itself may not exist yet (ensure() runs on FINISHED_LOADING) and the preview copes. */
+	g_vertical_dock = new smulti::VerticalCanvasDock(*g_owned_canvas);
+	g_vertical_dock_registered =
+		obs_frontend_add_dock_by_id(kVerticalDockId, "StreamMulticast Vertical", g_vertical_dock.data());
+	if (!g_vertical_dock_registered) {
+		obs_log(LOG_WARNING, "vertical dock id already in use, deleting unregistered dock");
+		delete g_vertical_dock.data();
+		g_vertical_dock.clear();
+	}
+
 	obs_log(LOG_INFO, "StreamMulticast v%s loaded successfully", PLUGIN_VERSION);
 	return true;
 }
@@ -227,6 +253,9 @@ void obs_module_unload()
 		}
 	}
 
+	/* Destroy the preview display first: its draw callback uses g_owned_canvas. */
+	shutdown_vertical_preview();
+
 	/* Drop the owned-canvas reference before the registry goes away. */
 	g_owned_canvas.reset();
 
@@ -251,6 +280,11 @@ void obs_module_unload()
 	if (g_dock)
 		obs_frontend_remove_dock("avanatro_streammulticast");
 	g_dock = nullptr;
+
+	if (g_vertical_dock_registered)
+		obs_frontend_remove_dock(kVerticalDockId);
+	g_vertical_dock_registered = false;
+	g_vertical_dock.clear();
 
 	/* Destroying the registry enqueues every remaining OutputController to
 	 * the reaper (see EndpointRegistry::~EndpointRegistry) instead of

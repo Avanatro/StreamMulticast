@@ -96,6 +96,8 @@ target_sources(
     src/ui/HealthTab.cpp
     src/ui/ConfigTab.cpp
     src/ui/EndpointDialog.cpp
+    src/ui/CanvasPreview.cpp
+    src/ui/VerticalCanvasDock.cpp
 )
 
 # Include directories
