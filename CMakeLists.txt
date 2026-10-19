@@ -73,6 +73,7 @@ target_sources(
     src/core/Endpoint.cpp
     src/core/CanvasMigration.cpp
     src/core/CanvasResolve.cpp
+    src/core/OwnedCanvasPolicy.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/LinkedStart.cpp

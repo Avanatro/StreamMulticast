@@ -214,6 +214,62 @@ nodes:
             run: "ctest --test-dir build_tests -C Release -R canvas_resolve, local run 2026-10-19; failed before implementation (configure error, missing CanvasResolve.cpp), passed after (TASK-4)"
             checked_at: 2026-10-19
     status: building
+  - id: owned-vertical-canvas
+    lane: pipeline
+    goal: "The plugin owns exactly one vertical canvas and endpoints on it stop cleanly when it goes away."
+    owns: [canvas.owned-vertical-identity]
+    needs: [canvas-selection, endpoint-model]
+    code:
+      - src/core/OwnedCanvasPolicy.hpp
+      - src/core/OwnedCanvasPolicy.cpp
+      - tests/test_canvas_owned.cpp
+    works_when:
+      - id: owned-vertical-canvas.create-or-reuse
+        behavior: "The canvas named StreamMulticast Vertical is matched by exact name: absent -> create, present with video -> reuse, present without video -> reuse and reset video; similar names never match."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_creates_when_absent
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_reuses_existing_by_name
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_reuses_existing_by_name_and_resets_video
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_ignores_similar_names
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+      - id: owned-vertical-canvas.ovi-derivation
+        behavior: "Vertical geometry is 1080x1920 for base and output with the main fps copied."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_geometry_from_main_1080p60
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+      - id: owned-vertical-canvas.removal-stops-endpoints
+        behavior: "Removing a canvas uuid yields exactly the endpoints bound to it, in order."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_owned.cpp
+            check: canvas_owned_removal_stops_bound_endpoints
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_owned, local run 2026-10-19; failed before implementation (configure error, missing OwnedCanvasPolicy.cpp), passed after (TASK-5)"
+            checked_at: 2026-10-19
+    status: building
   - id: controller-reaper
     lane: pipeline
     goal: "Blocking output teardown never runs on the UI thread."
