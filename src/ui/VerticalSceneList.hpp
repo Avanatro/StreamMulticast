@@ -66,6 +66,7 @@ private slots:
 	void on_rename();
 	void on_remove();
 	void on_set_active();
+	void on_import();
 	void update_buttons();
 
 private:
@@ -81,6 +82,7 @@ private:
 	QPushButton *m_rename_btn = nullptr;
 	QPushButton *m_remove_btn = nullptr;
 	QPushButton *m_active_btn = nullptr;
+	QPushButton *m_import_btn = nullptr;
 	QLabel *m_status = nullptr;
 
 	std::mutex m_conn_mutex;

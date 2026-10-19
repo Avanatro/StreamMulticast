@@ -477,6 +477,8 @@ nodes:
       - src/ui/CanvasPreview.cpp
       - src/ui/VerticalSceneList.hpp
       - src/ui/VerticalSceneList.cpp
+      - src/ui/ImportScenesDialog.hpp
+      - src/ui/ImportScenesDialog.cpp
       - src/ui/VerticalItemList.hpp
       - src/ui/VerticalItemList.cpp
       - src/ui/TransformEditor.hpp
@@ -499,6 +501,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: Fill on the webcam source fills 1080x1920 centred; numeric edits move the item; add, remove, reorder and visibility change the preview; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-12)"
+            result: pending
+      - id: ui-vertical-dock.import-scenes
+        behavior: "The Scenes tab has \"Import scenes from canvas...\": a modal dialog lists every canvas from snapshot_canvases except the main and the owned one, with their scenes (obs_canvas_enum_scenes) as checkboxes; scenes that contain a group are shown disabled, because OBS_SCENE_DUP_REFS shares the group source and obs_canvas_move_scene would pull it out of the original canvas. Per selected scene import_scene() takes the refs, re-checks that the scene belongs to the chosen canvas, duplicates it with obs_scene_duplicate(OBS_SCENE_DUP_REFS) under a temporary unique name (libobs creates the copy in the SOURCE canvas and shares the child sources, nothing private is created), moves only the copy with obs_canvas_move_scene(copy, owned), verifies obs_source_get_canvas(copy) is the owned canvas (pointer and uuid), then renames it to a free name (\"Name\", \"Name (2)\", ...). On a failed move the stranded temporary name is reported and nothing is removed from the foreign canvas. The source canvas scene names are compared before and after (INV-6). The original scene is never passed to move, rename or remove. Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: import V Just Chatting from Aitum Vertical; the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source, Aitum still lists its four V scenes with unchanged names (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-13)"
             result: pending
     status: building
   - id: plugin-entry

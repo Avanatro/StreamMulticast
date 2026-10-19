@@ -8,10 +8,12 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalSceneList.hpp"
 
 #include "../pipeline/OwnedCanvas.hpp"
+#include "ImportScenesDialog.hpp"
 
 #include <obs.h>
 
 #include <QtCore/QMetaObject>
+#include <QtCore/QStringList>
 #include <QtGui/QFont>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
@@ -101,6 +103,9 @@ VerticalSceneList::VerticalSceneList(OwnedCanvas &canvas, QWidget *parent) : QWi
 		buttons->addWidget(b);
 	layout->addLayout(buttons);
 
+	m_import_btn = new QPushButton(tr("Import scenes from canvas..."), this);
+	layout->addWidget(m_import_btn);
+
 	m_status = new QLabel(this);
 	m_status->setWordWrap(true);
 	layout->addWidget(m_status);
@@ -109,6 +114,7 @@ VerticalSceneList::VerticalSceneList(OwnedCanvas &canvas, QWidget *parent) : QWi
 	connect(m_rename_btn, &QPushButton::clicked, this, &VerticalSceneList::on_rename);
 	connect(m_remove_btn, &QPushButton::clicked, this, &VerticalSceneList::on_remove);
 	connect(m_active_btn, &QPushButton::clicked, this, &VerticalSceneList::on_set_active);
+	connect(m_import_btn, &QPushButton::clicked, this, &VerticalSceneList::on_import);
 	connect(m_list, &QListWidget::currentRowChanged, this, &VerticalSceneList::update_buttons);
 	connect(m_list, &QListWidget::itemDoubleClicked, this, [this] { on_set_active(); });
 
@@ -260,6 +266,7 @@ void VerticalSceneList::update_buttons()
 	const bool canvas_ok = !m_canvas.uuid().empty();
 	const bool has_sel = !selected_scene().isEmpty();
 	m_add_btn->setEnabled(canvas_ok);
+	m_import_btn->setEnabled(canvas_ok);
 	m_rename_btn->setEnabled(canvas_ok && has_sel);
 	m_remove_btn->setEnabled(canvas_ok && has_sel);
 	m_active_btn->setEnabled(canvas_ok && has_sel);
@@ -438,6 +445,46 @@ void VerticalSceneList::on_set_active()
 
 	refresh();
 	set_status(error);
+}
+
+void VerticalSceneList::on_import()
+{
+	if (m_shutdown.load())
+		return;
+
+	/* The dialog runs an event loop and keeps no libobs reference; import_scene() takes and releases
+	 * its own references per scene. Only plain uuids and names cross the dialog. */
+	ImportScenesDialog dialog(m_canvas, this);
+	if (dialog.exec() != QDialog::Accepted || m_shutdown.load())
+		return;
+	const std::vector<ImportSelection> picked = dialog.selection();
+	if (picked.empty())
+		return;
+
+	int imported = 0;
+	QStringList problems;
+	for (const ImportSelection &sel : picked) {
+		if (m_shutdown.load())
+			return;
+		const ImportOutcome r = import_scene(m_canvas, sel);
+		const QString scene = QString::fromStdString(sel.scene_name);
+		if (r.ok)
+			++imported;
+		else
+			problems << tr("\"%1\": %2").arg(scene, QString::fromStdString(r.message));
+		if (!r.stranded.empty())
+			problems << tr("A temporary copy \"%1\" stayed in the source canvas; remove it there manually.")
+					    .arg(QString::fromStdString(r.stranded));
+		if (r.source_changed)
+			problems << tr("The scene list of the source canvas changed during the import of \"%1\".")
+					    .arg(scene);
+	}
+
+	refresh();
+	QString status = tr("Imported %n scene(s).", nullptr, imported);
+	if (!problems.isEmpty())
+		status += QStringLiteral(" ") + problems.join(QStringLiteral(" "));
+	set_status(status);
 }
 
 } // namespace smulti
