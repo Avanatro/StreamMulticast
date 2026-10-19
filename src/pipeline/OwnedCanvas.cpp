@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "OwnedCanvas.hpp"
 
 #include "CanvasLookup.hpp"
+#include "CanvasSceneNames.hpp"
 #include "OutputController.hpp"
 #include "../core/EndpointRegistry.hpp"
 #include "../core/OwnedCanvasPolicy.hpp"
@@ -39,14 +40,6 @@ bool scan_scene(void *param, obs_source_t *scene)
 		const char *name = obs_source_get_name(scene);
 		scan->first_name = name ? name : "";
 	}
-	return true;
-}
-
-bool collect_scene_name(void *param, obs_source_t *scene)
-{
-	const char *name = obs_source_get_name(scene);
-	if (name)
-		static_cast<std::vector<std::string> *>(param)->emplace_back(name);
 	return true;
 }
 
@@ -102,16 +95,54 @@ OwnedCanvas::~OwnedCanvas()
 	release();
 }
 
+void OwnedCanvas::on_canvas_rename(void *param, calldata_t *cd)
+{
+	/* Any thread, possibly with libobs locks held: only update the mutex guarded link map. */
+	auto *self = static_cast<OwnedCanvas *>(param);
+	auto *source = static_cast<obs_source_t *>(calldata_ptr(cd, "source"));
+	if (!source || !obs_source_is_scene(source))
+		return;
+	const char *new_name = calldata_string(cd, "new_name");
+	const char *prev_name = calldata_string(cd, "prev_name");
+	if (new_name && prev_name)
+		self->on_scene_renamed(prev_name, new_name);
+}
+
+void OwnedCanvas::disconnect_rename(obs_weak_canvas_t *weak)
+{
+	/* Only touch the handler while the canvas is provably alive; a dead canvas took its handler along.
+	 * From the canvas_remove signal the remover still holds its own ref, so the release is not the last. */
+	obs_canvas_t *c = obs_weak_canvas_get_canvas(weak);
+	if (!c)
+		return;
+	signal_handler_t *handler = obs_canvas_get_signal_handler(c);
+	if (handler)
+		signal_handler_disconnect(handler, "source_rename", &OwnedCanvas::on_canvas_rename, this);
+	obs_canvas_release(c);
+}
+
 void OwnedCanvas::remember(obs_canvas_t *canvas)
 {
 	obs_weak_canvas_t *weak = obs_canvas_get_weak_canvas(canvas);
 	const char *uuid = obs_canvas_get_uuid(canvas);
 
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (m_weak)
-		obs_weak_canvas_release(m_weak);
-	m_weak = weak;
-	m_uuid = uuid ? uuid : "";
+	obs_weak_canvas_t *old = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		old = m_weak;
+		m_weak = weak;
+		m_uuid = uuid ? uuid : "";
+	}
+	if (old) {
+		disconnect_rename(old); // also covers a reused canvas: never connect twice
+		obs_weak_canvas_release(old);
+	}
+
+	/* Renames of owned-canvas scenes are only signalled on the canvas itself (libobs emits the
+	 * global source_rename for main canvases only). */
+	signal_handler_t *handler = obs_canvas_get_signal_handler(canvas);
+	if (handler)
+		signal_handler_connect(handler, "source_rename", &OwnedCanvas::on_canvas_rename, this);
 }
 
 void OwnedCanvas::ensure()
@@ -231,12 +262,17 @@ void OwnedCanvas::on_collection_changing(EndpointRegistry &registry)
 
 void OwnedCanvas::release()
 {
-	std::lock_guard<std::mutex> lock(m_mutex);
-	if (m_weak) {
-		obs_weak_canvas_release(m_weak);
+	obs_weak_canvas_t *weak = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		weak = m_weak;
 		m_weak = nullptr;
+		m_uuid.clear();
 	}
-	m_uuid.clear();
+	if (weak) {
+		disconnect_rename(weak);
+		obs_weak_canvas_release(weak);
+	}
 }
 
 obs_canvas_t *OwnedCanvas::get_ref() const
@@ -309,6 +345,32 @@ void OwnedCanvas::on_scene_renamed(const std::string &old_name, const std::strin
 	rename_scene_in_links(m_links, old_name, new_name);
 }
 
+int OwnedCanvas::follow_delay_ms() const
+{
+	obs_source_t *transition = obs_frontend_get_current_transition();
+	if (!transition)
+		return 0;
+
+	const char *id = obs_source_get_id(transition);
+	const std::string transition_id = id ? id : "";
+	std::int64_t tp_type = 0;
+	std::int64_t point = 0;
+	if (transition_id == kStingerTransitionId) {
+		obs_data_t *settings = obs_source_get_settings(transition);
+		if (settings) {
+			tp_type = obs_data_get_int(settings, "tp_type");
+			point = obs_data_get_int(settings, "transition_point");
+			obs_data_release(settings);
+		}
+	}
+	obs_source_release(transition);
+
+	obs_video_info ovi = {};
+	if (!obs_get_video_info(&ovi))
+		return 0;
+	return linked_switch_delay_ms(transition_id, tp_type, point, ovi.fps_num, ovi.fps_den);
+}
+
 void OwnedCanvas::follow_program_scene()
 {
 	const SceneLinkSettings settings = link_settings();
@@ -330,8 +392,7 @@ void OwnedCanvas::follow_program_scene()
 		return;
 
 	if (obs_canvas_has_video(canvas)) {
-		std::vector<std::string> verticals;
-		obs_canvas_enum_scenes(canvas, collect_scene_name, &verticals);
+		const std::vector<std::string> verticals = canvas_scene_names(canvas);
 
 		const std::optional<std::string> target = resolve_linked_scene(main_name, settings, verticals);
 		if (target) {

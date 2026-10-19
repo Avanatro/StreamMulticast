@@ -35,6 +35,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMainWindow>
 #include <QAction>
 #include <QPointer>
+#include <QTimer>
 #include <atomic>
 #include <memory>
 
@@ -83,13 +84,49 @@ static void refresh_vertical_links()
 		g_vertical_dock->refresh_links();
 }
 
-/* Rebuild the owned canvas, then put it on the scene linked to the current program scene. UI thread. */
-static void ensure_owned_canvas_and_follow()
+/* Pending delayed scene-link switch (stinger). UI thread only; no libobs refs are captured. */
+static QTimer *g_follow_timer = nullptr;
+
+static void cancel_pending_follow()
+{
+	if (g_follow_timer)
+		g_follow_timer->stop();
+}
+
+/* SCENE_CHANGED fires at transition START: with a stinger, wait for its transition point so the
+ * vertical canvas switches while the main output is covered. A newer change replaces a pending one. */
+static void schedule_follow()
 {
 	if (!g_owned_canvas)
 		return;
+	const int delay_ms = g_owned_canvas->follow_delay_ms();
+	if (delay_ms <= 0) {
+		cancel_pending_follow();
+		g_owned_canvas->follow_program_scene();
+		return;
+	}
+	if (!g_follow_timer) {
+		g_follow_timer = new QTimer();
+		g_follow_timer->setSingleShot(true);
+		QObject::connect(g_follow_timer, &QTimer::timeout, []() {
+			/* Re-resolve everything now: the program scene or the canvas may have changed. */
+			if (g_module_alive.load() && g_owned_canvas)
+				g_owned_canvas->follow_program_scene();
+		});
+	}
+	g_follow_timer->start(delay_ms);
+}
+
+/* Rebuild the owned canvas; optionally put it on the scene linked to the current program scene
+ * (only on collection load/change: a profile change or video reset must not undo a manual Set active). */
+static void ensure_owned_canvas_and_follow(bool follow)
+{
+	if (!g_owned_canvas)
+		return;
+	cancel_pending_follow();
 	g_owned_canvas->ensure();
-	g_owned_canvas->follow_program_scene();
+	if (follow)
+		g_owned_canvas->follow_program_scene();
 	refresh_vertical_scenes();
 }
 
@@ -137,7 +174,7 @@ static void shutdown_vertical_preview()
 static void ensure_owned_canvas_task(void *)
 {
 	if (g_module_alive.load())
-		ensure_owned_canvas_and_follow();
+		ensure_owned_canvas_and_follow(false);
 }
 
 /* obs_reset_video() frees every canvas mix; rebuild ours after a main video
@@ -168,16 +205,17 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
-	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
-	    event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
-		ensure_owned_canvas_and_follow();
+	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+		ensure_owned_canvas_and_follow(true);
+	} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
+		ensure_owned_canvas_and_follow(false);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
 		/* Program scene only (studio mode preview fires PREVIEW_SCENE_CHANGED, ignored). */
-		if (g_owned_canvas)
-			g_owned_canvas->follow_program_scene();
+		schedule_follow();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED) {
 		refresh_vertical_links();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		cancel_pending_follow();
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
 			g_owned_canvas->on_collection_changing(*g_registry);
@@ -217,6 +255,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			if (ctrl && ctrl->is_running())
 				ctrl->stop();
 		}
+		cancel_pending_follow();
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
@@ -336,6 +375,10 @@ void obs_module_unload()
 				ctrl->stop();
 		}
 	}
+
+	cancel_pending_follow();
+	delete g_follow_timer;
+	g_follow_timer = nullptr;
 
 	/* Destroy the preview display first: its draw callback uses g_owned_canvas. */
 	shutdown_vertical_preview();

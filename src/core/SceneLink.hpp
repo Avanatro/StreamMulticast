@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -42,6 +43,18 @@ struct SceneLinkSettings {
  */
 std::optional<std::string> resolve_linked_scene(const std::string &main_scene, const SceneLinkSettings &settings,
 						const std::vector<std::string> &vertical_scenes);
+
+/** Stinger transition source id (obs-transitions). */
+inline constexpr const char *kStingerTransitionId = "obs_stinger_transition";
+
+/**
+ * Delay in ms before the vertical switch, so it lands when a stinger covers the main program
+ * (OBS emits SCENE_CHANGED at transition START). Only a stinger delays: its "transition_point" is
+ * milliseconds when `tp_type` is 0 and a frame count when 1 (converted with the main fps). Any other
+ * transition, an unusable fps or a non-positive point switches immediately (0). Capped at 120000 ms.
+ */
+int linked_switch_delay_ms(const std::string &transition_id, std::int64_t tp_type, std::int64_t transition_point,
+			   std::uint32_t fps_num, std::uint32_t fps_den);
 
 /** A scene was renamed: re-key / re-target explicit entries. Returns true when anything changed. */
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name);

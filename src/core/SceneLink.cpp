@@ -45,6 +45,22 @@ std::optional<std::string> resolve_linked_scene(const std::string &main_scene, c
 	return std::nullopt;
 }
 
+int linked_switch_delay_ms(const std::string &transition_id, std::int64_t tp_type, std::int64_t transition_point,
+			   std::uint32_t fps_num, std::uint32_t fps_den)
+{
+	constexpr std::int64_t kMaxMs = 120000;
+	if (transition_id != kStingerTransitionId || transition_point <= 0)
+		return 0;
+
+	std::int64_t ms = transition_point;
+	if (tp_type == 1) { // TIMING_FRAME
+		if (fps_num == 0 || fps_den == 0)
+			return 0;
+		ms = transition_point * 1000 * static_cast<std::int64_t>(fps_den) / static_cast<std::int64_t>(fps_num);
+	}
+	return static_cast<int>(ms > kMaxMs ? kMaxMs : ms);
+}
+
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name)
 {
 	if (old_name == new_name)

@@ -239,7 +239,7 @@ nodes:
       - tests/test_scene_link.cpp
     works_when:
       - id: scene-link.resolve
-        behavior: "resolve_linked_scene(main, settings, vertical scenes): link off -> keep; explicit entry naming an existing scene -> it; explicit empty -> keep; explicit entry naming a missing scene -> default rule; default rule is vertical 'V <main>', then vertical '<main>', else keep. Renames migrate explicit keys and values; settings round-trip through obs_data (keys streammulticast_vertical_links, streammulticast_vertical_link_enabled)."
+        behavior: "resolve_linked_scene(main, settings, vertical scenes): link off -> keep; explicit entry naming an existing scene -> it; explicit empty -> keep; explicit entry naming a missing scene -> default rule; default rule is vertical 'V <main>', then vertical '<main>', else keep. Renames migrate explicit keys and values (rename_scene_in_links); linked_switch_delay_ms returns the stinger's transition_point in ms (frames converted with the main fps) and 0 for every other transition; settings round-trip through obs_data (keys streammulticast_vertical_links, streammulticast_vertical_link_enabled)."
         verification:
           - kind: automated
             reference: tests/test_scene_link.cpp
@@ -259,6 +259,18 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; failed before implementation (configure error, missing SceneLink.cpp), 10/10 passed after (TASK-23)"
             checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_scene_link.cpp
+            check: scene_link_stinger_delay_uses_transition_point
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; 12/12 passed after fix round 1 (TASK-23)"
+            checked_at: 2026-10-19
+          - kind: automated
+            reference: tests/test_scene_link.cpp
+            check: scene_link_non_stinger_switches_immediately
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R scene_link_, local run 2026-10-19; 12/12 passed after fix round 1 (TASK-23)"
+            checked_at: 2026-10-19
     status: building
   - id: owned-vertical-canvas
     lane: pipeline
@@ -270,6 +282,8 @@ nodes:
       - src/core/OwnedCanvasPolicy.cpp
       - src/pipeline/OwnedCanvas.hpp
       - src/pipeline/OwnedCanvas.cpp
+      - src/pipeline/CanvasSceneNames.hpp
+      - src/pipeline/CanvasSceneNames.cpp
       - tests/test_canvas_owned.cpp
     works_when:
       - id: owned-vertical-canvas.create-or-reuse
@@ -330,7 +344,7 @@ nodes:
             reference: "OBS runtime check: restart OBS, then change Settings > Video; the V canvas preview renders its scene both times (not run in this session)"
             result: pending
       - id: owned-vertical-canvas.scene-link-switch
-        behavior: "OwnedCanvas::follow_program_scene() reads the program scene (obs_frontend_get_current_scene), resolves the linked vertical scene with resolve_linked_scene and calls obs_canvas_set_channel(owned, 0, scene) on the owned canvas only, logging one line 'scene link: \"<main>\" -> \"<vertical>\"'; nothing happens when the link is off, nothing matches or the scene is already active. Triggered by OBS_FRONTEND_EVENT_SCENE_CHANGED (program scene; studio preview ignored) and after ensure() on collection/profile/video reset. Link settings are saved in the collection data by the existing save callback and migrated on scene rename (global source_rename signal). Only compiled locally (plugin target built), not run in OBS."
+        behavior: "OwnedCanvas::follow_program_scene() reads the program scene (obs_frontend_get_current_scene), resolves the linked vertical scene with resolve_linked_scene and calls obs_canvas_set_channel(owned, 0, scene) on the owned canvas only, logging one line 'scene link: \"<main>\" -> \"<vertical>\"'; nothing happens when the link is off, nothing matches or the scene is already active. Triggered by OBS_FRONTEND_EVENT_SCENE_CHANGED (program scene; studio preview ignored) and after ensure() on FINISHED_LOADING and SCENE_COLLECTION_CHANGED only (profile change and video reset rebuild the canvas but do not switch, so a manual Set active survives). SCENE_CHANGED fires at transition start: when the current transition is obs_stinger_transition the switch is delayed by its transition_point (single-shot QTimer on the UI thread, replaced by a newer change, cancelled on collection change/exit/unload, refs re-resolved at fire time); other transitions switch at once. Link settings are saved in the collection data by the existing save callback. Scene renames migrate the entries: owned-canvas scenes via the owned canvas's own source_rename signal (connected in OwnedCanvas::remember, disconnected in release), because libobs emits the global source_rename for main canvases only; main scenes via the global signal. Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: manual
             reference: "OBS runtime check: switch the main scene between Gaming, Just Chatting, Dev/Coding, BRB; the vertical preview follows with the V scene; restart OBS and the links persist (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"
@@ -549,7 +563,7 @@ nodes:
             reference: "OBS runtime check: import V Just Chatting from Aitum Vertical; the copy appears in the StreamMulticast Vertical Scenes tab with the shared webcam source, Aitum still lists its four V scenes with unchanged names (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-13)"
             result: pending
       - id: ui-vertical-dock.scene-link
-        behavior: "The Links tab has a 'Follow main scene' checkbox and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings and applied at once via follow_program_scene(). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."
+        behavior: "The Links tab has a 'Follow main scene' checkbox and one row per main-canvas scene (obs_frontend_get_scenes) with a combo: (auto) = no explicit entry, (keep current) = empty entry, or any vertical scene; a stored entry naming a deleted scene stays visible as '<name> (missing)'. Edits are written with OwnedCanvas::set_link_settings; follow_program_scene() runs at once on the checkbox toggle and when the edited row is the current program scene (other rows leave a manual Set active alone). The tab connects no libobs signals and keeps no libobs refs; it refreshes on show, on OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED and after the Scenes tab refreshes, and returns early after shutdown. The Scenes tab tooltip notes that Set active is overridden by the next main scene change. Only compiled locally (plugin target built), not run in OBS."
         verification:
           - kind: manual
             reference: "OBS runtime check: switching the main scene switches the vertical preview; mapping a main scene to another V scene or (keep current) in the Links tab changes the behaviour; renaming a scene keeps its mapping (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-23)"

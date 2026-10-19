@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "ImportScenesDialog.hpp"
 
 #include "../pipeline/CanvasLookup.hpp"
+#include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 #include "../plugin-support.h"
 
@@ -31,33 +32,11 @@ namespace {
 constexpr int kRoleUuid = Qt::UserRole;
 constexpr int kRoleScene = Qt::UserRole + 1;
 
-struct SceneNames {
-	std::vector<std::string> names;
-};
-
-bool collect_scene_name(void *param, obs_source_t *scene)
-{
-	const char *name = obs_source_get_name(scene);
-	if (name)
-		static_cast<SceneNames *>(param)->names.emplace_back(name);
-	return true;
-}
-
 std::vector<std::string> sorted_scene_names(obs_canvas_t *canvas)
 {
-	SceneNames s;
-	obs_canvas_enum_scenes(canvas, collect_scene_name, &s);
-	std::sort(s.names.begin(), s.names.end());
-	return s.names;
-}
-
-bool canvas_has_name(obs_canvas_t *canvas, const std::string &name)
-{
-	obs_source_t *src = obs_canvas_get_source_by_name(canvas, name.c_str());
-	if (!src)
-		return false;
-	obs_source_release(src);
-	return true;
+	std::vector<std::string> names = canvas_scene_names(canvas);
+	std::sort(names.begin(), names.end());
+	return names;
 }
 
 bool find_group_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
@@ -74,33 +53,6 @@ bool scene_has_group(obs_scene_t *scene)
 	bool found = false;
 	obs_scene_enum_items(scene, find_group_item, &found);
 	return found;
-}
-
-/** "Name", then "Name (2)", "Name (3)" ... first one free in the canvas. */
-std::string free_name_in(obs_canvas_t *canvas, const std::string &base)
-{
-	if (!canvas_has_name(canvas, base))
-		return base;
-	for (int i = 2; i < 10000; ++i) {
-		std::string candidate = base + " (" + std::to_string(i) + ")";
-		if (!canvas_has_name(canvas, candidate))
-			return candidate;
-	}
-	return base + " (import)";
-}
-
-/** Temporary name that is free in the source canvas; the copy is created there first. */
-std::string temp_name_in(obs_canvas_t *src, const std::string &base)
-{
-	const std::string stem = base + " [smulti import]";
-	if (!canvas_has_name(src, stem))
-		return stem;
-	for (int i = 2; i < 10000; ++i) {
-		std::string candidate = stem + " " + std::to_string(i);
-		if (!canvas_has_name(src, candidate))
-			return candidate;
-	}
-	return stem + " x";
 }
 
 /** True when the source belongs to exactly this canvas (pointer and uuid). */
@@ -276,7 +228,7 @@ ImportOutcome import_scene(OwnedCanvas &owned, const ImportSelection &sel)
 		}
 
 		const std::vector<std::string> before = sorted_scene_names(src);
-		const std::string tmp = temp_name_in(src, sel.scene_name);
+		const std::string tmp = unique_name_in(src, sel.scene_name + " [smulti import]");
 
 		/* The copy is created in the SOURCE canvas (libobs: create_id on the original's canvas) and shares
 		 * the child sources. Only the copy is ever handed to move/rename; the original is read-only here. */
@@ -300,7 +252,7 @@ ImportOutcome import_scene(OwnedCanvas &owned, const ImportSelection &sel)
 			break;
 		}
 
-		const std::string wanted = free_name_in(dst, sel.scene_name);
+		const std::string wanted = unique_name_in(dst, sel.scene_name, " (", ")");
 		obs_source_set_name(copy_src, wanted.c_str());
 		const char *actual = obs_source_get_name(copy_src);
 		result.ok = true;

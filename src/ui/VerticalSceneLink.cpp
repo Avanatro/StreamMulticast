@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalSceneLink.hpp"
 
 #include "../core/SceneLink.hpp"
+#include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
@@ -30,12 +31,17 @@ namespace {
 enum Kind { KindAuto = 0, KindKeep = 1, KindScene = 2 };
 constexpr int kSceneNameRole = Qt::UserRole + 1;
 
-bool collect_scene_name(void *param, obs_source_t *scene)
+/** Name of the current program scene ("" when none). Releases the ref it takes. */
+std::string program_scene_name()
 {
-	const char *name = obs_source_get_name(scene);
-	if (name)
-		static_cast<std::vector<std::string> *>(param)->emplace_back(name);
-	return true;
+	std::string out;
+	obs_source_t *program = obs_frontend_get_current_scene();
+	if (program) {
+		const char *n = obs_source_get_name(program);
+		out = n ? n : "";
+		obs_source_release(program);
+	}
+	return out;
 }
 
 /** Scene names of the main canvas. Releases every ref it takes. */
@@ -116,7 +122,7 @@ void VerticalSceneLink::refresh()
 	obs_canvas_t *canvas = m_canvas.get_ref();
 	if (canvas) {
 		have_canvas = true;
-		obs_canvas_enum_scenes(canvas, collect_scene_name, &verticals);
+		verticals = canvas_scene_names(canvas);
 		obs_canvas_release(canvas);
 	}
 	const std::vector<std::string> mains = main_scene_names();
@@ -212,7 +218,10 @@ void VerticalSceneLink::on_choice_changed(const QString &main_scene, int kind, c
 		break;
 	}
 	m_canvas.set_link_settings(settings);
-	m_canvas.follow_program_scene();
+	/* Only the row of the current program scene can change what is on screen; editing another row
+	 * must not undo a manual "Set active". */
+	if (key == program_scene_name())
+		m_canvas.follow_program_scene();
 }
 
 } // namespace smulti

@@ -77,6 +77,25 @@ SMULTI_TEST(scene_link_rename_migrates_key_and_value)
 	EXPECT_TRUE(!smulti::rename_scene_in_links(s, "Nothing", "Else"));
 }
 
+SMULTI_TEST(scene_link_stinger_delay_uses_transition_point)
+{
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, 380, 60, 1), 380);
+	/* frame based: 30 frames at 60 fps = 500 ms; at 30000/1001 fps = 1001 ms */
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 60, 1), 500);
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 30000, 1001), 1001);
+	/* unusable input never delays, huge values are capped */
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 1, 30, 0, 1), 0);
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, -5, 60, 1), 0);
+	EXPECT_EQ(smulti::linked_switch_delay_ms("obs_stinger_transition", 0, 999999, 60, 1), 120000);
+}
+
+SMULTI_TEST(scene_link_non_stinger_switches_immediately)
+{
+	EXPECT_EQ(smulti::linked_switch_delay_ms("fade_transition", 0, 380, 60, 1), 0);
+	EXPECT_EQ(smulti::linked_switch_delay_ms("cut_transition", 0, 380, 60, 1), 0);
+	EXPECT_EQ(smulti::linked_switch_delay_ms("", 0, 380, 60, 1), 0);
+}
+
 SMULTI_TEST(scene_link_save_load_roundtrip)
 {
 	SceneLinkSettings s;

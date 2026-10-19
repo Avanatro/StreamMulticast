@@ -86,6 +86,7 @@ target_sources(
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp
+    src/pipeline/CanvasSceneNames.cpp
     src/pipeline/OwnedCanvas.cpp
     src/pipeline/EncoderFactory.cpp
     src/pipeline/OutputController.cpp

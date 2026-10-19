@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "VerticalSceneList.hpp"
 
+#include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 #include "ImportScenesDialog.hpp"
 
@@ -34,17 +35,6 @@ namespace {
 constexpr const char *kSignals[] = {"source_add", "source_remove", "source_rename", "channel_change"};
 constexpr const char *kNewSceneBase = "V Scene";
 
-struct SceneNames {
-	std::vector<std::string> names;
-};
-
-bool collect_scene_name(void *param, obs_source_t *scene)
-{
-	const char *name = obs_source_get_name(scene);
-	if (name)
-		static_cast<SceneNames *>(param)->names.emplace_back(name);
-	return true;
-}
 
 /** Name of the scene on channel 0 ("" when none). Releases the ref it takes. */
 std::string active_scene_name(obs_canvas_t *canvas)
@@ -57,28 +47,6 @@ std::string active_scene_name(obs_canvas_t *canvas)
 		obs_source_release(src);
 	}
 	return out;
-}
-
-/** True when any source of the canvas (scene or not: they share one name table) uses the name. */
-bool canvas_has_name(obs_canvas_t *canvas, const std::string &name)
-{
-	obs_source_t *src = obs_canvas_get_source_by_name(canvas, name.c_str());
-	if (!src)
-		return false;
-	obs_source_release(src);
-	return true;
-}
-
-std::string unique_scene_name(obs_canvas_t *canvas)
-{
-	if (!canvas_has_name(canvas, kNewSceneBase))
-		return kNewSceneBase;
-	for (int i = 2; i < 10000; ++i) {
-		std::string candidate = std::string(kNewSceneBase) + " " + std::to_string(i);
-		if (!canvas_has_name(canvas, candidate))
-			return candidate;
-	}
-	return std::string(kNewSceneBase) + " new";
 }
 
 } // namespace
@@ -210,7 +178,7 @@ void VerticalSceneList::refresh()
 		return; // unload may destroy the owned canvas before the dock is removed
 	const QString previous = selected_scene();
 
-	SceneNames scenes;
+	std::vector<std::string> scenes;
 	std::string active;
 	bool have_canvas = false;
 
@@ -218,7 +186,7 @@ void VerticalSceneList::refresh()
 	if (canvas) {
 		have_canvas = true;
 		connect_signals(canvas);
-		obs_canvas_enum_scenes(canvas, collect_scene_name, &scenes);
+		scenes = canvas_scene_names(canvas);
 		active = active_scene_name(canvas);
 		obs_canvas_release(canvas);
 	} else {
@@ -228,7 +196,7 @@ void VerticalSceneList::refresh()
 	m_list->blockSignals(true);
 	m_list->clear();
 	int select_row = -1;
-	for (const std::string &n : scenes.names) {
+	for (const std::string &n : scenes) {
 		const QString name = QString::fromStdString(n);
 		const bool is_active = (n == active);
 		auto *item = new QListWidgetItem(is_active ? tr("%1  (active)").arg(name) : name, m_list);
@@ -284,7 +252,7 @@ void VerticalSceneList::on_add()
 		return;
 	}
 
-	const std::string name = unique_scene_name(canvas);
+	const std::string name = unique_name_in(canvas, kNewSceneBase);
 	obs_scene_t *scene = obs_canvas_scene_create(canvas, name.c_str());
 	const bool created = scene != nullptr;
 	if (scene) {
@@ -383,15 +351,14 @@ void VerticalSceneList::on_remove()
 		/* Never remove a scene of another canvas (Aitum Vertical, main). */
 		error = tr("The scene does not belong to the vertical canvas; nothing was removed.");
 	} else {
-		SceneNames scenes;
-		obs_canvas_enum_scenes(canvas, collect_scene_name, &scenes);
-		if (scenes.names.size() <= 1) {
+		const std::vector<std::string> scenes = canvas_scene_names(canvas);
+		if (scenes.size() <= 1) {
 			error = tr("The last scene cannot be removed; add another scene first.");
 		} else {
 			const std::string removing = name.toStdString();
 			if (active_scene_name(canvas) == removing) {
 				/* Hand channel 0 to another scene first so the preview never loses its scene. */
-				for (const std::string &other : scenes.names) {
+				for (const std::string &other : scenes) {
 					if (other == removing)
 						continue;
 					obs_scene_t *next = obs_canvas_get_scene_by_name(canvas, other.c_str());

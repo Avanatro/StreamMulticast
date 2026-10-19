@@ -17,6 +17,8 @@ struct obs_canvas;
 typedef struct obs_canvas obs_canvas_t;
 struct obs_data;
 typedef struct obs_data obs_data_t;
+struct calldata;
+typedef struct calldata calldata_t;
 struct obs_weak_canvas;
 typedef struct obs_weak_canvas obs_weak_canvas_t;
 
@@ -84,8 +86,16 @@ public:
 	 */
 	void follow_program_scene();
 
+	/**
+	 * Milliseconds to wait before follow_program_scene() after a program scene change: the
+	 * stinger's transition point when the current transition is a stinger, else 0. UI thread only.
+	 */
+	int follow_delay_ms() const;
+
 private:
 	void remember(obs_canvas_t *canvas);
+	void disconnect_rename(obs_weak_canvas_t *weak);
+	static void on_canvas_rename(void *param, calldata_t *cd);
 	void ensure_active_scene(obs_canvas_t *canvas);
 
 	mutable std::mutex m_mutex;
