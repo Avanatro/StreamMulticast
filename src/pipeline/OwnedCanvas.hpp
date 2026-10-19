@@ -13,6 +13,8 @@ GPLv2 — see LICENSE for full text.
 // libobs forward declarations
 struct obs_canvas;
 typedef struct obs_canvas obs_canvas_t;
+struct obs_data;
+typedef struct obs_data obs_data_t;
 struct obs_weak_canvas;
 typedef struct obs_weak_canvas obs_weak_canvas_t;
 
@@ -46,6 +48,13 @@ public:
 	/** Scene collection is about to change: stop endpoints bound to the canvas, drop our reference. */
 	void on_collection_changing(EndpointRegistry &registry);
 
+	/**
+	 * Frontend save/load hook. libobs persists no channel assignment for a
+	 * non-main canvas, so the name of the scene on channel 0 is stored in the
+	 * collection data and restored by ensure().
+	 */
+	void on_save_load(obs_data_t *data, bool saving);
+
 	/** Drop the reference without stopping anything (OBS exit, module unload). */
 	void release();
 
@@ -57,11 +66,12 @@ public:
 
 private:
 	void remember(obs_canvas_t *canvas);
-	void ensure_default_scene(obs_canvas_t *canvas);
+	void ensure_active_scene(obs_canvas_t *canvas);
 
 	mutable std::mutex m_mutex;
 	obs_weak_canvas_t *m_weak = nullptr;
 	std::string m_uuid;
+	std::string m_scene_name; ///< scene wanted on channel 0 (loaded from or saved to the collection)
 };
 
 } // namespace smulti

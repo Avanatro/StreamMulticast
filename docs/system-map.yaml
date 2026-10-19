@@ -291,6 +291,12 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: restart OBS twice; GetCanvasList shows exactly one StreamMulticast Vertical (not run in this session)"
             result: pending
+      - id: owned-vertical-canvas.restart-renders-scene
+        behavior: "libobs persists no channel assignment for a non-main canvas, so the scene name on channel 0 is stored in the collection data (save callback) and restored on load; with no stored name the first scene is used; an empty canvas gets V Main. The canvas is rebuilt on collection change, profile change and the libobs video_reset signal (main video reset frees every canvas mix)."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: restart OBS, then change Settings > Video; the V canvas preview renders its scene both times (not run in this session)"
+            result: pending
       - id: owned-vertical-canvas.own-mix
         behavior: "The owned canvas has its own video mix (1080x1920, main fps) independent of whether Aitum Vertical is active; Aitum's canvas and the V scenes are never written."
         verification:

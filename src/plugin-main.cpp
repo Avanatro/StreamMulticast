@@ -33,6 +33,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QMainWindow>
 #include <QAction>
+#include <atomic>
 #include <memory>
 
 OBS_DECLARE_MODULE()
@@ -48,6 +49,30 @@ static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
 
+static std::atomic<bool> g_module_alive{false};
+
+/* Runs on the UI thread (queued from the libobs video_reset signal). */
+static void ensure_owned_canvas_task(void *)
+{
+	if (g_module_alive.load() && g_owned_canvas)
+		g_owned_canvas->ensure();
+}
+
+/* obs_reset_video() frees every canvas mix; rebuild ours after a main video
+ * reset. The signal may fire on any thread, and the frontend canvas API is
+ * UI-thread only, so hop to the UI thread. */
+static void on_video_reset(void *, calldata_t *)
+{
+	if (g_module_alive.load())
+		obs_queue_task(OBS_TASK_UI, ensure_owned_canvas_task, nullptr, false);
+}
+
+static void on_save_load(obs_data_t *data, bool saving, void *)
+{
+	if (g_owned_canvas)
+		g_owned_canvas->on_save_load(data, saving);
+}
+
 /* -----------------------------------------------------------------------
  * OBS frontend-event handler
  * Reacts to main-stream start/stop to trigger "linked" endpoints.
@@ -57,7 +82,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	if (!g_registry)
 		return;
 
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
+	    event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 		if (g_owned_canvas)
 			g_owned_canvas->ensure();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
@@ -135,6 +161,9 @@ bool obs_module_load()
 	// AVANATRO-VERIFY: obs_frontend_add_event_callback signature — verify it exists in
 	// obs-frontend-api.h for OBS 30+ (it does in OBS 30.x, but confirm 31.x didn't rename it).
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
+	obs_frontend_add_save_callback(on_save_load, nullptr);
+	g_module_alive = true;
+	signal_handler_connect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 
 	/* 6. Create and register the dock widget
 	 * obs_frontend_add_dock_by_id was added in OBS 30.0.
@@ -176,6 +205,9 @@ void obs_module_unload()
 {
 	obs_log(LOG_INFO, "StreamMulticast unloading");
 
+	g_module_alive = false;
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
+	obs_frontend_remove_save_callback(on_save_load, nullptr);
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
 
 	/* Request every output to stop, unconditionally — no is_running() gate

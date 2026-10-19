@@ -24,10 +24,20 @@ namespace smulti {
 namespace {
 
 constexpr const char *kDefaultSceneName = "V Main";
+constexpr const char *kSceneSaveKey = "streammulticast_vertical_scene";
 
-bool count_scene(void *param, obs_source_t *)
+struct SceneScan {
+	size_t count = 0;
+	std::string first_name;
+};
+
+bool scan_scene(void *param, obs_source_t *scene)
 {
-	++*static_cast<size_t *>(param);
+	auto *scan = static_cast<SceneScan *>(param);
+	if (scan->count++ == 0) {
+		const char *name = obs_source_get_name(scene);
+		scan->first_name = name ? name : "";
+	}
 	return true;
 }
 
@@ -142,16 +152,40 @@ void OwnedCanvas::ensure()
 
 	remember(canvas);
 	if (obs_canvas_has_video(canvas))
-		ensure_default_scene(canvas);
+		ensure_active_scene(canvas);
 	obs_canvas_release(canvas);
 }
 
-void OwnedCanvas::ensure_default_scene(obs_canvas_t *canvas)
+void OwnedCanvas::ensure_active_scene(obs_canvas_t *canvas)
 {
-	size_t scenes = 0;
-	obs_canvas_enum_scenes(canvas, count_scene, &scenes);
-	if (scenes > 0)
+	SceneScan scan;
+	obs_canvas_enum_scenes(canvas, scan_scene, &scan);
+
+	if (scan.count > 0) {
+		/* A restored canvas has its scenes but no channel assignment (libobs
+		 * does not persist it). Only fill an empty channel 0. */
+		obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+		if (current) {
+			obs_source_release(current);
+			return;
+		}
+
+		std::string wanted;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			wanted = m_scene_name;
+		}
+		obs_scene_t *scene = wanted.empty() ? nullptr : obs_canvas_get_scene_by_name(canvas, wanted.c_str());
+		if (!scene)
+			scene = obs_canvas_get_scene_by_name(canvas, scan.first_name.c_str());
+		if (!scene)
+			return;
+		obs_canvas_set_channel(canvas, 0, obs_scene_get_source(scene));
+		obs_log(LOG_INFO, "owned canvas: restored scene '%s' on channel 0",
+			obs_source_get_name(obs_scene_get_source(scene)));
+		obs_scene_release(scene);
 		return;
+	}
 
 	obs_scene_t *scene = obs_canvas_scene_create(canvas, kDefaultSceneName);
 	if (!scene) {
@@ -199,7 +233,42 @@ void OwnedCanvas::release()
 obs_canvas_t *OwnedCanvas::get_ref() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_weak ? obs_weak_canvas_get_canvas(m_weak) : nullptr;
+	obs_canvas_t *c = m_weak ? obs_weak_canvas_get_canvas(m_weak) : nullptr;
+	/* A removed canvas can stay alive while an endpoint still pins it. */
+	if (c && obs_canvas_removed(c)) {
+		obs_canvas_release(c);
+		return nullptr;
+	}
+	return c;
+}
+
+void OwnedCanvas::on_save_load(obs_data_t *data, bool saving)
+{
+	if (!data)
+		return;
+	if (!saving) {
+		const char *name = obs_data_get_string(data, kSceneSaveKey);
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_scene_name = name ? name : "";
+		return;
+	}
+
+	obs_canvas_t *c = get_ref();
+	std::string name;
+	if (c) {
+		obs_source_t *src = obs_canvas_get_channel(c, 0);
+		if (src) {
+			const char *n = obs_source_get_name(src);
+			name = n ? n : "";
+			obs_source_release(src);
+		}
+		obs_canvas_release(c);
+	}
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!name.empty())
+		m_scene_name = name;
+	if (!m_scene_name.empty())
+		obs_data_set_string(data, kSceneSaveKey, m_scene_name.c_str());
 }
 
 std::string OwnedCanvas::uuid() const
