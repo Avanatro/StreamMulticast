@@ -24,7 +24,11 @@ struct StreamTarget {
 /**
  * Normalize an ingest URL for comparison only (never stored):
  * trim whitespace, lowercase scheme and host (path stays case-sensitive),
- * strip trailing '/'. Returns "" for blank input.
+ * strip trailing '/', and drop the scheme's default port (rtmp :1935,
+ * rtmps :443). Returns "" for blank input.
+ *
+ * Known limit: rtmp:// and rtmps:// stay distinct (different transport), so
+ * the same host and key over both schemes is not reported as a duplicate.
  */
 std::string normalize_server_url(const std::string &url);
 

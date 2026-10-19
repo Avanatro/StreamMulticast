@@ -112,7 +112,7 @@ nodes:
       - tests/test_linked_start_duplicates.cpp
     works_when:
       - id: endpoint-validation.dup-target
-        behavior: "Two targets are duplicates when the normalized server (trimmed, scheme and host lowercased, trailing slashes stripped) and the non-empty stream key are equal. Checked against other enabled endpoints and the OBS main streaming service. The check is pure (find_duplicate); reading the main service via the frontend API (MainServiceTarget) is not covered by an automated check."
+        behavior: "Two targets are duplicates when the normalized server (trimmed, scheme and host lowercased, trailing slashes and the scheme default port rtmp:1935 / rtmps:443 stripped; rtmp and rtmps stay distinct) and the non-empty stream key are equal. Checked against other enabled endpoints and the OBS main streaming service. The check is pure (find_duplicate); reading the main service via the frontend API (MainServiceTarget) is not covered by an automated check."
         verification:
           - kind: automated
             reference: tests/test_endpoint_validation.cpp

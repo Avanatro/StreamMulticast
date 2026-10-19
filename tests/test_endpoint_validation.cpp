@@ -35,7 +35,7 @@ SMULTI_TEST(normalize_keeps_path_case)
 
 SMULTI_TEST(normalize_keeps_port)
 {
-	EXPECT_EQ(smulti::normalize_server_url("rtmp://HOST:1935/app"), "rtmp://host:1935/app");
+	EXPECT_EQ(smulti::normalize_server_url("rtmp://HOST:1936/app"), "rtmp://host:1936/app");
 }
 
 SMULTI_TEST(normalize_without_scheme_lowercases_host)
@@ -126,4 +126,33 @@ SMULTI_TEST(find_duplicate_main_service_with_other_key_is_fine)
 	Endpoint b = make("B", "rtmp://host/app", "k");
 	StreamTarget main_t{"rtmp://host/app", "other"};
 	EXPECT_TRUE(smulti::find_duplicate(b, {b}, main_t).kind == DuplicateKind::None);
+}
+
+/* ---- default ports ---- */
+
+SMULTI_TEST(normalize_strips_default_port_of_scheme)
+{
+	EXPECT_EQ(smulti::normalize_server_url("rtmp://h:1935/app"), "rtmp://h/app");
+	EXPECT_EQ(smulti::normalize_server_url("rtmps://h:443/app"), "rtmps://h/app");
+	EXPECT_EQ(smulti::normalize_server_url("RTMP://H:1935"), "rtmp://h");
+}
+
+SMULTI_TEST(normalize_keeps_non_default_port)
+{
+	EXPECT_EQ(smulti::normalize_server_url("rtmp://h:443/app"), "rtmp://h:443/app");
+	EXPECT_EQ(smulti::normalize_server_url("rtmps://h:1935/app"), "rtmps://h:1935/app");
+}
+
+SMULTI_TEST(default_port_does_not_hide_duplicate)
+{
+	StreamTarget a{"rtmp://live.example.com:1935/app", "k"};
+	StreamTarget b{"rtmp://live.example.com/app", "k"};
+	EXPECT_TRUE(smulti::is_duplicate_target(a, b));
+}
+
+SMULTI_TEST(rtmp_and_rtmps_stay_distinct)
+{
+	StreamTarget a{"rtmp://h/app", "k"};
+	StreamTarget b{"rtmps://h/app", "k"};
+	EXPECT_TRUE(!smulti::is_duplicate_target(a, b));
 }

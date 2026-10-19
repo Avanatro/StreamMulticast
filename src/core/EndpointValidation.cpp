@@ -54,7 +54,18 @@ std::string normalize_server_url(const std::string &url)
 	while (!path.empty() && path.back() == '/')
 		path.pop_back();
 
-	return scheme + lower_ascii(authority) + path;
+	authority = lower_ascii(authority);
+
+	/* Drop the scheme's default port so "h:1935" and "h" compare equal. */
+	const char *default_port = scheme == "rtmp://" ? ":1935" : scheme == "rtmps://" ? ":443" : nullptr;
+	if (default_port) {
+		const std::string suffix = default_port;
+		if (authority.size() > suffix.size() &&
+		    authority.compare(authority.size() - suffix.size(), suffix.size(), suffix) == 0)
+			authority.erase(authority.size() - suffix.size());
+	}
+
+	return scheme + authority + path;
 }
 
 bool is_duplicate_target(const StreamTarget &a, const StreamTarget &b)
