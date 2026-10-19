@@ -29,8 +29,8 @@ namespace smulti {
 namespace {
 
 constexpr const char *kCanvasSignals[] = {"channel_change", "source_remove", "source_rename"};
-constexpr const char *kSceneSignals[] = {"item_add",     "item_remove",    "reorder",
-					 "item_visible", "item_transform", "refresh"};
+constexpr const char *kSceneSignals[] = {"item_add", "item_remove", "reorder", "item_visible", "refresh"};
+constexpr const char *kTransformSignal = "item_transform";
 
 constexpr int kIdRole = Qt::UserRole;
 
@@ -115,9 +115,11 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, QWidget *parent) : QWidg
 	m_status->setWordWrap(true);
 	layout->addWidget(m_status);
 
-	m_editor = new TransformEditor([this](int64_t id, const std::function<void(obs_sceneitem_t *)> &fn) {
-		return with_item(id, fn);
-	}, this);
+	m_editor = new TransformEditor(
+		[this](const std::string &scene_uuid, int64_t id, const std::function<void(obs_sceneitem_t *)> &fn) {
+			return with_item(scene_uuid, id, fn);
+		},
+		this);
 	layout->addWidget(m_editor);
 
 	connect(m_add_btn, &QPushButton::clicked, this, &VerticalItemList::on_add);
@@ -137,7 +139,7 @@ VerticalItemList::~VerticalItemList()
 
 /* ---- libobs access: every reference lives inside one call ------------------ */
 
-bool VerticalItemList::with_scene(const std::function<void(obs_scene_t *)> &fn)
+bool VerticalItemList::with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn)
 {
 	if (m_shutdown.load())
 		return false;
@@ -148,6 +150,10 @@ bool VerticalItemList::with_scene(const std::function<void(obs_scene_t *)> &fn)
 	bool called = false;
 	obs_source_t *source = obs_canvas_get_channel(canvas, 0);
 	obs_scene_t *scene = source ? obs_scene_from_source(source) : nullptr; // no ref; valid while source is held
+	const char *active_uuid = source ? obs_source_get_uuid(source) : nullptr;
+	/* Item ids are per scene: refuse when the active scene is not the one the ids come from. */
+	if (scene && (scene_uuid.empty() || !active_uuid || scene_uuid != active_uuid))
+		scene = nullptr;
 	if (scene) {
 		/* INV-6: write only to a scene that belongs to the owned canvas. */
 		obs_canvas_t *scene_canvas = obs_source_get_canvas(source);
@@ -166,12 +172,13 @@ bool VerticalItemList::with_scene(const std::function<void(obs_scene_t *)> &fn)
 	return called;
 }
 
-bool VerticalItemList::with_item(int64_t item_id, const std::function<void(obs_sceneitem_t *)> &fn)
+bool VerticalItemList::with_item(const std::string &scene_uuid, int64_t item_id,
+				 const std::function<void(obs_sceneitem_t *)> &fn)
 {
 	if (item_id == 0)
 		return false;
 	bool called = false;
-	with_scene([&](obs_scene_t *scene) {
+	with_scene(scene_uuid, [&](obs_scene_t *scene) {
 		FindItem f;
 		f.id = item_id;
 		obs_scene_enum_items(scene, find_item, &f);
@@ -190,6 +197,29 @@ void VerticalItemList::on_signal(void *param, calldata_t *)
 {
 	/* Any thread, possibly with libobs locks held: only queue a coalesced refresh, touch nothing else. */
 	static_cast<VerticalItemList *>(param)->queue_refresh();
+}
+
+void VerticalItemList::on_transform_signal(void *param, calldata_t *)
+{
+	/* item_transform can fire on every source size change: never rebuild the list for it. */
+	static_cast<VerticalItemList *>(param)->queue_editor_reload();
+}
+
+void VerticalItemList::queue_editor_reload()
+{
+	if (m_shutdown.load())
+		return;
+	if (m_reload_queued.exchange(true))
+		return;
+	QMetaObject::invokeMethod(
+		this,
+		[this] {
+			m_reload_queued = false;
+			if (m_shutdown.load())
+				return;
+			m_editor->reload(false);
+		},
+		Qt::QueuedConnection);
 }
 
 void VerticalItemList::queue_refresh()
@@ -255,6 +285,7 @@ void VerticalItemList::connect_scene_signals(obs_source_t *scene_source)
 		return;
 	for (const char *sig : kSceneSignals)
 		signal_handler_connect(handler, sig, &VerticalItemList::on_signal, this);
+	signal_handler_connect(handler, kTransformSignal, &VerticalItemList::on_transform_signal, this);
 	m_conn_scene = obs_source_get_weak_source(scene_source);
 	m_conn_scene_uuid = uuid;
 }
@@ -287,6 +318,7 @@ void VerticalItemList::detach_scene_signals_locked()
 		if (handler) {
 			for (const char *sig : kSceneSignals)
 				signal_handler_disconnect(handler, sig, &VerticalItemList::on_signal, this);
+			signal_handler_disconnect(handler, kTransformSignal, &VerticalItemList::on_transform_signal, this);
 		}
 		obs_source_release(s);
 	}
@@ -320,11 +352,12 @@ void VerticalItemList::refresh()
 	if (m_shutdown.load())
 		return;
 
-	const int64_t previous = m_pending_select != 0 ? m_pending_select : selected_id();
+	int64_t previous = m_pending_select != 0 ? m_pending_select : selected_id();
 	m_pending_select = 0;
 
 	ItemRows items;
 	std::string scene_name;
+	std::string scene_uuid;
 	bool have_canvas = false;
 	bool have_scene = false;
 
@@ -338,6 +371,8 @@ void VerticalItemList::refresh()
 			have_scene = true;
 			const char *n = obs_source_get_name(source);
 			scene_name = n ? n : "";
+			const char *u = obs_source_get_uuid(source);
+			scene_uuid = u ? u : "";
 			connect_scene_signals(source);
 			obs_scene_enum_items(scene, collect_item, &items);
 		}
@@ -348,6 +383,11 @@ void VerticalItemList::refresh()
 		detach_signals();
 	}
 	m_has_scene = have_scene;
+	if (scene_uuid != m_list_scene_uuid) {
+		/* Another scene is active: ids of the old scene mean other items here. Drop the selection. */
+		previous = 0;
+		m_list_scene_uuid = scene_uuid;
+	}
 	if (!have_scene) {
 		std::lock_guard<std::mutex> lock(m_conn_mutex);
 		detach_scene_signals_locked();
@@ -372,12 +412,13 @@ void VerticalItemList::refresh()
 		m_list->setCurrentRow(select_row);
 	m_list->blockSignals(false);
 
-	set_status(have_canvas ? QString() : tr("The vertical canvas is not available yet."));
+	set_status(have_canvas ? m_pending_status : tr("The vertical canvas is not available yet."));
+	m_pending_status.clear();
 	update_buttons();
 
 	const int64_t now = selected_id();
 	if (now != previous || now == 0)
-		m_editor->set_item(now);
+		m_editor->set_item(m_list_scene_uuid, now);
 	else
 		m_editor->reload(false);
 }
@@ -409,7 +450,7 @@ void VerticalItemList::on_selection_changed()
 	if (m_shutdown.load())
 		return;
 	update_buttons();
-	m_editor->set_item(selected_id());
+	m_editor->set_item(m_list_scene_uuid, selected_id());
 }
 
 /* ---- actions ---------------------------------------------------------- */
@@ -426,6 +467,7 @@ void VerticalItemList::on_add()
 		set_status(tr("There are no existing sources to add. Create one in the main OBS window first."));
 		return;
 	}
+	const std::string list_scene = m_list_scene_uuid; // the scene the user was looking at
 	QStringList choices;
 	for (const std::string &n : inputs.names)
 		choices << QString::fromStdString(n);
@@ -438,7 +480,7 @@ void VerticalItemList::on_add()
 
 	QString error;
 	int64_t new_id = 0;
-	const bool in_scene = with_scene([&](obs_scene_t *scene) {
+	const bool in_scene = with_scene(list_scene, [&](obs_scene_t *scene) {
 		obs_source_t *source = obs_get_source_by_name(picked.toUtf8().constData());
 		if (!source || obs_source_get_type(source) != OBS_SOURCE_TYPE_INPUT) {
 			error = tr("The source no longer exists.");
@@ -454,7 +496,7 @@ void VerticalItemList::on_add()
 			obs_source_release(source);
 	});
 	if (!in_scene && error.isEmpty())
-		error = tr("There is no active scene on the vertical canvas.");
+		error = tr("The active scene changed or is missing; nothing was added.");
 
 	m_pending_select = new_id;
 	refresh();
@@ -468,6 +510,7 @@ void VerticalItemList::on_remove()
 	const int64_t id = selected_id();
 	if (id == 0)
 		return;
+	const std::string list_scene = m_list_scene_uuid; // the id belongs to this scene only
 	const QListWidgetItem *cur = m_list->currentItem();
 	const QString name = cur ? cur->text() : QString();
 
@@ -478,9 +521,9 @@ void VerticalItemList::on_remove()
 		return;
 
 	QString error;
-	const bool ok = with_item(id, [](obs_sceneitem_t *item) { obs_sceneitem_remove(item); });
+	const bool ok = with_item(list_scene, id, [](obs_sceneitem_t *item) { obs_sceneitem_remove(item); });
 	if (!ok)
-		error = tr("The item no longer exists.");
+		error = tr("The item no longer exists or the active scene changed; nothing was removed.");
 	refresh();
 	set_status(error);
 }
@@ -493,7 +536,7 @@ void VerticalItemList::move_selected(bool up)
 	if (id == 0)
 		return;
 	QString error;
-	const bool ok = with_item(id, [up](obs_sceneitem_t *item) {
+	const bool ok = with_item(m_list_scene_uuid, id, [up](obs_sceneitem_t *item) {
 		obs_sceneitem_set_order(item, up ? OBS_ORDER_MOVE_UP : OBS_ORDER_MOVE_DOWN);
 	});
 	if (!ok)
@@ -519,10 +562,12 @@ void VerticalItemList::on_item_changed(QListWidgetItem *row)
 		return;
 	const int64_t id = static_cast<int64_t>(row->data(kIdRole).toLongLong());
 	const bool visible = row->checkState() == Qt::Checked;
-	const bool ok = with_item(id, [visible](obs_sceneitem_t *item) { obs_sceneitem_set_visible(item, visible); });
+	const bool ok = with_item(m_list_scene_uuid, id,
+				  [visible](obs_sceneitem_t *item) { obs_sceneitem_set_visible(item, visible); });
 	if (!ok) {
-		refresh();
-		set_status(tr("The item no longer exists."));
+		/* Never rebuild (clear) the list from inside its own itemChanged emission. */
+		m_pending_status = tr("The item no longer exists or the active scene changed.");
+		queue_refresh();
 	}
 }
 

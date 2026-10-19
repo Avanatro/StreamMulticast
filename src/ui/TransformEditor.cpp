@@ -46,8 +46,9 @@ layout::Size source_size(obs_sceneitem_t *item)
 	return {obs_source_get_width(src), obs_source_get_height(src)};
 }
 
-/** One atomic transform write. Bounds NONE and top-left alignment keep pos/scale/crop literal. */
-void write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t)
+/** One atomic transform write, bounds always NONE. Presets (reset_frame) also reset alignment to
+ * top-left and rotation to 0 because they replace the whole transform; numeric Apply keeps both. */
+void write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t, bool reset_frame)
 {
 	vec2 pos;
 	vec2_set(&pos, t.pos_x, t.pos_y);
@@ -61,8 +62,10 @@ void write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t)
 
 	obs_sceneitem_defer_update_begin(item);
 	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
-	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
-	obs_sceneitem_set_rot(item, 0.0f);
+	if (reset_frame) {
+		obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+		obs_sceneitem_set_rot(item, 0.0f);
+	}
 	obs_sceneitem_set_pos(item, &pos);
 	obs_sceneitem_set_scale(item, &scale);
 	obs_sceneitem_set_crop(item, &crop);
@@ -172,13 +175,14 @@ bool TransformEditor::any_field_focused() const
 	return false;
 }
 
-void TransformEditor::set_item(int64_t item_id)
+void TransformEditor::set_item(const std::string &scene_uuid, int64_t item_id)
 {
 	if (m_shutdown.load())
 		return;
-	if (item_id != m_item_id)
+	if (item_id != m_item_id || scene_uuid != m_scene_uuid)
 		set_status(QString());
 	m_item_id = item_id;
+	m_scene_uuid = scene_uuid;
 	reload(true);
 }
 
@@ -191,7 +195,7 @@ void TransformEditor::reload(bool force)
 
 	bool found = false;
 	if (m_item_id != 0 && m_access) {
-		found = m_access(m_item_id, [this](obs_sceneitem_t *item) {
+		found = m_access(m_scene_uuid, m_item_id, [this](obs_sceneitem_t *item) {
 			vec2 pos;
 			vec2 scale;
 			obs_sceneitem_crop crop;
@@ -199,6 +203,8 @@ void TransformEditor::reload(bool force)
 			obs_sceneitem_get_scale(item, &scale);
 			obs_sceneitem_get_crop(item, &crop);
 			const layout::Size sz = source_size(item);
+			const bool has_bounds = obs_sceneitem_get_bounds_type(item) != OBS_BOUNDS_NONE;
+			const bool odd_align = obs_sceneitem_get_alignment(item) != (OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
 
 			const QSignalBlocker b1(m_pos_x), b2(m_pos_y), b3(m_scale_x), b4(m_scale_y), b5(m_crop_l),
 				b6(m_crop_t), b7(m_crop_r), b8(m_crop_b);
@@ -210,7 +216,13 @@ void TransformEditor::reload(bool force)
 			m_crop_t->setValue(crop.top);
 			m_crop_r->setValue(crop.right);
 			m_crop_b->setValue(crop.bottom);
-			m_info->setText(tr("Source size: %1 x %2").arg(sz.w).arg(sz.h));
+			QString info = tr("Source size: %1 x %2").arg(sz.w).arg(sz.h);
+			if (has_bounds)
+				info += tr("\nThis item uses a bounding box: Apply removes it and uses the scale shown "
+					   "(the visible size may change).");
+			if (odd_align)
+				info += tr("\nPosition refers to the alignment point of the item, which Apply keeps.");
+			m_info->setText(info);
 		});
 	}
 	if (!found) {
@@ -225,7 +237,7 @@ void TransformEditor::apply_preset(bool fill)
 	if (m_shutdown.load() || m_item_id == 0)
 		return;
 	QString error;
-	const bool ok = m_access(m_item_id, [&](obs_sceneitem_t *item) {
+	const bool ok = m_access(m_scene_uuid, m_item_id, [&](obs_sceneitem_t *item) {
 		const layout::Size src = source_size(item);
 		if (src.w == 0 || src.h == 0) {
 			error = tr("The source has no size yet (not active or not rendered); nothing was changed.");
@@ -233,10 +245,10 @@ void TransformEditor::apply_preset(bool fill)
 		}
 		layout::ItemTransform t = fill ? layout::fill(src, canvas_size()) : layout::fit(src, canvas_size());
 		t.crop = layout::clamp_crop(t.crop, src); // fill rounding can overshoot by < 1 px
-		write_transform(item, t);
+		write_transform(item, t, true);
 	});
 	if (!ok)
-		error = tr("The item no longer exists.");
+		error = tr("The item no longer exists or the active scene changed.");
 	reload(true);
 	set_status(error);
 }
@@ -264,16 +276,16 @@ void TransformEditor::on_apply()
 	t.crop = {m_crop_l->value(), m_crop_t->value(), m_crop_r->value(), m_crop_b->value()};
 
 	QString error;
-	const bool ok = m_access(m_item_id, [&](obs_sceneitem_t *item) {
+	const bool ok = m_access(m_scene_uuid, m_item_id, [&](obs_sceneitem_t *item) {
 		const layout::Size src = source_size(item);
 		if (src.w != 0 && src.h != 0)
 			t.crop = layout::clamp_crop(t.crop, src);
 		else
 			t.crop = {}; // unknown source size: do not crop blindly
-		write_transform(item, t);
+		write_transform(item, t, false);
 	});
 	if (!ok)
-		error = tr("The item no longer exists.");
+		error = tr("The item no longer exists or the active scene changed.");
 	reload(true); // shows the clamped crop
 	set_status(error);
 }

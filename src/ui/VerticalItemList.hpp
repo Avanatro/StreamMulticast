@@ -50,8 +50,10 @@ class OwnedCanvas;
  *    call or a frontend event. Items are identified by their numeric id between events.
  *  - The long-lived links are weak references (canvas, active scene source) plus connected signals:
  *    canvas channel_change / source_remove / source_rename and the scene signals item_add,
- *    item_remove, reorder, item_visible, item_transform, refresh. Callbacks only queue a coalesced
- *    refresh().
+ *    item_remove, reorder, item_visible, refresh (callbacks only queue a coalesced refresh()) and
+ *    item_transform (queues only a coalesced transform panel reload; it can fire per frame).
+ *  - Item ids are unique per scene only: the list remembers the scene uuid its ids came from and every
+ *    libobs access passes it; a different active scene refuses the access.
  *  - detach_signals() is thread safe and must run before the canvas is released (canvas_remove,
  *    collection changing, SCRIPTING_SHUTDOWN, unload). The destructor repeats it.
  *  - Only the owned canvas is ever written (INV-6): every write re-checks that the scene belongs to
@@ -82,18 +84,20 @@ private slots:
 	void on_item_changed(QListWidgetItem *item);
 
 private:
-	bool with_scene(const std::function<void(obs_scene_t *)> &fn);
-	bool with_item(int64_t item_id, const std::function<void(obs_sceneitem_t *)> &fn);
+	bool with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn);
+	bool with_item(const std::string &scene_uuid, int64_t item_id, const std::function<void(obs_sceneitem_t *)> &fn);
 	void connect_canvas_signals(obs_canvas_t *canvas);
 	void connect_scene_signals(obs_source_t *scene_source);
 	void detach_scene_signals_locked();
 	void detach_canvas_signals_locked();
 	void queue_refresh();
+	void queue_editor_reload();
 	void move_selected(bool up);
 	void set_status(const QString &text);
 	void update_buttons();
 	int64_t selected_id() const;
 	static void on_signal(void *param, calldata_t *cd);
+	static void on_transform_signal(void *param, calldata_t *cd);
 
 	OwnedCanvas &m_canvas;
 	QLabel *m_scene_label = nullptr;
@@ -107,6 +111,8 @@ private:
 
 	int64_t m_pending_select = 0; ///< item id to select on the next refresh (UI thread only)
 	bool m_has_scene = false;     ///< UI thread only: last refresh found an active scene
+	std::string m_list_scene_uuid; ///< scene the list rows (and their ids) were built from; ids are per scene
+	QString m_pending_status;      ///< shown by the next refresh (UI thread only)
 
 	std::mutex m_conn_mutex;
 	obs_weak_canvas_t *m_conn_canvas = nullptr; ///< canvas the canvas signals are on (weak)
@@ -114,6 +120,7 @@ private:
 	obs_weak_source_t *m_conn_scene = nullptr; ///< scene source the scene signals are on (weak)
 	std::string m_conn_scene_uuid;
 	std::atomic<bool> m_refresh_queued{false};
+	std::atomic<bool> m_reload_queued{false};
 	std::atomic<bool> m_shutdown{false};
 };
 
