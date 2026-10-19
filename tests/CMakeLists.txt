@@ -13,6 +13,7 @@ set(SMULTI_TEST_SOURCES
     test_linked_start.cpp
     test_endpoint_validation.cpp
     test_linked_start_duplicates.cpp
+    test_canvas_endpoint.cpp
 )
 
 add_executable(
@@ -22,6 +23,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/Endpoint.cpp
   ${CMAKE_SOURCE_DIR}/src/core/LinkedStart.cpp
   ${CMAKE_SOURCE_DIR}/src/core/EndpointValidation.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/CanvasMigration.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

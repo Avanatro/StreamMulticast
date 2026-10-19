@@ -71,6 +71,7 @@ target_sources(
 
     # Core layer
     src/core/Endpoint.cpp
+    src/core/CanvasMigration.cpp
     src/core/ConfigStore.cpp
     src/core/EndpointRegistry.cpp
     src/core/LinkedStart.cpp

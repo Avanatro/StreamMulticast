@@ -6,6 +6,7 @@ GPLv2 — see LICENSE for full text.
 */
 
 #include "ConfigStore.hpp"
+#include "CanvasMigration.hpp"
 #include "../plugin-support.h"
 
 #include <obs-module.h>
@@ -19,7 +20,7 @@ GPLv2 — see LICENSE for full text.
 
 namespace smulti {
 
-static constexpr int CURRENT_SCHEMA_VERSION = 1;
+static constexpr int CURRENT_SCHEMA_VERSION = 2;
 static constexpr int SAVE_DEBOUNCE_MS       = 500;
 
 /* -----------------------------------------------------------------------
@@ -261,11 +262,23 @@ bool ConfigStore::read_from_disk(const std::string &path, std::vector<Endpoint> 
 /* -----------------------------------------------------------------------
  * migrate — for future schema changes
  * ----------------------------------------------------------------------- */
-void ConfigStore::migrate(int from_version, std::vector<Endpoint> &/*endpoints*/)
+void ConfigStore::migrate(int from_version, std::vector<Endpoint> &endpoints)
 {
 	obs_log(LOG_INFO, "ConfigStore: migrating config from schema v%d to v%d",
 	        from_version, CURRENT_SCHEMA_VERSION);
-	/* No migrations needed from v1 → v1 */
+
+	/* v1 -> v2: framing modes 1/2 were removed in favour of a canvas reference.
+	 * Names only in the log (never keys or URLs). The migrated list is written
+	 * back on the next save/unload. */
+	if (from_version < 2) {
+		for (auto &ep : endpoints) {
+			const int old_mode = static_cast<int>(ep.orientation);
+			if (migrate_legacy_orientation(ep))
+				obs_log(LOG_WARNING,
+				        "ConfigStore: endpoint '%s' used removed framing mode %d, migrated to canvas '%s'",
+				        ep.name.c_str(), old_mode, kOwnedVerticalCanvasName);
+		}
+	}
 }
 
 } // namespace smulti

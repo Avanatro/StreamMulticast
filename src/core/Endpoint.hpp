@@ -32,24 +32,17 @@ enum class EncoderBackend : int {
 };
 
 /**
- * OutputOrientation — per-endpoint target frame shape.
+ * OutputOrientation — legacy per-endpoint framing selector.
  *
- * v1.0.5 adds Vertical1080x1920Letterbox to enable parallel horizontal+vertical
- * streaming (Twitch primary + TikTok/Shorts/Reels secondary).
- *
- * SourceMatch: encoder receives frames at the OBS main canvas resolution (default).
- * Vertical1080x1920Letterbox: obs_output_set_video_conversion targets 1080×1920;
- *   the 16:9 main canvas is letterboxed inside the 9:16 frame with black bars
- *   top+bottom. Mechanically reliable.
- *
- * Vertical1080x1920CenterCrop is reserved for v1.1 — requires a per-output
- * obs_view_t with a custom render path that crops the centre 9:16 slice
- * from the horizontal canvas before encoding.
+ * Values 1 and 2 are legacy: they are kept only so old config files can be
+ * deserialized. ConfigStore migrates them to a canvas reference
+ * (see migrate_legacy_orientation in CanvasMigration.hpp) and new code must
+ * only use SourceMatch.
  */
 enum class OutputOrientation : int {
 	SourceMatch                     = 0, ///< Use OBS main canvas as-is
-	Vertical1080x1920Letterbox      = 1, ///< 1080×1920 with letterbox bars
-	Vertical1080x1920CenterCrop     = 2, ///< v1.1 — custom view rendering, NOT YET IMPLEMENTED
+	Vertical1080x1920Letterbox      = 1, ///< legacy, migrated to a canvas on load
+	Vertical1080x1920CenterCrop     = 2, ///< legacy, migrated to a canvas on load
 };
 
 /**
@@ -81,6 +74,11 @@ struct Endpoint {
 
 	/* Output framing — v1.0.5 */
 	OutputOrientation orientation = OutputOrientation::SourceMatch;
+
+	/* Canvas reference — both empty means the OBS main canvas.
+	 * canvas_uuid is the stable key, canvas_name the fallback lookup. */
+	std::string canvas_uuid;
+	std::string canvas_name;
 
 	/* Behaviour */
 	bool enabled       = true;        ///< Is this endpoint active at all?

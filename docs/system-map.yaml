@@ -39,7 +39,10 @@ nodes:
     code:
       - src/core/Endpoint.hpp
       - src/core/Endpoint.cpp
+      - src/core/CanvasMigration.hpp
+      - src/core/CanvasMigration.cpp
       - tests/test_endpoint_defaults.cpp
+      - tests/test_canvas_endpoint.cpp
     works_when:
       - id: endpoint-model.shape
         behavior: "Endpoint round-trips through obs_data without loss; missing keys get documented defaults."
@@ -56,6 +59,15 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C RelWithDebInfo, local run 2026-10-19; failed before the fix, passed after (WU2 commit)"
             checked_at: 2026-10-19
+      - id: endpoint-model.canvas-ref
+        behavior: "Endpoint carries canvas_uuid and canvas_name (both empty = main canvas), serialized as canvas_uuid/canvas_name; configs without the keys resolve to the main canvas."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_endpoint.cpp
+            check: canvas_endpoint_roundtrip_preserves_canvas_ref
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_, local run 2026-10-19; failed before implementation (build error, missing CanvasMigration.hpp), passed after (TASK-3)"
+            checked_at: 2026-10-19
     status: building
   - id: config-persistence
     lane: foundation
@@ -69,6 +81,15 @@ nodes:
       - id: config-persistence.roundtrip
         behavior: "Saved config.json loads back to an equal endpoint list; legacy schema versions are migrated."
         verification: []
+      - id: config-persistence.legacy-orientation-migration
+        behavior: "Schema 1 -> 2: orientation 1/2 becomes canvas_name 'StreamMulticast Vertical' with orientation SourceMatch, one LOG_WARNING per migrated endpoint (name only). The pure migration is tested; the ConfigStore load path and the log line are not covered by an automated check."
+        verification:
+          - kind: automated
+            reference: tests/test_canvas_endpoint.cpp
+            check: canvas_migrate_letterbox_to_vertical_canvas
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R canvas_, local run 2026-10-19; failed before implementation (build error), passed after (TASK-3)"
+            checked_at: 2026-10-19
     status: building
   - id: platform-server-table
     lane: foundation

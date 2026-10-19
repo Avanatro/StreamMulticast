@@ -62,6 +62,8 @@ Endpoint Endpoint::make_default(const std::string &name)
 	ep.keyframe_interval_sec = 2;
 	ep.audio_bitrate_kbps   = 160;
 	ep.orientation          = OutputOrientation::SourceMatch;
+	ep.canvas_uuid          = "";
+	ep.canvas_name          = "";
 	ep.enabled              = true;
 	ep.linked_to_main       = true;
 	ep.sort_order           = 0;
@@ -90,6 +92,8 @@ obs_data_t *Endpoint::serialize() const
 	obs_data_set_int   (data, "keyframe_interval",keyframe_interval_sec);
 	obs_data_set_int   (data, "audio_bitrate",    audio_bitrate_kbps);
 	obs_data_set_int   (data, "orientation",      static_cast<long long>(orientation));
+	obs_data_set_string(data, "canvas_uuid",      canvas_uuid.c_str());
+	obs_data_set_string(data, "canvas_name",      canvas_name.c_str());
 	obs_data_set_bool  (data, "enabled",          enabled);
 	obs_data_set_bool  (data, "linked_to_main",   linked_to_main);
 	obs_data_set_int   (data, "sort_order",       sort_order);
@@ -132,6 +136,10 @@ Endpoint Endpoint::deserialize(obs_data_t *data)
 	if (has("orientation"))
 		ep.orientation = static_cast<OutputOrientation>(
 			static_cast<int>(obs_data_get_int(data, "orientation")));
+	if (has("canvas_uuid"))
+		ep.canvas_uuid = obs_data_get_string(data, "canvas_uuid");
+	if (has("canvas_name"))
+		ep.canvas_name = obs_data_get_string(data, "canvas_name");
 	if (has("enabled"))
 		ep.enabled = obs_data_get_bool(data, "enabled");
 	if (has("linked_to_main"))
