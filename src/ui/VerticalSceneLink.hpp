@@ -49,11 +49,13 @@ protected:
 
 private slots:
 	void on_follow_toggled(bool checked);
+	void on_wait_stinger_toggled(bool checked);
 	void on_choice_changed(const QString &main_scene, int kind, const QString &vertical_scene);
 
 private:
 	OwnedCanvas &m_canvas;
 	QCheckBox *m_follow = nullptr;
+	QCheckBox *m_wait_stinger = nullptr;
 	QTableWidget *m_table = nullptr;
 	QLabel *m_status = nullptr;
 	bool m_refreshing = false;

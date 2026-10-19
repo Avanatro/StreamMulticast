@@ -75,6 +75,11 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	m_follow->setToolTip(tip);
 	layout->addWidget(m_follow);
 
+	m_wait_stinger = new QCheckBox(tr("Wait for stinger transition point"), this);
+	m_wait_stinger->setToolTip(tr("Off: the vertical canvas switches at the same moment the main transition starts. "
+				      "On: with a stinger transition it switches at the stinger's transition point instead."));
+	layout->addWidget(m_wait_stinger);
+
 	m_table = new QTableWidget(0, 2, this);
 	m_table->setHorizontalHeaderLabels({tr("Main scene"), tr("Vertical scene")});
 	m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
@@ -91,6 +96,7 @@ VerticalSceneLink::VerticalSceneLink(OwnedCanvas &canvas, QWidget *parent) : QWi
 	layout->addWidget(m_status);
 
 	connect(m_follow, &QCheckBox::toggled, this, &VerticalSceneLink::on_follow_toggled);
+	connect(m_wait_stinger, &QCheckBox::toggled, this, &VerticalSceneLink::on_wait_stinger_toggled);
 
 	refresh();
 }
@@ -132,6 +138,10 @@ void VerticalSceneLink::refresh()
 	m_follow->blockSignals(true);
 	m_follow->setChecked(settings.enabled);
 	m_follow->blockSignals(false);
+	m_wait_stinger->blockSignals(true);
+	m_wait_stinger->setChecked(settings.wait_for_stinger);
+	m_wait_stinger->setEnabled(settings.enabled);
+	m_wait_stinger->blockSignals(false);
 
 	m_table->setRowCount(0);
 	m_table->setRowCount(static_cast<int>(mains.size()));
@@ -201,11 +211,21 @@ void VerticalSceneLink::on_follow_toggled(bool checked)
 	SceneLinkSettings settings = m_canvas.link_settings();
 	settings.enabled = checked;
 	m_canvas.set_link_settings(settings);
+	m_wait_stinger->setEnabled(checked);
 	for (int r = 0; r < m_table->rowCount(); ++r) {
 		if (QWidget *w = m_table->cellWidget(r, 1))
 			w->setEnabled(checked);
 	}
 	m_canvas.follow_program_scene(); // takes effect now, not only at the next scene change
+}
+
+void VerticalSceneLink::on_wait_stinger_toggled(bool checked)
+{
+	if (m_shutdown.load() || m_refreshing)
+		return;
+	SceneLinkSettings settings = m_canvas.link_settings();
+	settings.wait_for_stinger = checked;
+	m_canvas.set_link_settings(settings); // applies from the next transition; persisted with the collection
 }
 
 void VerticalSceneLink::on_choice_changed(const QString &main_scene, int kind, const QString &vertical_scene)

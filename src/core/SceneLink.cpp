@@ -61,6 +61,14 @@ int linked_switch_delay_ms(const std::string &transition_id, std::int64_t tp_typ
 	return static_cast<int>(ms > kMaxMs ? kMaxMs : ms);
 }
 
+int linked_switch_delay_ms(const SceneLinkSettings &settings, const std::string &transition_id, std::int64_t tp_type,
+			   std::int64_t transition_point, std::uint32_t fps_num, std::uint32_t fps_den)
+{
+	if (!settings.wait_for_stinger)
+		return 0;
+	return linked_switch_delay_ms(transition_id, tp_type, transition_point, fps_num, fps_den);
+}
+
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name)
 {
 	if (old_name == new_name)
@@ -89,6 +97,7 @@ void scene_link_save(obs_data_t *data, const SceneLinkSettings &settings)
 	if (!data)
 		return;
 	obs_data_set_bool(data, kSceneLinkEnabledKey, settings.enabled);
+	obs_data_set_bool(data, kSceneLinkWaitStingerKey, settings.wait_for_stinger);
 
 	obs_data_t *map = obs_data_create();
 	for (const auto &entry : settings.explicit_map)
@@ -105,6 +114,8 @@ SceneLinkSettings scene_link_load(obs_data_t *data)
 
 	if (obs_data_has_user_value(data, kSceneLinkEnabledKey))
 		out.enabled = obs_data_get_bool(data, kSceneLinkEnabledKey);
+	if (obs_data_has_user_value(data, kSceneLinkWaitStingerKey))
+		out.wait_for_stinger = obs_data_get_bool(data, kSceneLinkWaitStingerKey);
 
 	obs_data_t *map = obs_data_get_obj(data, kSceneLinkMapKey);
 	if (map) {

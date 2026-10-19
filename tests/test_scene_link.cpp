@@ -120,3 +120,35 @@ SMULTI_TEST(scene_link_load_defaults_when_keys_missing)
 	EXPECT_EQ(back.enabled, true);
 	EXPECT_TRUE(back.explicit_map.empty());
 }
+
+SMULTI_TEST(scene_link_switch_immediate_by_default)
+{
+	SceneLinkSettings s; // wait_for_stinger defaults to false
+	EXPECT_EQ(s.wait_for_stinger, false);
+	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "obs_stinger_transition", 0, 380, 60, 1), 0);
+	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "fade_transition", 0, 380, 60, 1), 0);
+}
+
+SMULTI_TEST(scene_link_wait_for_stinger_keeps_delay)
+{
+	SceneLinkSettings s;
+	s.wait_for_stinger = true;
+	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "obs_stinger_transition", 0, 380, 60, 1), 380);
+	EXPECT_EQ(smulti::linked_switch_delay_ms(s, "fade_transition", 0, 380, 60, 1), 0);
+}
+
+SMULTI_TEST(scene_link_wait_for_stinger_persisted)
+{
+	SceneLinkSettings s;
+	s.wait_for_stinger = true;
+	obs_data_t *data = obs_data_create();
+	smulti::scene_link_save(data, s);
+	EXPECT_TRUE(obs_data_has_user_value(data, smulti::kSceneLinkWaitStingerKey));
+	SceneLinkSettings back = smulti::scene_link_load(data);
+	EXPECT_EQ(back.wait_for_stinger, true);
+	obs_data_release(data);
+
+	obs_data_t *empty = obs_data_create();
+	EXPECT_EQ(smulti::scene_link_load(empty).wait_for_stinger, false);
+	obs_data_release(empty);
+}

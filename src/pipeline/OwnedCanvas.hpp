@@ -95,10 +95,11 @@ public:
 	void follow_scene(const std::string &main_scene);
 
 	/**
-	 * Milliseconds after transition_start at which the vertical switch should happen: the stinger's
-	 * transition point when `transition` is a stinger, else 0. Any thread (reads source settings only).
+	 * Milliseconds after transition_start at which the vertical switch should happen: 0 (simultaneous)
+	 * unless the link setting "wait for stinger transition point" is on and `transition` is a stinger,
+	 * then its transition point. Any thread (reads source settings and the guarded link settings only).
 	 */
-	static int switch_delay_ms(obs_source_t *transition);
+	int switch_delay_ms(obs_source_t *transition) const;
 
 private:
 	void remember(obs_canvas_t *canvas);

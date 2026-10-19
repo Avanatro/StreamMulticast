@@ -405,9 +405,10 @@ void OwnedCanvas::on_scene_renamed(const std::string &old_name, const std::strin
 	rename_scene_in_links(m_links, old_name, new_name);
 }
 
-int OwnedCanvas::switch_delay_ms(obs_source_t *transition)
+int OwnedCanvas::switch_delay_ms(obs_source_t *transition) const
 {
-	if (!transition)
+	const SceneLinkSettings settings = link_settings();
+	if (!transition || !settings.wait_for_stinger)
 		return 0;
 
 	const char *id = obs_source_get_id(transition);
@@ -426,7 +427,7 @@ int OwnedCanvas::switch_delay_ms(obs_source_t *transition)
 	obs_video_info ovi = {};
 	if (!obs_get_video_info(&ovi))
 		return 0;
-	return linked_switch_delay_ms(transition_id, tp_type, point, ovi.fps_num, ovi.fps_den);
+	return linked_switch_delay_ms(settings, transition_id, tp_type, point, ovi.fps_num, ovi.fps_den);
 }
 
 void OwnedCanvas::follow_program_scene()

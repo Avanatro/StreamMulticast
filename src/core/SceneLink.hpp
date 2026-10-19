@@ -22,14 +22,18 @@ namespace smulti {
 /** Save-callback keys (scene collection data). */
 inline constexpr const char *kSceneLinkMapKey = "streammulticast_vertical_links";
 inline constexpr const char *kSceneLinkEnabledKey = "streammulticast_vertical_link_enabled";
+inline constexpr const char *kSceneLinkWaitStingerKey = "streammulticast_vertical_link_wait_stinger";
 
 /**
  * Link between the main program scene and the scene on channel 0 of the owned
  * vertical canvas. `explicit_map` maps main scene name -> vertical scene name;
  * "" means "keep the current vertical scene". No entry means "auto".
+ * `wait_for_stinger`: delay the vertical switch to the stinger's transition point; off (the default)
+ * switches the vertical canvas at transition_start, simultaneously with the main transition.
  */
 struct SceneLinkSettings {
 	bool enabled = true;
+	bool wait_for_stinger = false;
 	std::map<std::string, std::string> explicit_map;
 };
 
@@ -57,13 +61,17 @@ inline constexpr const char *kStingerTransitionId = "obs_stinger_transition";
 int linked_switch_delay_ms(const std::string &transition_id, std::int64_t tp_type, std::int64_t transition_point,
 			   std::uint32_t fps_num, std::uint32_t fps_den);
 
+/** Same, gated by the link settings: 0 (switch at transition_start) unless `wait_for_stinger` is on. */
+int linked_switch_delay_ms(const SceneLinkSettings &settings, const std::string &transition_id, std::int64_t tp_type,
+			   std::int64_t transition_point, std::uint32_t fps_num, std::uint32_t fps_den);
+
 /** A scene was renamed: re-key / re-target explicit entries. Returns true when anything changed. */
 bool rename_scene_in_links(SceneLinkSettings &settings, const std::string &old_name, const std::string &new_name);
 
-/** Write enabled flag and map into collection data. */
+/** Write enabled flag, stinger option and map into collection data. */
 void scene_link_save(obs_data_t *data, const SceneLinkSettings &settings);
 
-/** Read settings from collection data; missing keys yield the defaults (enabled, empty map). */
+/** Read settings from collection data; missing keys yield the defaults (enabled, no stinger wait, empty map). */
 SceneLinkSettings scene_link_load(obs_data_t *data);
 
 } // namespace smulti

@@ -115,7 +115,9 @@ static void schedule_follow(const std::string &main_scene, int delay_ms)
  * transition runs; the frontend's SCENE_CHANGED only follows at transition end (OBSBasic::
  * TransitionStopped), or at once for the force/cut path. The callback runs on the thread that
  * started the transition, so it only reads names and queues to the UI thread. Fires for whatever
- * transition is on output channel 0, so a per-scene override transition is covered too. */
+ * transition is on output channel 0, so a per-scene override transition is covered too.
+ * By default the vertical canvas switches right away (simultaneous with the main transition); only
+ * the link option "wait for stinger transition point" delays it to the stinger's point. */
 static void on_transition_start(void *, calldata_t *cd)
 {
 	if (!g_module_alive.load() || !g_owned_canvas)
@@ -139,9 +141,7 @@ static void on_transition_start(void *, calldata_t *cd)
 	if (main_scene.empty())
 		return;
 
-	const int delay_ms = smulti::OwnedCanvas::switch_delay_ms(transition);
-	if (delay_ms <= 0)
-		return; // no stinger: SCENE_CHANGED switches, nothing to anticipate
+	const int delay_ms = g_owned_canvas->switch_delay_ms(transition); // 0 unless waiting for a stinger
 
 	QTimer *context = g_follow_timer;
 	if (!context)
