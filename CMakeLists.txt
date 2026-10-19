@@ -99,6 +99,8 @@ target_sources(
     src/ui/CanvasPreview.cpp
     src/ui/VerticalCanvasDock.cpp
     src/ui/VerticalSceneList.cpp
+    src/ui/VerticalItemList.cpp
+    src/ui/TransformEditor.cpp
 )
 
 # Include directories

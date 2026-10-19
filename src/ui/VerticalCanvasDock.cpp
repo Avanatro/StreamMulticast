@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalCanvasDock.hpp"
 
 #include "CanvasPreview.hpp"
+#include "VerticalItemList.hpp"
 #include "VerticalSceneList.hpp"
 
 #include <QVBoxLayout>
@@ -29,8 +30,8 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, QWidget *parent) : Q
 	m_tabs = new QTabWidget(this);
 	m_scenes = new VerticalSceneList(canvas, m_tabs);
 	m_tabs->addTab(m_scenes, tr("Scenes"));
-	/* Reserved for the source controls (later task). */
-	m_tabs->addTab(new QWidget(m_tabs), tr("Sources"));
+	m_items = new VerticalItemList(canvas, m_tabs);
+	m_tabs->addTab(m_items, tr("Sources"));
 	layout->addWidget(m_tabs, 2);
 }
 
@@ -44,18 +45,24 @@ void VerticalCanvasDock::refresh_scenes()
 {
 	if (m_scenes)
 		m_scenes->refresh();
+	if (m_items)
+		m_items->refresh();
 }
 
 void VerticalCanvasDock::detach_scene_signals()
 {
 	if (m_scenes)
 		m_scenes->detach_signals();
+	if (m_items)
+		m_items->detach_signals();
 }
 
 void VerticalCanvasDock::shutdown_preview()
 {
 	if (m_scenes)
 		m_scenes->shutdown();
+	if (m_items)
+		m_items->shutdown();
 	if (m_preview)
 		m_preview->shutdown();
 }

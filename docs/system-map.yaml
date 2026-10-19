@@ -477,6 +477,10 @@ nodes:
       - src/ui/CanvasPreview.cpp
       - src/ui/VerticalSceneList.hpp
       - src/ui/VerticalSceneList.cpp
+      - src/ui/VerticalItemList.hpp
+      - src/ui/VerticalItemList.cpp
+      - src/ui/TransformEditor.hpp
+      - src/ui/TransformEditor.cpp
     works_when:
       - id: ui-vertical-dock.preview
         behavior: "The dock (id avanatro_streammulticast_vertical) previews the owned canvas through an obs_display whose draw callback takes a canvas ref per frame via OwnedCanvas::get_ref() and renders nothing when it is null; the canvas is fitted into the widget without stretching. The display is destroyed before the canvas ref owner and the widget go away (FRONTEND EXIT, module unload, destructor). Only compiled locally (plugin target built), not run in OBS."
@@ -489,6 +493,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: add, rename, remove and set active change the preview; the active scene survives an OBS restart; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-11)"
+            result: pending
+      - id: ui-vertical-dock.items-and-transform
+        behavior: "The Sources tab lists the items of the active scene (channel 0) of the owned canvas, top item first. Add source offers the existing inputs (obs_enum_sources, type input) and calls obs_scene_add (adds a reference, the input is not modified); Remove (confirmed) calls obs_sceneitem_remove; Up/Down use obs_sceneitem_set_order; the checkbox uses obs_sceneitem_set_visible. The transform panel applies Fit and Fill (smulti::layout::fit / fill with obs_source_get_width/height and 1080x1920) and numeric pos/scale/crop (layout::clamp_crop), written in one obs_sceneitem_defer_update_begin/end block with OBS_BOUNDS_NONE, top-left alignment and rotation 0. Scene item refs are taken and released inside one UI-thread call (items are tracked by id); writes only happen after checking the scene belongs to the owned canvas. The list refreshes (queued, coalesced) on canvas channel_change/source_remove/source_rename and the active scene's item_add/item_remove/reorder/item_visible/item_transform/refresh; all signals are detached before the canvas is released, and every entry point returns early after shutdown. Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: Fill on the webcam source fills 1080x1920 centred; numeric edits move the item; add, remove, reorder and visibility change the preview; switching scene collection and quitting OBS do not crash (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-12)"
             result: pending
     status: building
   - id: plugin-entry

@@ -136,6 +136,8 @@ void VerticalSceneList::queue_refresh()
 		this,
 		[this] {
 			m_refresh_queued = false;
+			if (m_shutdown.load())
+				return;
 			refresh();
 		},
 		Qt::QueuedConnection);
@@ -198,6 +200,8 @@ void VerticalSceneList::detach_signals()
 
 void VerticalSceneList::refresh()
 {
+	if (m_shutdown.load())
+		return; // unload may destroy the owned canvas before the dock is removed
 	const QString previous = selected_scene();
 
 	SceneNames scenes;
@@ -265,6 +269,8 @@ void VerticalSceneList::update_buttons()
 
 void VerticalSceneList::on_add()
 {
+	if (m_shutdown.load())
+		return;
 	obs_canvas_t *canvas = m_canvas.get_ref();
 	if (!canvas) {
 		refresh();
@@ -292,6 +298,8 @@ void VerticalSceneList::on_add()
 
 void VerticalSceneList::on_rename()
 {
+	if (m_shutdown.load())
+		return;
 	const QString old_name = selected_scene();
 	if (old_name.isEmpty())
 		return;
@@ -300,7 +308,7 @@ void VerticalSceneList::on_rename()
 	bool ok = false;
 	const QString entered =
 		QInputDialog::getText(this, tr("Rename scene"), tr("Scene name:"), QLineEdit::Normal, old_name, &ok);
-	if (!ok)
+	if (m_shutdown.load() || !ok)
 		return;
 	const QString new_name = entered.trimmed();
 	if (new_name.isEmpty()) {
@@ -335,6 +343,8 @@ void VerticalSceneList::on_rename()
 
 void VerticalSceneList::on_remove()
 {
+	if (m_shutdown.load())
+		return;
 	const QString name = selected_scene();
 	if (name.isEmpty())
 		return;
@@ -343,7 +353,7 @@ void VerticalSceneList::on_remove()
 	const auto answer = QMessageBox::question(this, tr("Remove scene"),
 						  tr("Remove the scene \"%1\" from the vertical canvas?").arg(name),
 						  QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-	if (answer != QMessageBox::Yes)
+	if (m_shutdown.load() || answer != QMessageBox::Yes)
 		return;
 
 	obs_canvas_t *canvas = m_canvas.get_ref();
@@ -402,6 +412,8 @@ void VerticalSceneList::on_remove()
 
 void VerticalSceneList::on_set_active()
 {
+	if (m_shutdown.load())
+		return;
 	const QString name = selected_scene();
 	if (name.isEmpty())
 		return;

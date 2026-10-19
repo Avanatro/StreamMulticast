@@ -14,6 +14,7 @@ namespace smulti {
 
 class CanvasPreview;
 class OwnedCanvas;
+class VerticalItemList;
 class VerticalSceneList;
 
 /**
@@ -43,6 +44,7 @@ public:
 private:
 	CanvasPreview *m_preview = nullptr;
 	VerticalSceneList *m_scenes = nullptr;
+	VerticalItemList *m_items = nullptr;
 	QTabWidget *m_tabs = nullptr;
 };
 
