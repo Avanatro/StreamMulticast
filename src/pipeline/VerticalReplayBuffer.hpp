@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <ctime>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // libobs forward declarations
@@ -61,6 +62,13 @@ enum class VerticalReplayState : int {
  * after the output and the encoders, on the ControllerReaper thread. stop_now (canvas removed, scene
  * collection changing, scripting shutdown, exit, unload) is non-blocking; the signals are disconnected outside
  * the mutex (libobs holds the signal mutex across the callback).
+ *
+ * Runtime encode error: the recorder's rule (vertical_record_runtime_fallback). When an NVENC session that was
+ * still buffering stops with OBS_OUTPUT_ENCODE_ERROR, finish() keeps the error in last_error() (dock status),
+ * logs one warning and posts one restart with x264 CRF 20 (the buffered seconds before the error are lost). A
+ * pending restart is cancelled by stop / stop_now / shutdown and, for a buffer started with the main replay
+ * buffer, by on_main_replay_stopping. A second encode error, or a failed restart, ends the buffer; save() then
+ * logs a warning with the reason instead of the plain "not buffering" line.
  */
 class VerticalReplayBuffer {
 public:
@@ -103,6 +111,9 @@ private:
 		std::string scene;
 	};
 
+	bool start_session(bool with_main, const std::optional<RecordEncoderChoice> &forced, bool runtime_restart);
+	void restart_after_encode_error(const RecordEncoderChoice &choice, const std::string &failed_encoder,
+					bool with_main); ///< UI thread
 	bool try_start(const RecordEncoderChoice &choice, obs_canvas_t *canvas, video_t *video,
 		       const VerticalReplaySettings &settings, const std::string &folder, bool with_main,
 		       std::string &error);
@@ -130,6 +141,12 @@ private:
 	PendingClip m_pending;
 	std::string m_last_clip;
 	std::string m_error;
+	std::string m_encoder_id;          ///< video encoder type id of the running session
+	bool m_runtime_restarted = false;  ///< the running session is the runtime fallback restart
+	/* A runtime restart posted by finish(): cleared by every stop path, consumed by restart_after_encode_error. */
+	bool m_restart_pending = false;
+	bool m_restart_with_main = false;  ///< "started with main" of the session the pending restart continues
+	bool m_restart_failed = false;     ///< the runtime restart was refused; save() warns until the next start
 	std::atomic<std::uint64_t> m_session_id{0};
 	std::function<void()> m_listener;
 	bool m_shut_down = false;

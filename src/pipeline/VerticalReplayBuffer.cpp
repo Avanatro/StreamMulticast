@@ -12,6 +12,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalRecorder.hpp"
 #include "../plugin-support.h"
 
+#include <obs-frontend-api.h>
 #include <obs-module.h>
 #include <util/platform.h>
 
@@ -96,6 +97,12 @@ void VerticalReplayBuffer::fail(const std::string &reason)
 
 bool VerticalReplayBuffer::start(bool with_main)
 {
+	return start_session(with_main, std::nullopt, false);
+}
+
+bool VerticalReplayBuffer::start_session(bool with_main, const std::optional<RecordEncoderChoice> &forced,
+					 bool runtime_restart)
+{
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_shut_down || m_state != VerticalReplayState::Idle)
@@ -124,7 +131,8 @@ bool VerticalReplayBuffer::start(bool with_main)
 	obs_canvas_t *canvas = cv.canvas;
 	video_t *video = cv.video;
 
-	RecordEncoderChoice choice = choose_vertical_record_encoder(EncoderFactory::available_encoder_types());
+	RecordEncoderChoice choice =
+		forced ? *forced : choose_vertical_record_encoder(EncoderFactory::available_encoder_types());
 	const bool started = start_with_encoder_fallback(
 		"vertical replay", choice, error, [&](const RecordEncoderChoice &c, std::string &err) {
 			return try_start(c, canvas, video, settings, folder.folder, with_main, err);
@@ -135,6 +143,11 @@ bool VerticalReplayBuffer::start(bool with_main)
 		reap(only_canvas, false);
 		fail(error + ". Not buffering.");
 		return false;
+	}
+	{
+		/* Before any posted finish() of this session can run (both on the UI thread). */
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_runtime_restarted = runtime_restart;
 	}
 
 	obs_log(LOG_INFO, "vertical replay: buffering %d s (max %d MB) into \"%s\" (%s %s %d%s)", settings.seconds,
@@ -181,6 +194,8 @@ bool VerticalReplayBuffer::try_start(const RecordEncoderChoice &choice, obs_canv
 		m_folder = folder;
 		m_pending = PendingClip{};
 		m_error.clear();
+		m_encoder_id = choice.type_id;
+		m_restart_failed = false;
 		m_session_id.fetch_add(1);
 	}
 
@@ -206,6 +221,7 @@ void VerticalReplayBuffer::stop()
 	std::uint64_t session = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_pending = false; // also when Idle: a stop cancels a posted runtime restart
 		if (m_state != VerticalReplayState::Buffering)
 			return;
 		m_state = VerticalReplayState::Stopping;
@@ -232,15 +248,25 @@ bool VerticalReplayBuffer::save()
 {
 	obs_output_t *output = nullptr;
 	obs_canvas_t *canvas = nullptr;
+	bool restart_failed = false;
+	std::string error;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_state == VerticalReplayState::Buffering) {
 			output = m_session.output;
 			canvas = m_session.canvas;
 		}
+		restart_failed = m_restart_failed;
+		error = m_error;
 	}
 	if (!output || !obs_output_active(output)) {
-		obs_log(LOG_INFO, "vertical replay: not buffering, no clip saved");
+		if (restart_failed)
+			obs_log(LOG_WARNING,
+				"vertical replay: NO CLIP SAVED, the buffer stopped after an encode error and its restart "
+				"failed: %s",
+				error.c_str());
+		else
+			obs_log(LOG_INFO, "vertical replay: not buffering, no clip saved");
 		return false;
 	}
 	/* UI thread, like every teardown of the session: its canvas ref stays valid here. The scene and the date
@@ -273,6 +299,8 @@ void VerticalReplayBuffer::on_main_replay_stopping()
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		with_main = m_started_with_main && m_state == VerticalReplayState::Buffering;
+		if (m_restart_with_main)
+			m_restart_pending = false; // a restart of a hand-started buffer stays pending
 	}
 	if (with_main)
 		stop(); // a buffer started by hand keeps running
@@ -283,6 +311,7 @@ void VerticalReplayBuffer::stop_now(const char *reason)
 	obs_output_t *output = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_pending = false; // also when Idle: a forced stop cancels a posted runtime restart
 		if (m_state == VerticalReplayState::Idle)
 			return;
 		output = m_session.output;
@@ -411,26 +440,89 @@ void VerticalReplayBuffer::finish(std::uint64_t session, long long code)
 	}
 	disconnect_signals(output);
 
+	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
 	std::string error;
+	std::string failed_encoder;
+	bool with_main = false;
+	std::optional<RecordEncoderChoice> restart;
 	Session s;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (session != m_session_id.load())
 			return;
+		with_main = m_started_with_main;
+		failed_encoder = m_encoder_id;
+		/* The recorder's rule: never after a requested stop (Stopping), only a buffer that was still running. */
+		if (m_state == VerticalReplayState::Buffering)
+			restart = vertical_record_runtime_fallback(code, m_encoder_id, m_runtime_restarted, available);
+		m_restart_pending = restart.has_value();
+		m_restart_with_main = with_main;
 		if (code != OBS_OUTPUT_SUCCESS) {
 			const char *err = output ? obs_output_get_last_error(output) : nullptr;
 			m_error = "The replay buffer stopped with code " + std::to_string(code) +
 				  (err ? std::string(": ") + err : "");
+			if (restart)
+				m_error += " (encode error with " + failed_encoder + ", restarting with " + restart->type_id + ")";
 			error = m_error;
 		}
 		s = detach_locked();
 	}
 	reap(s, false);
 
+	if (restart) {
+		obs_log(LOG_WARNING,
+			"vertical replay: encode error with %s, the buffered seconds are lost; restarting once with %s %s %d",
+			failed_encoder.c_str(), restart->type_id.c_str(), restart->rate_control.c_str(), restart->quality);
+		const RecordEncoderChoice choice = *restart;
+		if (m_post)
+			m_post([this, choice, failed_encoder, with_main]() {
+				restart_after_encode_error(choice, failed_encoder, with_main);
+			});
+		notify();
+		return;
+	}
+
 	if (code == OBS_OUTPUT_SUCCESS)
 		obs_log(LOG_INFO, "vertical replay: stopped");
 	else
 		obs_log(LOG_WARNING, "vertical replay: %s", error.c_str());
+	notify();
+}
+
+void VerticalReplayBuffer::restart_after_encode_error(const RecordEncoderChoice &choice,
+						      const std::string &failed_encoder, bool with_main)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		const bool pending = m_restart_pending;
+		m_restart_pending = false;
+		/* Cancelled by stop / stop_now / main replay buffer stopping / shutdown, or started again by hand. */
+		if (!pending || m_shut_down || m_state != VerticalReplayState::Idle)
+			return;
+	}
+	if (with_main && !obs_frontend_replay_buffer_active()) {
+		obs_log(LOG_INFO, "vertical replay: not restarted, the main replay buffer has stopped meanwhile");
+		return;
+	}
+	if (start_session(with_main, choice, true)) {
+		/* Keep the failure visible in the dock while the restarted buffer runs. */
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_error = "Encode error with " + failed_encoder + ": restarted with " + choice.type_id +
+				  ", clips start after the restart";
+		}
+		notify();
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_failed = true;
+		m_error = "Encode error with " + failed_encoder + ", the restart with " + choice.type_id +
+			  " failed: " + m_error;
+	}
+	obs_log(LOG_WARNING, "vertical replay: the restart after an encode error with %s failed, no clips until the "
+			     "buffer is started again",
+		failed_encoder.c_str());
 	notify();
 }
 

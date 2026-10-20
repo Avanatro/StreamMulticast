@@ -314,3 +314,24 @@ SMULTI_TEST(vertical_clip_path_avoids_existing_files)
 	/* the recording keeps its MKV default */
 	EXPECT_EQ(smulti::vertical_record_file_path("E:/R", "s", exists), "E:/R/s.mkv");
 }
+
+SMULTI_TEST(vertical_replay_runtime_error_restarts_once)
+{
+	/* The replay buffer reuses the recorder's runtime rule with the encoder its start chose. */
+	const std::set<std::string> all = {"obs_x264", "jim_hevc_nvenc", "obs_nvenc_hevc_tex"};
+	const long long encode_error = -8; // OBS_OUTPUT_ENCODE_ERROR
+	const RecordEncoderChoice started = smulti::choose_vertical_record_encoder(all);
+	EXPECT_TRUE(started.type_id != "obs_x264"); // an NVENC session
+	/* first encode error of the running buffer: one restart with x264 */
+	std::optional<RecordEncoderChoice> first =
+		smulti::vertical_record_runtime_fallback(encode_error, started.type_id, false, all);
+	EXPECT_TRUE(first.has_value());
+	EXPECT_EQ(first ? first->type_id : std::string(), "obs_x264");
+	/* the restarted buffer (already_restarted, x264) never restarts again */
+	const std::string restarted = first ? first->type_id : std::string("obs_x264");
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(encode_error, restarted, true, all).has_value());
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(encode_error, started.type_id, true, all).has_value());
+	/* a requested stop (success) or a non-encoder code never restarts */
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(0, started.type_id, false, all).has_value());
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(-7, started.type_id, false, all).has_value());
+}
