@@ -373,7 +373,10 @@ void VerticalRecorder::on_main_recording_stopping()
 	bool with_main;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_restart_pending = false; // the main recording is stopping: no runtime restart after it
+		/* The main recording is stopping: no runtime restart of a session started with it; the restart of a
+		 * vertical recording started by hand stays pending, like the recording itself would keep running. */
+		if (m_restart_with_main)
+			m_restart_pending = false;
 		with_main = m_started_with_main && m_state == VerticalRecordState::Recording;
 	}
 	if (with_main)
@@ -497,6 +500,7 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 		if (m_state == VerticalRecordState::Recording)
 			restart = vertical_record_runtime_fallback(code, m_encoder_id, m_runtime_restarted, available);
 		m_restart_pending = restart.has_value();
+		m_restart_with_main = with_main;
 		if (code != OBS_OUTPUT_SUCCESS) {
 			const char *err = output ? obs_output_get_last_error(output) : nullptr;
 			m_error = "The recording stopped with code " + std::to_string(code) +

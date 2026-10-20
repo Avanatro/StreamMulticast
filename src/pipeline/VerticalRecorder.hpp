@@ -146,8 +146,12 @@ private:
 	std::string m_file;
 	std::string m_encoder_id;          ///< video encoder type id of the running session
 	bool m_runtime_restarted = false;  ///< the running session is the runtime fallback restart
-	/** finish() posted a runtime fallback restart; stop/stop_now/main stopping/shutdown cancel it. */
+	/**
+	 * finish() posted a runtime fallback restart; stop/stop_now/shutdown cancel it, the main recording
+	 * stopping cancels it only when the restarted session was started with the main recording.
+	 */
 	bool m_restart_pending = false;
+	bool m_restart_with_main = false; ///< "started with main" of the session the pending restart continues
 	std::string m_error;
 	VerticalRecordSettings m_settings;
 	size_t m_hotkey = static_cast<size_t>(-1);
