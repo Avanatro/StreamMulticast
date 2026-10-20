@@ -115,12 +115,12 @@ The **StreamMulticast Vertical** dock preview can be edited like the OBS main pr
 
 The combo box **Safe zone** above the vertical preview shades the areas that the TikTok or YouTube Shorts app covers with its own interface (title bar, caption and comments, the button column on the right) in translucent red and outlines the remaining safe rectangle with a thin dashed white line. Dragging an item in the preview snaps its edges to that rectangle (hold **Ctrl** to move freely). The overlay is drawn in the preview only: it is never part of the canvas, so it does not appear in the stream or in a recording. The choice is remembered per user (OBS user config, section `StreamMulticast`, key `SafeZoneProfile`).
 
-**The numbers are approximate.** TikTok publishes no margins for LIVE; Shorts publishes none for organic video. Both sets below are for a 1080x1920 frame and are scaled linearly to other canvas sizes. They live in one table in `src/core/SafeZone.cpp`:
+**The numbers are approximate.** We found no official margins for TikTok LIVE or for organic Shorts. Both sets below are for a 1080x1920 frame and are scaled linearly to other canvas sizes. They live in one table in `src/core/SafeZone.cpp`:
 
 | Profile | Top | Bottom | Left | Right | Source |
 |---|---|---|---|---|---|
 | TikTok (approx.) | 240 | 660 | 120 | 120 | TikTok's In-Feed Ads template (720x1280, scaled) as published by [socialync.io](https://socialync.io/tools/safe-zones/tiktok); the right-hand button column (x 900..1080, y 840..1260) is socialync.io's own measurement. Other tools give 160-254 top and 480-707 bottom, so check on your phone once. |
-| Shorts (approx.) | 288 | 672 | 48 | 192 | Google Ads Help, [safe zones for vertical video ads](https://support.google.com/google-ads/answer/9128498), 15 % / 35 % / 4 % / 18 % of the frame, as quoted by [socialync.io](https://www.socialync.io/tools/safe-zones/youtube-shorts) and [revid.ai](https://www.revid.ai/youtube-shorts-safe-zone). Published for ads. |
+| Shorts (approx.) | 288 | 672 | 48 | 192 | Third-party figures from [socialync.io](https://www.socialync.io/tools/safe-zones/youtube-shorts) and [revid.ai](https://www.revid.ai/youtube-shorts-safe-zone), not verified against Google's page (Google publishes a reference image for vertical video ads only). Ad-oriented; organic Shorts may differ. |
 
 ### Editing sources from the vertical dock
 

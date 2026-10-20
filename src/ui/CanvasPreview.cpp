@@ -351,8 +351,14 @@ void CanvasPreview::draw_overlay(const Overlay &ov, layout::Size canvas, float c
 			draw_rect(zone.unsafe_bottom);
 			draw_rect(zone.unsafe_left);
 			draw_rect(zone.unsafe_right);
-			if (zone.has_action_column)
-				draw_rect(zone.action_column);
+			if (zone.has_action_column) {
+				/* Clip to the safe rect so the column does not darken the right band a second time. */
+				layout::Rect col = zone.action_column;
+				const int right = std::min(col.x + col.w, zone.safe.x + zone.safe.w);
+				col.x = std::max(col.x, zone.safe.x);
+				col.w = right - col.x;
+				draw_rect(col);
+			}
 		}
 		vec4_set(&c, 1.0f, 1.0f, 1.0f, 0.9f);
 		gs_effect_set_vec4(color, &c);

@@ -25,8 +25,8 @@ struct Row {
 };
 
 /*
- * ONE table, one source comment per row. All numbers are APPROXIMATIONS: neither platform publishes
- * margins for LIVE or organic video, the figures come from the ad templates and third-party tools, and
+ * ONE table, one source comment per row. All numbers are APPROXIMATIONS: we found no official margins
+ * for TikTok LIVE or organic Shorts, the figures come from the ad templates and third-party tools, and
  * the apps move their UI between versions. Adjust here only; nothing else holds a zone number.
  *
  * TikTok (approximation): top 240, bottom 660, left/right 120 from TikTok's In-Feed Ads template (720x1280
@@ -35,10 +35,10 @@ struct Row {
  * TikTok; its height is a planner estimate. Other tools publish 160..254 top and 480..707 bottom
  * (adkit.so, revid.ai, poster.ly); this set is the most conservative that still leaves a usable centre.
  *
- * Shorts (approximation): top 288, bottom 672, left 48, right 192 from Google Ads Help "safe zones for
- * vertical video ads" (https://support.google.com/google-ads/answer/9128498, 15% / 35% / 4% / 18% of the
- * frame), as quoted by https://www.socialync.io/tools/safe-zones/youtube-shorts and https://www.revid.ai/youtube-shorts-safe-zone.
- * Published for ads; organic Shorts may differ. No button column is given.
+ * Shorts (approximation): top 288, bottom 672, left 48, right 192. Third-party figures from
+ * https://www.socialync.io/tools/safe-zones/youtube-shorts and https://www.revid.ai/youtube-shorts-safe-zone,
+ * NOT verified against Google's page (Google publishes a reference image for vertical video ads only).
+ * Ad-oriented; organic Shorts may differ. No button column is given.
  */
 constexpr Row kTikTok = {240, 660, 120, 120, true, 900, 840, 180, 420};
 constexpr Row kShorts = {288, 672, 48, 192, false, 0, 0, 0, 0};
