@@ -216,11 +216,17 @@ std::string format_record_file_stem(const std::string &format, const std::tm &ti
 std::string vertical_record_file_path(const std::string &folder, const std::string &stem,
 				      const std::function<bool(const std::string &)> &exists, const std::string &extension)
 {
-	const std::string base = trim_trailing_separators(folder) + "/" + stem;
-	std::string path = base + extension;
+	std::string path = vertical_record_numbered_path(folder, stem, 1, extension);
 	for (int n = 2; exists && exists(path) && n < 1000; ++n)
-		path = base + " (" + std::to_string(n) + ")" + extension;
+		path = vertical_record_numbered_path(folder, stem, n, extension);
 	return path;
+}
+
+std::string vertical_record_numbered_path(const std::string &folder, const std::string &stem, int n,
+					  const std::string &extension)
+{
+	const std::string base = trim_trailing_separators(folder) + "/" + stem;
+	return n <= 1 ? base + extension : base + " (" + std::to_string(n) + ")" + extension;
 }
 
 std::tm local_time(std::time_t t)

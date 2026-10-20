@@ -96,6 +96,10 @@ std::string vertical_record_file_path(const std::string &folder, const std::stri
 				      const std::function<bool(const std::string &)> &exists,
 				      const std::string &extension = ".mkv");
 
+/** Candidate `n` of vertical_record_file_path: n <= 1 "<folder>/<stem><extension>", else "... (n)<extension>". */
+std::string vertical_record_numbered_path(const std::string &folder, const std::string &stem, int n,
+					  const std::string &extension);
+
 /** Local time of `t` (the date and time parts of the file names). */
 std::tm local_time(std::time_t t);
 

@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/VerticalRecord.hpp"
 #include "EncoderFactory.hpp"
+#include "VerticalEncodeSession.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -93,12 +94,7 @@ public:
 	void set_state_listener(std::function<void()> listener);
 
 private:
-	struct Session {
-		obs_output_t *output = nullptr;
-		obs_encoder_t *video = nullptr;
-		obs_encoder_t *audio = nullptr;
-		obs_canvas_t *canvas = nullptr;
-	};
+	using Session = VerticalSession;
 
 	/** Name parts taken at save() time; the "saved" signal consumes them (latest save wins). */
 	struct PendingClip {

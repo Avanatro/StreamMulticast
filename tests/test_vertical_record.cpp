@@ -308,6 +308,9 @@ SMULTI_TEST(vertical_clip_path_avoids_existing_files)
 	existing.insert("E:/Clips/vertical/2026-10-19 07-05-09-V Gaming (2).mp4");
 	EXPECT_EQ(smulti::vertical_record_file_path("E:/Clips/vertical", stem, exists, ".mp4"),
 		  "E:/Clips/vertical/2026-10-19 07-05-09-V Gaming (3).mp4");
+	/* the candidate names the non-replacing clip move walks through */
+	EXPECT_EQ(smulti::vertical_record_numbered_path("E:/c/", "s", 1, ".mp4"), "E:/c/s.mp4");
+	EXPECT_EQ(smulti::vertical_record_numbered_path("E:/c", "s", 7, ".mp4"), "E:/c/s (7).mp4");
 	/* the recording keeps its MKV default */
 	EXPECT_EQ(smulti::vertical_record_file_path("E:/R", "s", exists), "E:/R/s.mkv");
 }

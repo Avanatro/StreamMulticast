@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/VerticalRecord.hpp"
 #include "EncoderFactory.hpp"
+#include "VerticalEncodeSession.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -114,12 +115,7 @@ public:
 	void set_state_listener(std::function<void()> listener);
 
 private:
-	struct Session {
-		obs_output_t *output = nullptr;
-		obs_encoder_t *video = nullptr;
-		obs_encoder_t *audio = nullptr;
-		obs_canvas_t *canvas = nullptr;
-	};
+	using Session = VerticalSession;
 
 	/**
 	 * One start attempt with `choice`. On success the session (with `canvas`, whose ref then belongs to it)

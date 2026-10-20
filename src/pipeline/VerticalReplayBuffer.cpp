@@ -15,8 +15,6 @@ GPLv2 — see LICENSE for full text.
 #include <obs-module.h>
 #include <util/platform.h>
 
-#include <optional>
-#include <set>
 #include <utility>
 
 namespace smulti {
@@ -24,8 +22,6 @@ namespace smulti {
 namespace {
 
 constexpr const char *kOutputName = "StreamMulticast Vertical Replay";
-constexpr int kAudioBitrateKbps = 160; // same as the vertical recording (track 1)
-constexpr size_t kMainMixTrack1 = 0;
 
 /** File name format of the buffer's own write; the "saved" handler renames it to the clip name. */
 std::string replay_file_format()
@@ -113,36 +109,26 @@ bool VerticalReplayBuffer::start(bool with_main)
 		return false;
 	}
 
-	/* Strong ref for the whole session: it keeps the canvas's video_t (the encoder's input) alive. */
-	obs_canvas_t *canvas = m_owned.get_ref();
-	if (!canvas) {
-		fail("The vertical canvas is not available. Not buffering.");
-		return false;
-	}
-	video_t *video = obs_canvas_get_video(canvas);
-	if (!video) {
-		Session only_canvas;
-		only_canvas.canvas = canvas;
-		reap(only_canvas, false);
-		fail("The vertical canvas has no video yet. Not buffering.");
+	std::string error;
+	if (!ensure_vertical_folder(folder.folder, error)) {
+		fail(error + " Not buffering.");
 		return false;
 	}
 
-	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
-	RecordEncoderChoice choice = choose_vertical_record_encoder(available);
-	std::string error;
-	bool started = try_start(choice, canvas, video, settings, folder.folder, with_main, error);
-	if (!started) {
-		/* NVENC registered but refused (session limit, init error): once more with x264 CRF 20. */
-		const std::optional<RecordEncoderChoice> fallback = vertical_record_fallback_encoder(choice.type_id, available);
-		if (fallback) {
-			obs_log(LOG_WARNING, "vertical replay: %s with %s, retrying with %s %s %d", error.c_str(),
-				choice.type_id.c_str(), fallback->type_id.c_str(), fallback->rate_control.c_str(),
-				fallback->quality);
-			choice = *fallback;
-			started = try_start(choice, canvas, video, settings, folder.folder, with_main, error);
-		}
+	/* Strong ref for the whole session: it keeps the canvas's video_t (the encoder's input) alive. */
+	const VerticalCanvasVideo cv = acquire_vertical_canvas_video(m_owned, m_reaper);
+	if (!cv.canvas) {
+		fail(cv.error + " Not buffering.");
+		return false;
 	}
+	obs_canvas_t *canvas = cv.canvas;
+	video_t *video = cv.video;
+
+	RecordEncoderChoice choice = choose_vertical_record_encoder(EncoderFactory::available_encoder_types());
+	const bool started = start_with_encoder_fallback(
+		"vertical replay", choice, error, [&](const RecordEncoderChoice &c, std::string &err) {
+			return try_start(c, canvas, video, settings, folder.folder, with_main, err);
+		});
 	if (!started) {
 		Session only_canvas; // try_start released everything it created; the canvas ref is still ours
 		only_canvas.canvas = canvas;
@@ -163,8 +149,7 @@ bool VerticalReplayBuffer::try_start(const RecordEncoderChoice &choice, obs_canv
 				     std::string &error)
 {
 	Session s; // without the canvas until the start succeeded: a failed attempt must not release it
-	s.video = m_factory.create_record_video_encoder(choice, std::string(kOutputName) + " video", video);
-	s.audio = m_factory.create_aac_encoder(std::string(kOutputName) + " audio", kAudioBitrateKbps, kMainMixTrack1);
+	create_vertical_encoders(m_factory, choice, kOutputName, video, s);
 
 	obs_data_t *output_settings = obs_data_create();
 	obs_data_set_int(output_settings, "max_time_sec", settings.seconds);
@@ -347,23 +332,7 @@ VerticalReplayBuffer::Session VerticalReplayBuffer::detach_locked()
 
 void VerticalReplayBuffer::reap(Session s, bool force)
 {
-	if (!s.output && !s.video && !s.audio && !s.canvas)
-		return;
-	/* Off the UI thread, never on the graphics thread: the canvas ref goes LAST, after the encoders that read
-	 * its video_t and the output that holds them (the output joins its mux thread on release). */
-	m_reaper.enqueue([s, force]() {
-		if (s.output) {
-			if (force)
-				obs_output_force_stop(s.output);
-			obs_output_release(s.output);
-		}
-		if (s.video)
-			obs_encoder_release(s.video);
-		if (s.audio)
-			obs_encoder_release(s.audio);
-		if (s.canvas)
-			obs_canvas_release(s.canvas);
-	});
+	reap_vertical_session(m_reaper, s, force);
 }
 
 void VerticalReplayBuffer::on_output_stop(void *data, calldata_t *cd)
@@ -412,14 +381,13 @@ void VerticalReplayBuffer::rename_saved_clip()
 		/* Saved without save() (the output's own hotkey): name it after now; the scene is unknown here. */
 		pending.date = local_time(std::time(nullptr));
 	}
-	/* `folder` is the session's resolved clip folder (resolve_vertical_record_folder: never C:). */
-	const std::string clip =
-		vertical_record_file_path(folder, clip_file_stem(pending.date, pending.scene),
-					  [](const std::string &p) { return os_file_exists(p.c_str()); }, ".mp4");
-	std::string final_path = clip;
-	if (os_rename(written.c_str(), clip.c_str()) != 0) {
-		obs_log(LOG_WARNING, "vertical replay: could not rename \"%s\" to \"%s\", the clip keeps its name",
-			written.c_str(), clip.c_str());
+	/* `folder` is the session's resolved clip folder (resolve_vertical_record_folder: never C:). The move never
+	 * replaces a file: a name taken meanwhile gets the next " (N)". */
+	const std::string stem = clip_file_stem(pending.date, pending.scene);
+	std::string final_path = move_to_free_name(written, folder, stem, ".mp4");
+	if (final_path.empty()) {
+		obs_log(LOG_WARNING, "vertical replay: could not rename \"%s\" to \"%s\" in \"%s\", the clip keeps its name",
+			written.c_str(), stem.c_str(), folder.c_str());
 		final_path = written;
 	} else {
 		obs_log(LOG_INFO, "vertical replay: clip saved \"%s\"", final_path.c_str());

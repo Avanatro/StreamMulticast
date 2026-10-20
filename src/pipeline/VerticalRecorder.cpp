@@ -29,8 +29,6 @@ namespace {
 constexpr const char *kSettingsFile = "vertical-record.json";
 constexpr const char *kHotkeyKey = "hotkey";
 constexpr const char *kOutputName = "StreamMulticast Vertical Recording";
-constexpr int kAudioBitrateKbps = 160; // OBS default for recording track 1
-constexpr size_t kMainMixTrack1 = 0;
 constexpr size_t kNoHotkey = static_cast<size_t>(-1);
 
 std::string settings_path()
@@ -231,46 +229,31 @@ bool VerticalRecorder::start_session(bool with_main, const std::optional<RecordE
 		fail(folder.reason + " Not recording.");
 		return false;
 	}
-	if (os_mkdirs(folder.folder.c_str()) == MKDIR_ERROR) {
-		fail("Could not create the folder \"" + folder.folder + "\". Not recording.");
+	std::string error;
+	if (!ensure_vertical_folder(folder.folder, error)) {
+		fail(error + " Not recording.");
 		return false;
 	}
 
 	/* Strong ref for the whole session: it keeps the canvas's video_t (the encoder's input) alive. */
-	obs_canvas_t *canvas = m_owned.get_ref();
-	if (!canvas) {
-		fail("The vertical canvas is not available. Not recording.");
+	const VerticalCanvasVideo cv = acquire_vertical_canvas_video(m_owned, m_reaper);
+	if (!cv.canvas) {
+		fail(cv.error + " Not recording.");
 		return false;
 	}
-	video_t *video = obs_canvas_get_video(canvas);
-	if (!video) {
-		Session only_canvas;
-		only_canvas.canvas = canvas;
-		reap(only_canvas, false);
-		fail("The vertical canvas has no video yet. Not recording.");
-		return false;
-	}
+	obs_canvas_t *canvas = cv.canvas;
+	video_t *video = cv.video;
 
 	const std::string file = vertical_record_file_path(
 		folder.folder, format_record_file_stem(kVerticalRecordFileStemFormat, local_time(std::time(nullptr))),
 		[](const std::string &p) { return os_file_exists(p.c_str()); });
 
-	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
-	RecordEncoderChoice choice = forced ? *forced : choose_vertical_record_encoder(available);
-	std::string error;
-	bool started = try_start(choice, canvas, video, file, with_main, error);
-	if (!started) {
-		/* NVENC can be registered and still fail (session limit, init error): retry once with x264, so a
-		 * recording started together with the main one never silently produces no vertical file. */
-		const std::optional<RecordEncoderChoice> fallback = vertical_record_fallback_encoder(choice.type_id, available);
-		if (fallback) {
-			obs_log(LOG_WARNING, "vertical recording: %s with %s, retrying with %s %s %d", error.c_str(),
-				choice.type_id.c_str(), fallback->type_id.c_str(), fallback->rate_control.c_str(),
-				fallback->quality);
-			choice = *fallback;
-			started = try_start(choice, canvas, video, file, with_main, error);
-		}
-	}
+	RecordEncoderChoice choice =
+		forced ? *forced : choose_vertical_record_encoder(EncoderFactory::available_encoder_types());
+	const bool started = start_with_encoder_fallback(
+		"vertical recording", choice, error, [&](const RecordEncoderChoice &c, std::string &err) {
+			return try_start(c, canvas, video, file, with_main, err);
+		});
 	if (!started) {
 		Session only_canvas; // try_start released everything it created; the canvas ref is still ours
 		only_canvas.canvas = canvas;
@@ -294,8 +277,7 @@ bool VerticalRecorder::try_start(const RecordEncoderChoice &choice, obs_canvas_t
 				 const std::string &file, bool with_main, std::string &error)
 {
 	Session s; // without the canvas until the start succeeded: a failed attempt must not release it
-	s.video = m_factory.create_record_video_encoder(choice, std::string(kOutputName) + " video", video);
-	s.audio = m_factory.create_aac_encoder(std::string(kOutputName) + " audio", kAudioBitrateKbps, kMainMixTrack1);
+	create_vertical_encoders(m_factory, choice, kOutputName, video, s);
 
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "path", file.c_str());
@@ -447,23 +429,7 @@ VerticalRecorder::Session VerticalRecorder::detach_locked()
 
 void VerticalRecorder::reap(Session s, bool force)
 {
-	if (!s.output && !s.video && !s.audio && !s.canvas)
-		return;
-	/* Off the UI thread, and never on the graphics thread: the canvas ref is released LAST, after the
-	 * encoders that read its video_t and the output that holds them. */
-	m_reaper.enqueue([s, force]() {
-		if (s.output) {
-			if (force)
-				obs_output_force_stop(s.output);
-			obs_output_release(s.output);
-		}
-		if (s.video)
-			obs_encoder_release(s.video);
-		if (s.audio)
-			obs_encoder_release(s.audio);
-		if (s.canvas)
-			obs_canvas_release(s.canvas);
-	});
+	reap_vertical_session(m_reaper, s, force);
 }
 
 void VerticalRecorder::on_output_stop(void *data, calldata_t *cd)
