@@ -11,6 +11,7 @@ GPLv2 — see LICENSE for full text.
 #include "VerticalItemList.hpp"
 #include "VerticalSceneLink.hpp"
 #include "VerticalSceneList.hpp"
+#include "../pipeline/Autosave.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 #include "../pipeline/VerticalRecorder.hpp"
 
@@ -73,6 +74,7 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 			m_items->show_item_menu(pos, id, scene_uuid);
 	});
 	m_preview->set_edit_listener([this]() {
+		request_autosave("preview edit"); // once per finished drag / nudge / undo, never per mouse move
 		if (m_items)
 			m_items->reload_editor(true);
 	});

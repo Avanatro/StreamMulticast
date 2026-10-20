@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "VerticalSceneList.hpp"
 
+#include "../pipeline/Autosave.hpp"
 #include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 #include "ImportScenesDialog.hpp"
@@ -255,6 +256,8 @@ void VerticalSceneList::on_add()
 	refresh();
 	if (!created)
 		set_status(tr("Could not create a scene."));
+	else
+		request_autosave("create scene");
 }
 
 void VerticalSceneList::on_rename()
@@ -286,6 +289,7 @@ void VerticalSceneList::on_rename()
 	}
 
 	QString error;
+	bool renamed = false;
 	obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, old_name.toUtf8().constData());
 	if (!scene) {
 		error = tr("The scene no longer exists.");
@@ -293,6 +297,7 @@ void VerticalSceneList::on_rename()
 		error = tr("A scene or source named \"%1\" already exists.").arg(new_name);
 	} else {
 		obs_source_set_name(obs_scene_get_source(scene), new_name.toUtf8().constData());
+		renamed = true;
 	}
 	if (scene)
 		obs_scene_release(scene);
@@ -300,6 +305,8 @@ void VerticalSceneList::on_rename()
 
 	refresh();
 	set_status(error);
+	if (renamed)
+		request_autosave("rename scene");
 }
 
 void VerticalSceneList::on_remove()
@@ -325,6 +332,7 @@ void VerticalSceneList::on_remove()
 
 	QString error;
 	obs_scene_t *scene = obs_canvas_get_scene_by_name(canvas, name.toUtf8().constData());
+	bool removed = false;
 	obs_source_t *source = scene ? obs_scene_get_source(scene) : nullptr;
 	/* New strong ref to the canvas the scene belongs to (INV-6 guard). */
 	obs_canvas_t *scene_canvas = source ? obs_source_get_canvas(source) : nullptr;
@@ -358,6 +366,7 @@ void VerticalSceneList::on_remove()
 			}
 			obs_canvas_scene_remove(scene);
 			obs_source_remove(source); // marks it removed and signals "remove" to its listeners
+			removed = true;
 		}
 	}
 
@@ -369,6 +378,8 @@ void VerticalSceneList::on_remove()
 
 	refresh();
 	set_status(error);
+	if (removed)
+		request_autosave("remove scene");
 }
 
 void VerticalSceneList::on_set_active()
@@ -400,6 +411,8 @@ void VerticalSceneList::on_set_active()
 
 	refresh();
 	set_status(error);
+	if (error.isEmpty())
+		request_autosave("set active scene");
 }
 
 void VerticalSceneList::on_import()
@@ -436,6 +449,8 @@ void VerticalSceneList::on_import()
 	}
 
 	refresh();
+	if (imported > 0)
+		request_autosave("import scenes");
 	QString status = tr("Imported %n scene(s).", nullptr, imported);
 	if (!problems.isEmpty())
 		status += QStringLiteral(" ") + problems.join(QStringLiteral(" "));

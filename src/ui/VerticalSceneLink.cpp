@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/SceneLink.hpp"
 #include "../core/VerticalTransition.hpp"
+#include "../pipeline/Autosave.hpp"
 #include "../pipeline/CanvasSceneNames.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
@@ -320,6 +321,7 @@ void VerticalSceneLink::on_follow_toggled(bool checked)
 	SceneLinkSettings settings = m_canvas.link_settings();
 	settings.enabled = checked;
 	m_canvas.set_link_settings(settings);
+	request_autosave("link settings");
 	for (int r = 0; r < m_table->rowCount(); ++r) {
 		if (QWidget *w = m_table->cellWidget(r, 1))
 			w->setEnabled(checked);
@@ -337,6 +339,7 @@ void VerticalSceneLink::on_transition_changed(int index)
 				       ? m_transition->itemData(index, kTransitionNameRole).toString().toStdString()
 				       : std::string();
 	m_canvas.set_transition_settings(settings); // persisted with the collection
+	request_autosave("transition settings");
 	m_canvas.prepare_transition();             // load it before the next switch
 }
 
@@ -351,6 +354,7 @@ void VerticalSceneLink::on_stinger_path_changed()
 	settings.stinger_path = path; // "" = auto
 	settings.stinger_source = path.empty() ? std::string() : target_stinger_file(settings);
 	m_canvas.set_transition_settings(settings);
+	request_autosave("stinger path");
 	m_canvas.prepare_transition();
 	refresh(); // shows which stinger it applies to
 }
@@ -386,6 +390,7 @@ void VerticalSceneLink::on_choice_changed(const QString &main_scene, int kind, c
 		break;
 	}
 	m_canvas.set_link_settings(settings);
+	request_autosave("scene link");
 	/* Only the row of the current program scene can change what is on screen; editing another row
 	 * must not undo a manual "Set active". */
 	if (key == program_scene_name())

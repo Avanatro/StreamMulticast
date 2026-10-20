@@ -797,7 +797,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition]
+    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -971,11 +971,69 @@ nodes:
             reference: "OBS runtime check (ON build): Dima clicks 'Log in with Streamlabs…', logs in in the browser, the tab says 'You can close this tab', the dialog shows 'Connected as @user'; Cancel while waiting restores the buttons; with Streamlabs Desktop logged in, 'Use Streamlabs Desktop login' connects (not run in this session, TASK-32)"
             result: pending
     status: building
+  - id: collection-autosave
+    lane: pipeline
+    goal: "Edits the plugin makes to the owned vertical canvas reach the scene collection file within seconds, so an OBS crash does not lose them."
+    owns: [collection.autosave]
+    needs: [owned-vertical-canvas]
+    code:
+      - src/core/AutosavePolicy.hpp
+      - src/core/AutosavePolicy.cpp
+      - src/pipeline/Autosave.hpp
+      - src/pipeline/Autosave.cpp
+      - tests/test_autosave_policy.cpp
+    works_when:
+      - id: collection-autosave.debounce
+        behavior: "AutosavePolicy (pure, explicit times, no clock): request(now) arms a deadline now + 2000 ms (kAutosaveDelayMs) and each further request moves it, but never past the first request of the burst + 10000 ms (kAutosaveMaxWaitMs); due(now) is true exactly once when the deadline passed; set_blocked(true) drops requests and cancels a pending one, so unblocking never fires a stale save. The adapter (UI thread only, one QTimer re-armed from the core deadline) is the only caller of obs_frontend_save() (rg: one match in src/pipeline/Autosave.cpp), logs 'autosave (<reason>)' at LOG_DEBUG, and refuses calls from another thread with a LOG_WARNING. It starts blocked; plugin-main blocks on SCENE_COLLECTION_CHANGING, SCRIPTING_SHUTDOWN, EXIT and at the start of obs_module_unload (which also destroys the timer) and unblocks on FINISHED_LOADING and SCENE_COLLECTION_CHANGED after ensure_owned_canvas_and_follow. Edit sites call request_autosave once per finished edit: preview drag/nudge/undo (dock edit listener), Sources tab add/remove/reorder/visibility/lock/transform/rename, transform panel Apply/Fit/Fill, Scenes tab create/rename/remove/Set active/import, Links tab link and transition settings. OBS's own SaveProject keeps working; no Aitum data is written. Only compiled locally (plugin target built with SMULTI_STREAMLABS_TIKTOK OFF and ON), not run in OBS."
+        verification:
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_debounces_burst_into_one_save
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_fires_after_delay
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_blocked_drops_requests
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_unblock_does_not_fire_stale_request
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_max_wait_caps_continuous_edits
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_autosave_policy.cpp
+            check: autosave_due_fires_once
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R autosave_, local run 2026-10-20; stub AutosavePolicy: 6/6 failed, 6/6 passed after implementation; full ctest 161/161 (TASK-33)"
+            checked_at: 2026-10-20
+      - id: collection-autosave.survives-crash
+        behavior: "After a drag in the vertical preview and about 3 s of waiting, killing obs64.exe and starting OBS again shows the new item position."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): drag the webcam in V Gaming, wait 3 s, kill obs64.exe in Task Manager, start OBS: the new position is still there (agents never kill OBS; not run, TASK-33)"
+            result: pending
+    status: building
   - id: plugin-entry
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, collection-autosave, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h

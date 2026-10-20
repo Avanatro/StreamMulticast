@@ -90,6 +90,7 @@ target_sources(
     src/core/TikTokBridgeImport.cpp
     src/core/StreamlabsTikTok.cpp
     src/core/StreamlabsLogin.cpp
+    src/core/AutosavePolicy.cpp
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp
@@ -100,6 +101,7 @@ target_sources(
     src/pipeline/OutputController.cpp
     src/pipeline/ControllerReaper.cpp
     src/pipeline/HealthSampler.cpp
+    src/pipeline/Autosave.cpp
 
     # UI layer
     src/ui/MultistreamDock.cpp

@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "../core/LayoutMath.hpp"
 #include "../core/OwnedCanvasPolicy.hpp"
+#include "../pipeline/Autosave.hpp"
 
 #include <obs.h>
 
@@ -251,6 +252,8 @@ void TransformEditor::apply_preset(bool fill)
 		error = tr("The item no longer exists or the active scene changed.");
 	reload(true);
 	set_status(error);
+	if (ok && error.isEmpty())
+		request_autosave("transform preset");
 }
 
 void TransformEditor::on_fit()
@@ -288,6 +291,8 @@ void TransformEditor::on_apply()
 		error = tr("The item no longer exists or the active scene changed.");
 	reload(true); // shows the clamped crop
 	set_status(error);
+	if (ok && error.isEmpty())
+		request_autosave("transform apply");
 }
 
 } // namespace smulti

@@ -10,6 +10,7 @@ GPLv2 — see LICENSE for full text.
 #include "CanvasPreview.hpp" // read_preview_item
 #include "VerticalCanvasDock.hpp" // VerticalSelection
 #include "../core/ItemActions.hpp"
+#include "../pipeline/Autosave.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
@@ -717,6 +718,8 @@ void VerticalItemList::on_add_existing()
 	m_pending_select = new_id;
 	refresh();
 	set_status(error);
+	if (new_id != 0)
+		request_autosave("add existing source");
 }
 
 void VerticalItemList::on_remove()
@@ -742,6 +745,8 @@ void VerticalItemList::on_remove()
 		error = tr("The item no longer exists or the active scene changed; nothing was removed.");
 	refresh();
 	set_status(error);
+	if (ok)
+		request_autosave("remove item");
 }
 
 void VerticalItemList::move_selected(bool up)
@@ -760,6 +765,8 @@ void VerticalItemList::move_selected(bool up)
 	m_pending_select = id;
 	refresh();
 	set_status(error);
+	if (ok)
+		request_autosave("reorder item");
 }
 
 void VerticalItemList::on_up()
@@ -784,6 +791,8 @@ void VerticalItemList::on_item_changed(QListWidgetItem *row)
 		/* Never rebuild (clear) the list from inside its own itemChanged emission. */
 		m_pending_status = tr("The item no longer exists or the active scene changed.");
 		queue_refresh();
+	} else {
+		request_autosave("item visibility");
 	}
 }
 
@@ -865,8 +874,10 @@ void VerticalItemList::on_add_new()
 	m_pending_select = new_id;
 	refresh();
 	set_status(error);
-	if (new_id != 0)
+	if (new_id != 0) {
+		request_autosave("add new source");
 		run_item_action(ItemAction::Properties, list_scene, new_id);
+	}
 }
 
 /* ---- item actions ---------------------------------------------------------- */
@@ -976,8 +987,10 @@ void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid
 		});
 		if (!ok)
 			error = tr("The item no longer exists or the active scene changed.");
-		else
+		else {
 			notify_change(); // item_locked is not a connected signal: redraw the preview handles now
+			request_autosave("item lock");
+		}
 		break;
 	}
 	case ItemAction::Fit:
@@ -1043,6 +1056,8 @@ void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid
 		set_status(QString());
 	reload_editor(true);
 	notify_change();
+	if (ok && !locked)
+		request_autosave("item transform");
 }
 
 void VerticalItemList::rename_item(std::string scene_uuid, int64_t id)
@@ -1096,6 +1111,8 @@ void VerticalItemList::rename_item(std::string scene_uuid, int64_t id)
 	else
 		m_pending_select = id;
 	refresh();
+	if (renamed)
+		request_autosave("rename source");
 }
 
 } // namespace smulti

@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/EndpointRegistry.hpp"
 #include "core/LinkedStart.hpp"
 #include "core/MainServiceTarget.hpp"
+#include "pipeline/Autosave.hpp"
 #include "pipeline/ControllerReaper.hpp"
 #include "pipeline/HealthSampler.hpp"
 #include "pipeline/OutputController.hpp"
@@ -255,6 +256,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		return;
 
 	if (event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+		smulti::autosave_set_blocked(true); // OBS saves on exit itself; never during teardown
 		/* First shutdown signal OBS gives us. Flush the config now: obs_module_unload comes
 		 * after OBSBasic::ClearSceneData, which has crashed OBS on exit (2026-10-19). */
 		flush_config();
@@ -269,6 +271,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			g_owned_canvas->shutdown_transitions();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
 		ensure_owned_canvas_and_follow(true);
+		smulti::autosave_set_blocked(false); // after ensure: its own scene switches are not user edits
 	} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 		ensure_owned_canvas_and_follow(false);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
@@ -294,6 +297,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		if (g_vertical_recorder)
 			g_vertical_recorder->on_main_recording_stopping();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		smulti::autosave_set_blocked(true); // cancels a pending save: the collection is being replaced
 		stop_provider_endpoints(); // ends a Streamlabs TikTok session (TASK-28)
 		stop_vertical_recording("scene collection changing"); // before the owned canvas reference goes
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
@@ -330,6 +334,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		}
 	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
 		/* Graceful shutdown — stop all outputs before OBS tears down */
+		smulti::autosave_set_blocked(true);
 		obs_log(LOG_INFO, "OBS exit — stopping all StreamMulticast outputs");
 		flush_config();
 		for (auto &ep : g_registry->all()) {
@@ -372,6 +377,7 @@ bool obs_module_load()
 
 	/* 3c. Vertical recording of the owned canvas; its teardown jobs run on the reaper. */
 	g_ui_context.store(new QObject()); // UI thread
+	smulti::autosave_start(); // blocked until FINISHED_LOADING
 #ifdef SMULTI_STREAMLABS_TIKTOK
 	g_streamlabs = std::make_unique<smulti::StreamlabsClient>(post_to_ui);
 	smulti::set_streamlabs_client(g_streamlabs.get());
@@ -450,6 +456,8 @@ void obs_module_unload()
 	obs_log(LOG_INFO, "StreamMulticast unloading");
 
 	g_module_alive = false;
+	smulti::autosave_set_blocked(true);
+	smulti::autosave_stop(); // no obs_frontend_save() after this point
 	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", on_video_reset, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "canvas_remove", on_canvas_remove, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "source_rename", on_source_rename, nullptr);
