@@ -759,7 +759,9 @@ void CanvasPreview::undo_last()
 	preview_edit::end_nudge_burst(m_nudge_burst);
 	write_item(undo.scene_uuid, undo.before); // refused when the scene changed or the item is gone
 	refresh_overlay();
-	notify_edit();
+	/* Only a kept change is an edit: a plain click that selects, or Escape that restored the start, saves nothing. */
+	if (drag.changed && !restore)
+		notify_edit();
 }
 
 void CanvasPreview::keyPressEvent(QKeyEvent *event)
