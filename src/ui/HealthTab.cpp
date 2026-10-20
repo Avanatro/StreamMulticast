@@ -27,10 +27,16 @@ QString alert_reason_text(const std::string &reason)
 		return QObject::tr("Reconnecting");
 	if (reason == kAlertReasonFailed)
 		return QObject::tr("Output failed");
+	/* Numbers from the policy defaults, so the text cannot drift from the rule. */
+	const AlertThresholds t{};
 	if (reason == kAlertReasonDropped)
-		return QObject::tr("Dropped frames: at least 2 % of the last 10 seconds");
+		return QObject::tr("Dropped frames: at least %1 % of the last %2 seconds")
+			.arg(t.drop_ratio * 100.0, 0, 'g', 3)
+			.arg(t.drop_window_ms / 1000);
 	if (reason == kAlertReasonLowBitrate)
-		return QObject::tr("Bitrate below 50 % of target for 15 seconds");
+		return QObject::tr("Bitrate below %1 % of target for %2 seconds")
+			.arg(t.low_bitrate_fraction * 100.0, 0, 'g', 3)
+			.arg(t.low_bitrate_hold_ms / 1000);
 	return QString::fromStdString(reason);
 }
 

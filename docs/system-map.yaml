@@ -29,7 +29,7 @@ size_ignore:
   - "cmake/.CMakeBuildNumber"
   - "**/*.subagent"
   - "*.subagent"
-  - "src/third_party/**"
+  - "src/third_party/**" # vendored third-party code, unmodified (sha256 in src/third_party/*/README.md)
 
 nodes:
   - id: endpoint-model
