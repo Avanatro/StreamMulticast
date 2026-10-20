@@ -225,9 +225,11 @@ static void ensure_owned_canvas_task(void *)
 		ensure_owned_canvas_and_follow(false);
 }
 
-/* obs_reset_video() frees every canvas mix; rebuild ours after a main video
- * reset. The signal may fire on any thread, and the frontend canvas API is
- * UI-thread only, so hop to the UI thread. */
+/* obs_reset_video() frees every canvas mix and rebuilds the non-main ones with
+ * their own size but the main fps (libobs restore_canvases / obs_init_video_mix);
+ * ensure() still runs afterwards for a canvas left without video. The signal may
+ * fire on any thread, and the frontend canvas API is UI-thread only, so hop to
+ * the UI thread. */
 static void on_video_reset(void *, calldata_t *)
 {
 	if (g_module_alive.load())
@@ -353,6 +355,15 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 			g_alert_monitor->stop(); // before the sampler it reads
 		if (g_health_sampler)
 			g_health_sampler->stop();
+	}
+
+	/* ensure() could not give the owned canvas a video mix while OBS video was active (reset refused):
+	 * retry once a main output has stopped. */
+	if ((event == OBS_FRONTEND_EVENT_STREAMING_STOPPED || event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
+	     event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED) &&
+	    g_module_alive.load() && g_owned_canvas && g_owned_canvas->needs_video()) {
+		obs_log(LOG_INFO, "owned canvas: a main output stopped, retrying the video reset");
+		ensure_owned_canvas_and_follow(false);
 	}
 }
 

@@ -329,7 +329,7 @@ void OwnedCanvas::ensure()
 		} else {
 			obs_log(LOG_WARNING,
 				"owned canvas: '%s' has no video and reset_video was refused "
-				"(OBS video active?), it stays unusable until the next collection load",
+				"(OBS video active?), retried when a main stream, recording or replay buffer stops",
 				kOwnedVerticalCanvasName);
 		}
 		break;
@@ -479,6 +479,16 @@ std::string OwnedCanvas::uuid() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_uuid;
+}
+
+bool OwnedCanvas::needs_video() const
+{
+	obs_canvas_t *c = get_ref();
+	if (!c)
+		return false;
+	const bool missing = !obs_canvas_has_video(c);
+	obs_canvas_release(c);
+	return missing;
 }
 
 SceneLinkSettings OwnedCanvas::link_settings() const
