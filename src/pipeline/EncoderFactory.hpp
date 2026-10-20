@@ -67,6 +67,15 @@ public:
 	                                    video_t *video) const;
 
 	/**
+	 * Same, with `backend` instead of ep.encoder_backend (runtime encoder fallback of one session,
+	 * see core/EncoderRecovery); every other setting comes from `ep`, which is never changed.
+	 */
+	obs_encoder_t *create_video_encoder(const Endpoint &ep,
+	                                    const std::string &name_hint,
+	                                    video_t *video,
+	                                    EncoderBackend backend) const;
+
+	/**
 	 * Create an AAC audio encoder for the given endpoint.
 	 *
 	 * AVANATRO-VERIFY: obs_audio_encoder_create — the "mixer_idx" parameter

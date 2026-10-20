@@ -16,6 +16,7 @@ GPLv2 — see LICENSE for full text.
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -59,6 +60,11 @@ enum class VerticalRecordState : int {
  *
  * After a graceful stop with code OBS_OUTPUT_SUCCESS the file is remuxed to MP4 on a worker thread when the
  * active profile has AutoRemux=true; shutdown() cancels a running remux and joins the worker.
+ *
+ * Runtime encode error (vertical_record_runtime_fallback): when an NVENC session stops with
+ * OBS_OUTPUT_ENCODE_ERROR after a successful start, finish() keeps the partial file (remuxed like a
+ * finished one), logs one warning and posts one restart with x264 CRF 20 into a NEW file (folder resolved
+ * again, never C:). A second encode error ends the recording as before.
  */
 class VerticalRecorder {
 public:
@@ -112,6 +118,12 @@ private:
 	 */
 	bool try_start(const RecordEncoderChoice &choice, obs_canvas_t *canvas, video_t *video, const std::string &file,
 		       bool with_main, std::string &error);
+	/**
+	 * start() body. `forced` replaces the encoder choice (runtime fallback restart, `runtime_restart` true:
+	 * a further encode error of that session is not restarted again). UI thread.
+	 */
+	bool start_session(bool with_main, const std::optional<RecordEncoderChoice> &forced, bool runtime_restart);
+	void restart_after_encode_error(const RecordEncoderChoice &choice, bool with_main); ///< UI thread
 	static void on_output_stop(void *data, calldata_t *cd);
 	void finish(std::uint64_t session, long long code);
 	Session detach_locked();
@@ -132,6 +144,8 @@ private:
 	bool m_started_with_main = false;
 	bool m_remux_on_stop = false;
 	std::string m_file;
+	std::string m_encoder_id;          ///< video encoder type id of the running session
+	bool m_runtime_restarted = false;  ///< the running session is the runtime fallback restart
 	std::string m_error;
 	VerticalRecordSettings m_settings;
 	size_t m_hotkey = static_cast<size_t>(-1);

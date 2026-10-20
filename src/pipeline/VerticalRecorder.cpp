@@ -206,6 +206,12 @@ void VerticalRecorder::fail(const std::string &reason)
 
 bool VerticalRecorder::start(bool with_main)
 {
+	return start_session(with_main, std::nullopt, false);
+}
+
+bool VerticalRecorder::start_session(bool with_main, const std::optional<RecordEncoderChoice> &forced,
+				     bool runtime_restart)
+{
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_shut_down || m_state != VerticalRecordState::Idle)
@@ -242,7 +248,7 @@ bool VerticalRecorder::start(bool with_main)
 		[](const std::string &p) { return os_file_exists(p.c_str()); });
 
 	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
-	RecordEncoderChoice choice = choose_vertical_record_encoder(available);
+	RecordEncoderChoice choice = forced ? *forced : choose_vertical_record_encoder(available);
 	std::string error;
 	bool started = try_start(choice, canvas, video, file, with_main, error);
 	if (!started) {
@@ -263,6 +269,11 @@ bool VerticalRecorder::start(bool with_main)
 		reap(only_canvas, false);
 		fail(error + ". Not recording.");
 		return false;
+	}
+	{
+		/* Before any posted finish() of this session can run (both on the UI thread). */
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_runtime_restarted = runtime_restart;
 	}
 
 	obs_log(LOG_INFO, "vertical recording: started \"%s\" (%s %s %d%s)", file.c_str(), choice.type_id.c_str(),
@@ -301,6 +312,7 @@ bool VerticalRecorder::try_start(const RecordEncoderChoice &choice, obs_canvas_t
 		m_started_with_main = with_main;
 		m_remux_on_stop = remux;
 		m_file = file;
+		m_encoder_id = choice.type_id;
 		m_error.clear();
 		m_session_id.fetch_add(1);
 	}
@@ -461,9 +473,13 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 	if (output)
 		signal_handler_disconnect(obs_output_get_signal_handler(output), "stop", on_output_stop, this);
 
+	const std::set<std::string> &available = EncoderFactory::available_encoder_types();
 	std::string file;
 	bool remux;
+	bool with_main;
 	std::string error;
+	std::string failed_encoder;
+	std::optional<RecordEncoderChoice> restart;
 	Session s;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -471,6 +487,9 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 			return;
 		file = m_file;
 		remux = m_remux_on_stop;
+		with_main = m_started_with_main;
+		failed_encoder = m_encoder_id;
+		restart = vertical_record_runtime_fallback(code, m_encoder_id, m_runtime_restarted, available);
 		if (code != OBS_OUTPUT_SUCCESS) {
 			const char *err = output ? obs_output_get_last_error(output) : nullptr;
 			m_error = "The recording stopped with code " + std::to_string(code) +
@@ -481,6 +500,22 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 	}
 	reap(s, false);
 
+	if (restart) {
+		/* Runtime NVENC failure after a successful start: keep the partial file, continue once with x264. */
+		obs_log(LOG_WARNING,
+			"vertical recording: encode error with %s, the partial file \"%s\" is kept; restarting with %s %s %d "
+			"in a new file",
+			failed_encoder.c_str(), file.c_str(), restart->type_id.c_str(), restart->rate_control.c_str(),
+			restart->quality);
+		if (remux)
+			queue_remux(file);
+		const RecordEncoderChoice choice = *restart;
+		if (m_post)
+			m_post([this, choice, with_main]() { restart_after_encode_error(choice, with_main); });
+		notify();
+		return;
+	}
+
 	if (code == OBS_OUTPUT_SUCCESS) {
 		obs_log(LOG_INFO, "vertical recording: saved \"%s\"", file.c_str());
 		if (remux)
@@ -489,6 +524,20 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 		obs_log(LOG_WARNING, "vertical recording: %s", error.c_str());
 	}
 	notify();
+}
+
+void VerticalRecorder::restart_after_encode_error(const RecordEncoderChoice &choice, bool with_main)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_shut_down || m_state != VerticalRecordState::Idle)
+			return; // unloaded, or started again by hand meanwhile
+	}
+	if (with_main && !obs_frontend_recording_active()) {
+		obs_log(LOG_INFO, "vertical recording: not restarted, the main recording has stopped meanwhile");
+		return;
+	}
+	start_session(with_main, choice, true); // new file name, folder resolved again (never C:)
 }
 
 /* ---- remux worker -------------------------------------------------------- */

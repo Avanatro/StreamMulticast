@@ -93,4 +93,14 @@ RecordEncoderChoice choose_vertical_record_encoder(const std::set<std::string> &
 std::optional<RecordEncoderChoice> vertical_record_fallback_encoder(const std::string &failed_type_id,
 								    std::set<std::string> available);
 
+/**
+ * The encoder to restart a running recording with after it stopped with `stop_code`: only an encode error
+ * (OBS_OUTPUT_ENCODE_ERROR) of a session that ran with an NVENC HEVC id and was not restarted before gives
+ * vertical_record_fallback_encoder (x264 CRF 20), restarted once into a new file; nullopt otherwise (the
+ * recording ends as before).
+ */
+std::optional<RecordEncoderChoice> vertical_record_runtime_fallback(long long stop_code, const std::string &session_type_id,
+								    bool already_restarted,
+								    const std::set<std::string> &available);
+
 } // namespace smulti

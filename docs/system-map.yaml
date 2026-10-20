@@ -177,7 +177,7 @@ nodes:
       - src/pipeline/EncoderFactory.cpp
     works_when:
       - id: encoder-factory.fallback
-        behavior: "Unavailable GPU backend falls back to x264 with a log line."
+        behavior: "Unavailable GPU backend falls back to x264 with a log line. create_video_encoder has an overload with an explicit EncoderBackend (runtime fallback of one session); the 3-argument form passes ep.encoder_backend, every other setting still comes from the endpoint (x264: preset veryfast, profile high, tune zerolatency)."
         verification: []
       - id: encoder-factory.record-encoder
         behavior: "create_record_video_encoder builds the vertical recording encoder from a RecordEncoderChoice (rate_control plus quality key; x264 preset veryfast, profile high) on the caller's video_t, with the same set_video and lifetime rule as create_video_encoder; create_aac_encoder (name, bitrate, mix) is shared by endpoints and the recorder; available_encoder_types exposes the once-enumerated id set. Only compiled locally."
@@ -531,7 +531,7 @@ nodes:
     lane: pipeline
     goal: "The owned vertical canvas can be recorded to a file, by hand, by hotkey or together with the main recording."
     owns: [recording.vertical-output, recording.vertical-settings]
-    needs: [owned-vertical-canvas, encoder-factory, controller-reaper]
+    needs: [owned-vertical-canvas, encoder-factory, controller-reaper, encoder-recovery]
     code:
       - src/core/VerticalRecord.hpp
       - src/core/VerticalRecord.cpp
@@ -602,6 +602,18 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R vertical_record_, local run 2026-10-19; configure failed before implementation (missing src/core/VerticalRecord.cpp), 9/9 passed after (TASK-27)"
             checked_at: 2026-10-19
+      - id: vertical-recording.runtime-fallback
+        behavior: "vertical_record_runtime_fallback(stop_code, session_type_id, already_restarted, available) gives x264 CRF 20 only for OBS_OUTPUT_ENCODE_ERROR of a session that ran with obs_nvenc_hevc_tex or jim_hevc_nvenc and was not restarted before; nullopt for every other code, an x264 session or a second encode error. VerticalRecorder::finish (UI thread, posted from the output's stop signal) then reaps the session, keeps the partial file (queued for remux when the session would have been remuxed), logs one warning and posts one restart through the UI poster: start_session with the forced choice resolves the folder again (never C:), takes a new file name and keeps 'started with main' (skipped when the main recording has stopped meanwhile, the recorder was shut down or a recording runs again). A further encode error of the restarted session ends the recording as before. The adapter is only compiled, not run in OBS."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_record_runtime_fallback_choice
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: manual
+            reference: "OBS log review (Dima): after an NVENC encode error during a vertical recording the log shows 'vertical recording: encode error with obs_nvenc_hevc_tex, the partial file ... is kept; restarting with obs_x264 CRF 20 in a new file' and a second '<date> Vertical.mkv' (not reproducible on demand; do not simulate; TASK-35)"
+            result: pending
       - id: vertical-recording.record-file
         behavior: "VerticalRecorder::start (UI thread) resolves the folder (obs_frontend_get_current_record_output_path; a refusal is logged and shown in the dock), creates it (os_mkdirs), takes a strong ref of the owned canvas and creates the video encoder on obs_canvas_get_video (EncoderFactory::create_record_video_encoder, 1080x1920 at the canvas fps), AAC 160 kbps from mix 0 (track 1, EncoderFactory::create_aac_encoder, shared with endpoints) and an ffmpeg_muxer output with the MKV path; when the NVENC encoder cannot be created or the output does not start, that attempt is reaped and the start is retried once with x264 CRF 20 (logged). A graceful stop calls obs_output_stop; the output's stop signal posts finish() to the UI thread (session-tagged); with code OBS_OUTPUT_SUCCESS and AutoRemux=true in the profile's [Video] section the file is remuxed to MP4 on a worker thread (media_remux_job_*; cancelled and joined on unload, a cancelled remux deletes its partial MP4 with os_unlink and logs it; the MKV is kept). Started by the dock button 'Record vertical', the frontend hotkey 'StreamMulticast: Start/Stop vertical recording' (binding saved with the settings in <module config>/vertical-record.json, only on a settings edit in the Record tab, at SCRIPTING_SHUTDOWN or at unload: a binding changed in OBS settings is lost if OBS crashes before shutting down) or OBS_FRONTEND_EVENT_RECORDING_STARTED when 'Record vertical together with main recording' is on; RECORDING_STOPPING stops only a recording started that way. Only compiled locally (plugin target built; dumpbin shows media_remux_job_create, obs_hotkey_register_frontend, obs_canvas_get_video, obs_frontend_get_profile_config), not run in OBS."
         verification:
@@ -614,6 +626,56 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: while the vertical recording runs, switch the scene collection and quit OBS; the log shows 'vertical recording: stopped (...)', the MKV is playable and no crash file is written (not run in this session; plugin target compiled, TASK-27)"
             result: pending
+    status: building
+  - id: encoder-recovery
+    lane: core
+    goal: "A session whose GPU encoder keeps failing at runtime is decided to continue on x264, for that session only, without OBS."
+    owns: [encoder.runtime-recovery-policy]
+    needs: [endpoint-model]
+    code:
+      - src/core/EncoderRecovery.hpp
+      - src/core/EncoderRecovery.cpp
+      - tests/test_encoder_recovery.cpp
+    works_when:
+      - id: encoder-recovery.decide
+        behavior: "EncoderRecoveryState {consecutive_encoder_failures, fallback_active, after_encode_error}. on_stop_code counts only OBS_OUTPUT_ENCODE_ERROR (-8) and marks the following reconnect; -2/-4/-5 count nothing and clear the mark. on_restart_failure (encoder create or obs_output_start failure in a reconnect) counts only while marked. At the third failure in a row (the first encode error plus two failed restarts, a restart that goes Live and hits -8 again included) a non-X264 backend sets fallback_active (reported once); X264 never does. on_live_for(>= 60000 ms) / on_live_stable reset the counter and the mark, an active fallback stays. effective_backend gives X264 while the fallback is active and obs_x264 is registered, else the configured backend; the configured backend is an input only."
+        verification:
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_counts_only_encode_errors
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_falls_back_after_two_failed_restarts
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_x264_never_falls_back
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_fallback_is_session_only
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_stable_live_resets_counter
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_no_x264_available_keeps_backend
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
     status: building
   - id: controller-reaper
     lane: pipeline
@@ -632,7 +694,7 @@ nodes:
     lane: pipeline
     goal: "One endpoint streams, reconnects with backoff and stops without blocking the UI."
     owns: [output.state-machine, output.reconnect-policy, output.libobs-objects]
-    needs: [encoder-factory, canvas-selection, controller-reaper, streamlabs-client]
+    needs: [encoder-factory, canvas-selection, controller-reaper, streamlabs-client, encoder-recovery]
     code:
       - src/core/OutputState.hpp
       - src/pipeline/OutputController.hpp
@@ -649,6 +711,18 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: remove the vertical canvas (or switch scene collection) while an endpoint streams on it; the endpoint must stop, the log must show \"canvas '<name>' removed, stopping endpoint\", OBS must not crash and no reconnect may start (not run in this session)"
+            result: pending
+      - id: output-lifecycle.encoder-fallback
+        behavior: "OutputController holds one EncoderRecoveryState per session under m_mutex (reset in start()). handle_stop feeds every reconnect-eligible stop code (after on_live_for with the Live time of the session that just stopped); reconnect_thread_func feeds encoder-create and obs_output_start failures. Both encoder creation sites (start_output and every reconnect attempt) call EncoderFactory::create_video_encoder with the effective backend. When the fallback switches on and obs_x264 is registered: one LOG_WARNING 'OutputController [<name>]: NVENC failed 3 times, falling back to x264 veryfast for this session' (QSV/AMF named instead for those backends) and m_last_error 'Encoder fallback: x264 veryfast' (Health tab tooltip; AlertPolicy has no last_error input, so no alert). The endpoint and config.json are never written (rg 'encoder_backend\\s*=' in src: only defaults, deserialize and the dialog). Backoff schedule and attempt limit unchanged. The pure rule is pinned by the encoder-recovery tests; the wiring is only compiled (flag OFF and ON), not run in OBS."
+        verification:
+          - kind: automated
+            reference: tests/test_encoder_recovery.cpp
+            check: encoder_recovery_falls_back_after_two_failed_restarts
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"encoder_recovery_|vertical_record_\", local run 2026-10-20; stub EncoderRecovery/vertical_record_runtime_fallback: 6 of 7 new tests failed (encoder_recovery_x264_never_falls_back passes vacuously on a stub), 17/17 passed after implementation (TASK-35)"
+            checked_at: 2026-10-20
+          - kind: manual
+            reference: "OBS log review (Dima): after an NVENC session error mid-stream the endpoint log shows the reconnect attempts, then the fallback warning once, then 'reconnected successfully' with an obs_x264 encoder; a later manual start uses NVENC again (not reproducible on demand without breaking NVENC; do not simulate by killing drivers or processes; TASK-35)"
             result: pending
       - id: output-lifecycle.provider-key-fetch
         behavior: "Only with SMULTI_STREAMLABS_TIKTOK: start() of an endpoint with key_provider streamlabs_tiktok goes Starting and asks StreamlabsClient for a session without blocking the UI thread; the completion (UI thread) streams to the returned rtmp/key, held only in the controller for this session, or sets FailedHard with the sanitized error (Health tab); other endpoints are unaffected. stop() aborts a pending fetch (generation counter, late result not adopted and ended by the client) and ends an open session once. Main stream stop, scene collection change, OBS exit and unload stop controllers with has_provider_work(). Compiled with -DSMULTI_STREAMLABS_TIKTOK=ON (release-sltt) and OFF (build_tests); not run in OBS."

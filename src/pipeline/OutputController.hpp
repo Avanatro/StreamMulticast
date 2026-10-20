@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #pragma once
 
 #include "../core/Endpoint.hpp"
+#include "../core/EncoderRecovery.hpp"
 #include "../core/OutputState.hpp"
 #include "EncoderFactory.hpp"
 #ifdef SMULTI_STREAMLABS_TIKTOK
@@ -56,8 +57,8 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  *   - HealthSampler polls stats concurrently, holding a shared_ptr obtained
  *     from EndpointRegistry::controller_for().
  *   - m_state, m_last_error, m_reconnect_attempt, m_output, m_video_enc,
- *     m_audio_enc, m_reconnect_thread and m_connected_since are ALL accessed
- *     from more than one of the threads above and are guarded by m_mutex.
+ *     m_audio_enc, m_reconnect_thread, m_connected_since and m_recovery are ALL
+ *     accessed from more than one of the threads above and are guarded by m_mutex.
  *     There is no field that is mutated from two threads without the lock.
  *
  * Detach-and-reaper rule (fix-round 1, 2026-07-07 — load-bearing, do not
@@ -94,6 +95,14 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  *   shutdown_blocking()  → force_stop → join reconnect thread → release
  *             encoders → obs_output_release (the actual, indefinitely
  *             blocking sync point — see shutdown_blocking() doc below)
+ *
+ * Runtime encoder fallback (core/EncoderRecovery): m_recovery counts encoder
+ * failures of the current session — stops with OBS_OUTPUT_ENCODE_ERROR
+ * (handle_stop) and encoder-create / obs_output_start failures of a reconnect
+ * that follows one (reconnect_thread_func).  At the third failure in a row a
+ * non-x264 endpoint is re-created with x264 veryfast for the rest of the
+ * session (one warning, m_last_error "Encoder fallback: x264 veryfast");
+ * start() resets it, m_endpoint is never changed.  Backoff is unchanged.
  *
  * Encoder ownership: obs_output_set_video/audio_encoder() takes its OWN
  * reference via obs_encoder_get_ref() (see libobs obs-output.c).  Our
@@ -290,6 +299,17 @@ private:
 	void handle_stop(int error_code);
 
 	/**
+	 * Encoder fallback bookkeeping, m_mutex HELD.  effective_backend_locked is
+	 * the backend both encoder creation sites use.  After a counted failure,
+	 * encoder_fallback_switched_locked returns true (and sets m_last_error)
+	 * when the fallback just switched on and x264 exists; the caller then calls
+	 * announce_encoder_fallback() after unlocking.
+	 */
+	EncoderBackend effective_backend_locked(bool x264_registered) const;
+	bool encoder_fallback_switched_locked(bool switched, bool x264_registered);
+	void announce_encoder_fallback() const;
+
+	/**
 	 * reconnect_thread_func — exponential backoff reconnect loop.
 	 *
 	 * Session-validity guard (fix-round 1, 2026-07-07): captures the
@@ -319,6 +339,7 @@ private:
 	OutputState         m_state    {OutputState::Idle};
 	std::string         m_last_error;
 	int                 m_reconnect_attempt {0};
+	EncoderRecoveryState m_recovery; ///< this session only, reset by start()
 
 	obs_output_t       *m_output   {nullptr};
 	obs_encoder_t      *m_video_enc{nullptr};

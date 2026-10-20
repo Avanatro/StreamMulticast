@@ -156,3 +156,26 @@ SMULTI_TEST(vertical_record_settings_roundtrip_and_defaults)
 	EXPECT_EQ(back.record_with_main, false);
 	EXPECT_EQ(back.folder, "F:/Shorts");
 }
+
+SMULTI_TEST(vertical_record_runtime_fallback_choice)
+{
+	const std::set<std::string> all = {"obs_x264", "jim_hevc_nvenc", "obs_nvenc_hevc_tex"};
+	const long long encode_error = -8; // OBS_OUTPUT_ENCODE_ERROR
+	/* NVENC session hit an encode error after a successful start: restart once with x264 CRF 20 */
+	std::optional<RecordEncoderChoice> r =
+		smulti::vertical_record_runtime_fallback(encode_error, "obs_nvenc_hevc_tex", false, all);
+	EXPECT_TRUE(r.has_value());
+	EXPECT_EQ(r ? r->type_id : std::string(), "obs_x264");
+	EXPECT_EQ(r ? r->rate_control : std::string(), "CRF");
+	EXPECT_EQ(r ? r->quality : 0, 20);
+	EXPECT_EQ(smulti::vertical_record_runtime_fallback(encode_error, "jim_hevc_nvenc", false, all)
+			  .value_or(RecordEncoderChoice{}).type_id,
+		  "obs_x264");
+	/* a second encode error (already restarted) ends the recording */
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(encode_error, "obs_nvenc_hevc_tex", true, all).has_value());
+	/* an x264 session has nothing left to try */
+	EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(encode_error, "obs_x264", false, all).has_value());
+	/* other stop codes never restart: success, disconnected, generic error, no space */
+	for (long long code : {0LL, -5LL, -4LL, -7LL})
+		EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(code, "obs_nvenc_hevc_tex", false, all).has_value());
+}

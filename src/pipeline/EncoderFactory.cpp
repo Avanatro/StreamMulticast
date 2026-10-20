@@ -130,16 +130,24 @@ obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
                                                      const std::string &name_hint,
                                                      video_t *video) const
 {
+	return create_video_encoder(ep, name_hint, video, ep.encoder_backend);
+}
+
+obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
+                                                     const std::string &name_hint,
+                                                     video_t *video,
+                                                     EncoderBackend backend) const
+{
 	if (!video) {
 		obs_log(LOG_ERROR, "EncoderFactory: create_video_encoder called without a video pipeline");
 		return nullptr;
 	}
 
 	/* Resolve actual type ID with fallback */
-	std::string type_id = encoder_type_id(ep.encoder_backend);
+	std::string type_id = encoder_type_id(backend);
 
 	/* NVENC fallback chain: jim_nvenc → ffmpeg_nvenc */
-	if (ep.encoder_backend == EncoderBackend::NVENC &&
+	if (backend == EncoderBackend::NVENC &&
 	    !is_encoder_available(type_id)) {
 		type_id = "ffmpeg_nvenc";
 		if (!is_encoder_available(type_id)) {
@@ -150,7 +158,7 @@ obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
 	}
 
 	/* QSV fallback */
-	if (ep.encoder_backend == EncoderBackend::QSV &&
+	if (backend == EncoderBackend::QSV &&
 	    !is_encoder_available(type_id)) {
 		type_id = "obs_qsv11";
 		if (!is_encoder_available(type_id)) {
@@ -161,7 +169,7 @@ obs_encoder_t *EncoderFactory::create_video_encoder(const Endpoint &ep,
 	}
 
 	/* AMF fallback */
-	if (ep.encoder_backend == EncoderBackend::AMF &&
+	if (backend == EncoderBackend::AMF &&
 	    !is_encoder_available(type_id)) {
 		obs_log(LOG_WARNING,
 		        "EncoderFactory: AMF not available — falling back to x264");

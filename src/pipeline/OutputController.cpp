@@ -42,6 +42,30 @@ namespace {
  *   OBS_OUTPUT_ENCODE_ERROR   = -8  — reconnect-eligible
  *   OBS_OUTPUT_HDR_DISABLED   = -9  — hard fail
  * ----------------------------------------------------------------------- */
+static_assert(kStopCodeConnectFailed == OBS_OUTPUT_CONNECT_FAILED && kStopCodeError == OBS_OUTPUT_ERROR &&
+		      kStopCodeDisconnected == OBS_OUTPUT_DISCONNECTED && kStopCodeEncodeError == OBS_OUTPUT_ENCODE_ERROR,
+	      "core/EncoderRecovery stop codes must match obs-defs.h");
+
+constexpr const char *kEncoderFallbackError = "Encoder fallback: x264 veryfast";
+
+/** Short backend name for the fallback warning ("NVENC" in the usual case). */
+const char *backend_short_name(EncoderBackend backend)
+{
+	switch (backend) {
+	case EncoderBackend::NVENC: return "NVENC";
+	case EncoderBackend::QSV:   return "QSV";
+	case EncoderBackend::AMF:   return "AMF";
+	default:                    return "x264";
+	}
+}
+
+/** obs_x264 is registered (cached enumeration, see EncoderFactory). Call outside m_mutex. */
+bool x264_registered()
+{
+	return EncoderFactory::available_encoder_types().count(
+		       EncoderFactory::encoder_type_id(EncoderBackend::X264)) != 0;
+}
+
 bool is_hard_fail_code(int code)
 {
 	return code == OBS_OUTPUT_INVALID_STREAM || code == OBS_OUTPUT_BAD_PATH ||
@@ -370,6 +394,7 @@ bool OutputController::start()
 		m_state = OutputState::Starting;
 		m_last_error.clear();
 		m_reconnect_attempt = 0;
+		m_recovery = EncoderRecoveryState{}; // the encoder fallback lives for one session only
 	}
 
 	obs_log(LOG_INFO, "OutputController [%s]: starting", m_endpoint.name.c_str());
@@ -432,7 +457,13 @@ bool OutputController::start_output()
 	}
 
 	/* Create and attach encoders */
-	obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video);
+	const bool x264 = x264_registered();
+	EncoderBackend backend;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		backend = effective_backend_locked(x264);
+	}
+	obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video, backend);
 	obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
 
 	if (!video_enc || !audio_enc) {
@@ -777,6 +808,29 @@ void OutputController::do_release_encoders_locked()
 }
 
 /* -----------------------------------------------------------------------
+ * Runtime encoder fallback helpers (see the class doc comment).
+ * ----------------------------------------------------------------------- */
+EncoderBackend OutputController::effective_backend_locked(bool x264) const
+{
+	return effective_backend(m_endpoint.encoder_backend, m_recovery, x264);
+}
+
+bool OutputController::encoder_fallback_switched_locked(bool switched, bool x264)
+{
+	if (!switched || effective_backend_locked(x264) == m_endpoint.encoder_backend)
+		return false; // not switched by this failure, or no x264 to fall back to
+	m_last_error = kEncoderFallbackError;
+	return true;
+}
+
+void OutputController::announce_encoder_fallback() const
+{
+	obs_log(LOG_WARNING, "OutputController [%s]: %s failed %d times, falling back to x264 veryfast for this session",
+	        m_endpoint.name.c_str(), backend_short_name(m_endpoint.encoder_backend),
+	        kEncoderFallbackAfterFailures);
+}
+
+/* -----------------------------------------------------------------------
  * Signal callbacks — called on OBS's internal signal thread
  * ----------------------------------------------------------------------- */
 void OutputController::on_start_signal(void *data, calldata_t * /*cd*/)
@@ -844,13 +898,24 @@ void OutputController::handle_stop(int code)
 	 * mirrors the lazy-join pattern; a stale thread here only happens if a
 	 * previous reconnect attempt just returned (success or exhausted) right
 	 * as a fresh disconnect signal arrived. */
+	const bool x264 = x264_registered();
 	std::thread stale_thread;
+	bool fallback_switched;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		/* A minute of Live before this stop resets the encoder failure count. */
+		if (m_state == OutputState::Live && m_connected_since != std::chrono::steady_clock::time_point{}) {
+			const auto live = std::chrono::steady_clock::now() - m_connected_since;
+			on_live_for(m_recovery, std::chrono::duration_cast<std::chrono::milliseconds>(live).count());
+		}
+		fallback_switched = encoder_fallback_switched_locked(
+			on_stop_code(m_recovery, code, m_endpoint.encoder_backend), x264);
 		m_state = OutputState::Reconnecting;
 		if (m_reconnect_thread.joinable())
 			stale_thread = std::move(m_reconnect_thread);
 	}
+	if (fallback_switched)
+		announce_encoder_fallback();
 	if (stale_thread.joinable())
 		stale_thread.join();
 
@@ -962,10 +1027,13 @@ void OutputController::reconnect_thread_func()
 		 * detached this session (or start() reclaimed it) while we were
 		 * waiting above, bail out now rather than creating encoders for a
 		 * session nobody owns any more. */
+		const bool x264 = x264_registered();
+		EncoderBackend backend;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_stop_reconnect.load() || m_output != captured_output)
 				return;
+			backend = effective_backend_locked(x264); // x264 once the encoder fallback is on
 		}
 
 		/* Re-resolve the canvas on EVERY attempt: it may have been removed or
@@ -984,7 +1052,7 @@ void OutputController::reconnect_thread_func()
 			return;
 		}
 
-		obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video);
+		obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video, backend);
 		obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
 
 		if (!video_enc || !audio_enc) {
@@ -995,6 +1063,15 @@ void OutputController::reconnect_thread_func()
 			if (audio_enc)
 				obs_encoder_release(audio_enc);
 			discard_canvas_candidate(rv);
+			bool fallback_switched = false;
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				if (m_output == captured_output)
+					fallback_switched = encoder_fallback_switched_locked(
+						on_restart_failure(m_recovery, m_endpoint.encoder_backend), x264);
+			}
+			if (fallback_switched)
+				announce_encoder_fallback();
 			continue;
 		}
 
@@ -1064,11 +1141,16 @@ void OutputController::reconnect_thread_func()
 		 * while obs_output_start() was in flight, do nothing further — the
 		 * output's signal handlers are already disconnected, and the reaper
 		 * owns cleanup of the now-detached captured_output. */
+		bool fallback_switched;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_output != captured_output)
 				return;
+			fallback_switched = encoder_fallback_switched_locked(
+				on_restart_failure(m_recovery, m_endpoint.encoder_backend), x264);
 		}
+		if (fallback_switched)
+			announce_encoder_fallback();
 
 		const char *err = obs_output_get_last_error(captured_output);
 		obs_log(LOG_WARNING, "OutputController [%s]: reconnect attempt %d failed: %s",

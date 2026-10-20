@@ -92,6 +92,7 @@ target_sources(
     src/core/StreamlabsLogin.cpp
     src/core/AutosavePolicy.cpp
     src/core/AlertPolicy.cpp
+    src/core/EncoderRecovery.cpp
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp

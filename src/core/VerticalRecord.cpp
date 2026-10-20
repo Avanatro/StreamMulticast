@@ -6,6 +6,7 @@ GPLv2 — see LICENSE for full text.
 */
 
 #include "VerticalRecord.hpp"
+#include "EncoderRecovery.hpp"
 
 #include <obs-data.h>
 
@@ -207,6 +208,15 @@ std::optional<RecordEncoderChoice> vertical_record_fallback_encoder(const std::s
 	if (!failed_was_nvenc)
 		return std::nullopt;
 	return choose_vertical_record_encoder(available);
+}
+
+std::optional<RecordEncoderChoice> vertical_record_runtime_fallback(long long stop_code, const std::string &session_type_id,
+								    bool already_restarted,
+								    const std::set<std::string> &available)
+{
+	if (stop_code != kStopCodeEncodeError || already_restarted)
+		return std::nullopt;
+	return vertical_record_fallback_encoder(session_type_id, available);
 }
 
 RecordEncoderChoice choose_vertical_record_encoder(const std::set<std::string> &available)
