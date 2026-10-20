@@ -284,6 +284,12 @@ obs_encoder_t *EncoderFactory::create_record_video_encoder(const RecordEncoderCh
 	if (choice.type_id == "obs_x264") {
 		obs_data_set_string(settings, "preset", "veryfast");
 		obs_data_set_string(settings, "profile", "high");
+	} else if (choice.type_id.rfind("obs_nvenc", 0) == 0) {
+		/* The vertical recording shares the one NVENC engine with the main recording and the stream.
+		 * Under CQP the quantizer already fixes quality, so multipass and lookahead only cost encoder time
+		 * (measured: two p5 qres encodes kept NVENC at ~70%). */
+		obs_data_set_string(settings, "multipass", "disabled");
+		obs_data_set_bool(settings, "lookahead", false);
 	}
 
 	obs_encoder_t *enc = obs_video_encoder_create(choice.type_id.c_str(), encoder_name.c_str(), settings,
