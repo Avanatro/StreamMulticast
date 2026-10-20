@@ -528,7 +528,7 @@ bool CanvasPreview::write_item(const std::string &scene_uuid, const preview_edit
 		obs_scene_enum_items(scene, find_by_id, &f);
 		if (!f.found)
 			return;
-		if (!obs_sceneitem_locked(f.found)) {
+		if (lock_policy::may_write(obs_sceneitem_locked(f.found))) {
 			vec2 pos;
 			vec2_set(&pos, next.pos.x, next.pos.y);
 			obs_sceneitem_defer_update_begin(f.found);
@@ -667,10 +667,11 @@ void CanvasPreview::contextMenuEvent(QContextMenuEvent *event)
 		 static_cast<float>(event->pos().y() * devicePixelRatioF())});
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
 	int64_t hit = 0;
-	if (sel && sel->visible && preview_edit::hit_item_selectable({*sel}, cp) == sel->id)
+	if (sel && lock_policy::can_edit(snap.items, sel->id) && sel->visible &&
+	    preview_edit::hit_item({*sel}, cp) == sel->id)
 		hit = sel->id;
 	if (hit == 0)
-		hit = preview_edit::hit_item_selectable(snap.items, cp); // a locked item still gets its menu
+		hit = lock_policy::pick_item(snap.items, cp).id; // unlocked first; a locked item still gets its menu
 	if (hit == 0) {
 		event->accept();
 		return;
@@ -722,10 +723,11 @@ void CanvasPreview::mousePressEvent(QMouseEvent *event)
 	if (drag.mode == DragMode::None) {
 		/* Like OBS: a click inside the selected item keeps dragging it even when another item lies on top. */
 		int64_t hit = 0;
-		if (sel && sel->visible && preview_edit::hit_item_selectable({*sel}, cp) == sel->id)
+		if (sel && lock_policy::can_edit(snap.items, sel->id) && sel->visible &&
+		    preview_edit::hit_item({*sel}, cp) == sel->id)
 			hit = sel->id;
 		if (hit == 0)
-			hit = preview_edit::hit_item_selectable(snap.items, cp);
+			hit = lock_policy::pick_item(snap.items, cp).id; // topmost unlocked, else a locked one (select only)
 		if (hit == 0) {
 			m_selection.clear();
 			refresh_overlay();
@@ -828,10 +830,11 @@ void CanvasPreview::nudge_selected(int dx, int dy, bool shift)
 	if (!take_snapshot(snap))
 		return;
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
-	if (!sel || lock_policy::editable_ids(snap.items, {sel->id}).empty())
+	const auto plan = sel ? lock_policy::plan_nudge(snap.items, {sel->id}, dx, dy, shift)
+			      : std::vector<preview_edit::Item>{};
+	if (plan.empty())
 		return; // locked (or gone): arrow keys do nothing
-	preview_edit::Item next = *sel;
-	next.pos = preview_edit::nudge(sel->pos, dx, dy, shift);
+	const preview_edit::Item next = plan.front();
 	if (!write_item(snap.scene_uuid, next)) {
 		preview_edit::end_nudge_burst(m_nudge_burst);
 		return;
@@ -926,8 +929,10 @@ void CanvasPreview::update_hover(const preview_edit::Vec2 &widget_px)
 			cursor = preview_edit::handle_cursor(h, sel->rot);
 	}
 	const preview_edit::Vec2 canvas_pt = preview_edit::widget_to_canvas(view, widget_px);
-	const int64_t hit = preview_edit::hit_item(snap.items, canvas_pt); // editable: hover outline + move cursor
-	if (cursor == preview_edit::Cursor::Arrow && hit != 0)
+	/* Same rule as a click: the topmost unlocked item, else a locked one. Only an editable hit shows Move. */
+	const lock_policy::Pick pick = lock_policy::pick_item(snap.items, canvas_pt);
+	const int64_t hit = pick.id;
+	if (cursor == preview_edit::Cursor::Arrow && pick.editable)
 		cursor = preview_edit::Cursor::Move;
 	setCursor(to_qt(cursor));
 

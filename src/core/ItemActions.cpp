@@ -118,7 +118,7 @@ CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &
 		if (s.items.size() > 1)
 			plan.skipped.push_back({s.name, "source appears " + std::to_string(s.items.size()) + " times"});
 		else if (s.items[0]->locked)
-			plan.skipped.push_back({s.name, "locked"});
+			plan.skipped.push_back({s.name, "locked", true});
 		else
 			plan.targets.push_back({s.uuid, s.items[0]->item_id});
 	}
@@ -128,7 +128,7 @@ CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &
 size_t skipped_locked_count(const CopyPlan &plan)
 {
 	return static_cast<size_t>(std::count_if(plan.skipped.begin(), plan.skipped.end(),
-						 [](const CopySkip &s) { return s.reason == "locked"; }));
+						 [](const CopySkip &s) { return s.locked; }));
 }
 
 } // namespace smulti::item_actions

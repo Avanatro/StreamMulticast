@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "TransformEditor.hpp"
 
 #include "../core/LayoutMath.hpp"
+#include "../core/LockPolicy.hpp"
 #include "../core/OwnedCanvasPolicy.hpp"
 #include "../pipeline/Autosave.hpp"
 
@@ -49,8 +50,11 @@ layout::Size source_size(obs_sceneitem_t *item)
 
 /** One atomic transform write, bounds always NONE. Presets (reset_frame) also reset alignment to
  * top-left and rotation to 0 because they replace the whole transform; numeric Apply keeps both. */
-void write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t, bool reset_frame)
+bool write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t, bool reset_frame)
 {
+	/* The only write path of the panel (Fit, Fill, Apply): one lock gate, shared with the preview and the menus. */
+	if (!lock_policy::may_write(obs_sceneitem_locked(item)))
+		return false;
 	vec2 pos;
 	vec2_set(&pos, t.pos_x, t.pos_y);
 	vec2 scale;
@@ -71,6 +75,7 @@ void write_transform(obs_sceneitem_t *item, const layout::ItemTransform &t, bool
 	obs_sceneitem_set_scale(item, &scale);
 	obs_sceneitem_set_crop(item, &crop);
 	obs_sceneitem_defer_update_end(item);
+	return true;
 }
 
 } // namespace
@@ -195,8 +200,9 @@ void TransformEditor::reload(bool force)
 		return; // never overwrite what the user is typing
 
 	bool found = false;
+	bool locked = false;
 	if (m_item_id != 0 && m_access) {
-		found = m_access(m_scene_uuid, m_item_id, [this](obs_sceneitem_t *item) {
+		found = m_access(m_scene_uuid, m_item_id, [this, &locked](obs_sceneitem_t *item) {
 			vec2 pos;
 			vec2 scale;
 			obs_sceneitem_crop crop;
@@ -223,6 +229,9 @@ void TransformEditor::reload(bool force)
 					   "(the visible size may change).");
 			if (odd_align)
 				info += tr("\nPosition refers to the alignment point of the item, which Apply keeps.");
+			locked = obs_sceneitem_locked(item);
+			if (locked)
+				info = tr("This item is locked: unlock it to edit its transform.\n") + info;
 			m_info->setText(info);
 		});
 	}
@@ -230,7 +239,7 @@ void TransformEditor::reload(bool force)
 		m_item_id = 0;
 		m_info->setText(tr("Select an item to edit its transform."));
 	}
-	set_fields_enabled(found);
+	set_fields_enabled(found && !locked); // read-only while locked (also follows a lock set elsewhere)
 }
 
 void TransformEditor::apply_preset(bool fill)
@@ -246,7 +255,8 @@ void TransformEditor::apply_preset(bool fill)
 		}
 		layout::ItemTransform t = fill ? layout::fill(src, canvas_size()) : layout::fit(src, canvas_size());
 		t.crop = layout::clamp_crop(t.crop, src); // fill rounding can overshoot by < 1 px
-		write_transform(item, t, true);
+		if (!write_transform(item, t, true))
+			error = tr(lock_policy::kLockedReason);
 	});
 	if (!ok)
 		error = tr("The item no longer exists or the active scene changed.");
@@ -285,7 +295,8 @@ void TransformEditor::on_apply()
 			t.crop = layout::clamp_crop(t.crop, src);
 		else
 			t.crop = {}; // unknown source size: do not crop blindly
-		write_transform(item, t, false);
+		if (!write_transform(item, t, false))
+			error = tr(lock_policy::kLockedReason);
 	});
 	if (!ok)
 		error = tr("The item no longer exists or the active scene changed.");

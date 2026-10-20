@@ -76,3 +76,39 @@ SMULTI_TEST(vertical_lock_all_unlock_all_flags)
 	EXPECT_TRUE(lock_policy::lock_all_changes({item(1, true)}, true).empty());
 	EXPECT_TRUE(lock_policy::lock_all_changes({}, false).empty());
 }
+
+SMULTI_TEST(vertical_lock_pick_prefers_unlocked_below_locked_overlay)
+{
+	// 1 = webcam (unlocked) under 2 = locked full-canvas frame
+	Item cam = item(1, false);
+	Item frame = item(2, true);
+	frame.pos = {0, 0};
+	frame.source = {1000, 1000};
+	cam.pos = {10, 10};
+	const std::vector<Item> items = {cam, frame};
+	auto pick = lock_policy::pick_item(items, {50, 50});
+	EXPECT_EQ(pick.id, int64_t(1)); // click goes through the locked frame
+	EXPECT_TRUE(pick.editable);
+	pick = lock_policy::pick_item(items, {500, 500}); // only the frame is there: selectable, not editable
+	EXPECT_EQ(pick.id, int64_t(2));
+	EXPECT_TRUE(!pick.editable);
+	EXPECT_EQ(lock_policy::pick_item(items, {5000, 5000}).id, int64_t(0));
+}
+
+SMULTI_TEST(vertical_lock_plan_nudge_moves_unlocked_only)
+{
+	const std::vector<Item> items = {item(1, false), item(2, true)};
+	const auto plan = lock_policy::plan_nudge(items, {1, 2}, 1, 0, true);
+	EXPECT_EQ(plan.size(), size_t(1));
+	EXPECT_EQ(plan[0].id, int64_t(1));
+	EXPECT_TRUE(plan[0].pos.x == items[0].pos.x + preview_edit::kNudgeStepShift);
+	EXPECT_TRUE(lock_policy::plan_nudge(items, {2}, 1, 0, false).empty());
+}
+
+SMULTI_TEST(vertical_lock_write_gate_refuses_locked)
+{
+	EXPECT_TRUE(!lock_policy::may_write(true));
+	EXPECT_TRUE(lock_policy::may_write(false));
+	EXPECT_TRUE(lock_policy::write_refusal(true) != nullptr);
+	EXPECT_TRUE(lock_policy::write_refusal(false) == nullptr);
+}

@@ -128,6 +128,15 @@ public:
 	}
 };
 
+bool collect_lock_flag(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	preview_edit::Item f;
+	f.id = obs_sceneitem_get_id(item);
+	f.locked = obs_sceneitem_locked(item);
+	static_cast<std::vector<preview_edit::Item> *>(param)->push_back(f);
+	return true;
+}
+
 struct FindItem {
 	int64_t id = 0;
 	obs_sceneitem_t *found = nullptr;
@@ -207,6 +216,9 @@ std::vector<item_actions::SceneItemRef> gather_scene_items(obs_canvas_t *canvas)
 	return out;
 }
 
+/** "Skipped N (M locked): A (reason), B (reason)" */
+QString skipped_summary(const std::vector<item_actions::CopySkip> &skipped);
+
 /** "A (reason), B (reason)" */
 QString skipped_text(const std::vector<item_actions::CopySkip> &skipped)
 {
@@ -214,6 +226,14 @@ QString skipped_text(const std::vector<item_actions::CopySkip> &skipped)
 	for (const auto &s : skipped)
 		parts << QStringLiteral("%1 (%2)").arg(QString::fromStdString(s.scene_name), QString::fromStdString(s.reason));
 	return parts.join(QStringLiteral(", "));
+}
+
+QString skipped_summary(const std::vector<item_actions::CopySkip> &skipped)
+{
+	return QObject::tr("Skipped %1 (%2 locked): %3")
+		.arg(skipped.size())
+		.arg(std::count_if(skipped.begin(), skipped.end(), [](const item_actions::CopySkip &k) { return k.locked; }))
+		.arg(skipped_text(skipped));
 }
 
 struct InputNames {
@@ -1166,15 +1186,6 @@ void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid
 }
 
 /* Lock/unlock every item of the scene the caller saw. Only flags that differ are written (lock_policy). */
-bool collect_lock_flag(obs_scene_t *, obs_sceneitem_t *item, void *param)
-{
-	preview_edit::Item f;
-	f.id = obs_sceneitem_get_id(item);
-	f.locked = obs_sceneitem_locked(item);
-	static_cast<std::vector<preview_edit::Item> *>(param)->push_back(f);
-	return true;
-}
-
 void VerticalItemList::set_all_locked(std::string scene_uuid, bool lock)
 {
 	size_t changed = 0;
@@ -1257,7 +1268,7 @@ void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid
 	const layout::Size canvas = owned_canvas_size(m_canvas);
 	bool locked = false;
 	const bool ok = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
-		if (obs_sceneitem_locked(item)) {
+		if (!lock_policy::may_write(obs_sceneitem_locked(item))) {
 			locked = true;
 			return;
 		}
@@ -1298,7 +1309,7 @@ void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid
 	if (!ok)
 		set_status(tr("The item no longer exists or the active scene changed."));
 	else if (locked)
-		set_status(tr("The item is locked. Unlock it first."));
+		set_status(tr(lock_policy::kLockedReason));
 	else
 		set_status(QString());
 	reload_editor(true);
@@ -1333,7 +1344,7 @@ void VerticalItemList::copy_transform_to_other_scenes(std::string scene_uuid, in
 	}
 	if (plan.targets.empty()) {
 		set_status(plan.skipped.empty() ? tr("No other vertical scene contains this source.")
-						: tr("Nothing copied. Skipped: %1").arg(skipped_text(plan.skipped)));
+						: tr("Nothing copied. %1").arg(skipped_summary(plan.skipped)));
 		return;
 	}
 
@@ -1375,8 +1386,8 @@ void VerticalItemList::copy_transform_to_other_scenes(std::string scene_uuid, in
 			not_done.push_back({name, "item vanished"});
 			continue;
 		}
-		if (obs_sceneitem_locked(f.found)) {
-			not_done.push_back({name, "locked"});
+		if (!lock_policy::may_write(obs_sceneitem_locked(f.found))) {
+			not_done.push_back({name, "locked", true});
 		} else {
 			obs_sceneitem_defer_update_begin(f.found);
 			obs_sceneitem_set_info2(f.found, &info);
@@ -1391,14 +1402,8 @@ void VerticalItemList::copy_transform_to_other_scenes(std::string scene_uuid, in
 	obs_canvas_release(canvas);
 
 	QString status = tr("Transform copied to %1 scenes").arg(applied);
-	if (!not_done.empty()) {
-		item_actions::CopyPlan outcome;
-		outcome.skipped = not_done;
-		status += tr(". Skipped %1 (%2 locked): %3")
-				  .arg(not_done.size())
-				  .arg(item_actions::skipped_locked_count(outcome))
-				  .arg(skipped_text(not_done));
-	}
+	if (!not_done.empty())
+		status += QStringLiteral(". ") + skipped_summary(not_done);
 	set_status(status);
 	if (applied > 0) {
 		reload_editor(true);

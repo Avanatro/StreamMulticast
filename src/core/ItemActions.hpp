@@ -68,6 +68,7 @@ struct CopyTarget {
 struct CopySkip {
 	std::string scene_name;
 	std::string reason;
+	bool locked = false; ///< skipped because the item is locked (counted by skipped_locked_count)
 };
 
 struct CopyPlan {
