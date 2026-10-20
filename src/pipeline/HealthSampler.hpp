@@ -34,6 +34,7 @@ struct HealthSnapshot {
 	int            target_bitrate = 0;      ///< kbps from Endpoint config
 	double         actual_bitrate = 0.0;    ///< kbps, rolling 5s avg
 	uint64_t       dropped_frames = 0;      ///< cumulative total
+	uint64_t       total_frames   = 0;      ///< frames handed to the output this session (0 when not streaming)
 	int            reconnect_count = 0;     ///< incremented per reconnect attempt
 	int64_t        uptime_sec     = 0;      ///< seconds since output started
 	std::string    last_error;

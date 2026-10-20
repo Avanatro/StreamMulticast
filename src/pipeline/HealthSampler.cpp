@@ -173,6 +173,7 @@ void HealthSampler::sample_output(const Endpoint &ep, const std::shared_ptr<Outp
 	}
 
 	snap.dropped_frames = dropped;
+	snap.total_frames   = static_cast<uint64_t>(sample.total_frames > 0 ? sample.total_frames : 0);
 
 	/* Uptime — computed from OutputController's own "start" signal timestamp
 	 * (std::chrono::steady_clock), NOT obs_output_get_connect_time_ms(): that
@@ -214,6 +215,7 @@ void HealthSampler::write_inactive_snapshot(const Endpoint &ep, const std::strin
 	snap.state           = state;
 	snap.actual_bitrate  = 0.0;
 	snap.dropped_frames  = 0;
+	snap.total_frames    = 0;
 	snap.reconnect_count = 0;
 	snap.uptime_sec      = 0;
 

@@ -7,6 +7,7 @@ GPLv2 — see LICENSE for full text.
 
 #pragma once
 
+#include "../pipeline/AlertMonitor.hpp"
 #include "../pipeline/HealthSampler.hpp"
 
 #include <QtWidgets/QWidget>
@@ -14,6 +15,8 @@ GPLv2 — see LICENSE for full text.
 #include <QtCore/QAbstractTableModel>
 #include <QtCore/QTimer>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QCheckBox>
+#include <map>
 #include <vector>
 #include <string>
 
@@ -36,6 +39,9 @@ class EndpointRegistry;
  * refresh() fetches a snapshot from HealthSampler and calls
  * beginResetModel/endResetModel.  Called from HealthTab's 500 ms QTimer.
  *
+ * A row whose endpoint has an active alert (AlertMonitor) gets a red background
+ * (BackgroundRole) and the alert reasons at the top of its tooltip.
+ *
  * Thread safety: refresh() is always called from the Qt main thread
  * (via QTimer → queued connection ensures this).
  */
@@ -45,6 +51,7 @@ class HealthTableModel : public QAbstractTableModel {
 public:
 	explicit HealthTableModel(EndpointRegistry &registry,
 	                          HealthSampler    &sampler,
+	                          AlertMonitor     &alerts,
 	                          QObject          *parent = nullptr);
 
 	/* QAbstractTableModel overrides */
@@ -60,9 +67,11 @@ public:
 private:
 	EndpointRegistry &m_registry;
 	HealthSampler    &m_sampler;
+	AlertMonitor     &m_alerts;
 
 	std::vector<Endpoint>                            m_endpoints_cache;
 	std::unordered_map<std::string, HealthSnapshot>  m_snapshot_cache;
+	std::map<std::string, AlertStatus>               m_alert_cache;   ///< endpoints with an active alert
 
 	static constexpr int COL_NAME       = 0;
 	static constexpr int COL_STATUS     = 1;
@@ -82,6 +91,7 @@ private:
  *
  * Contains:
  *   - QTableView backed by HealthTableModel
+ *   - Two alert settings checkboxes (sound, obs-websocket event), persisted by AlertMonitor
  *   - Footer label with cross-sell link to Stream Health Doctor
  *   - 500 ms QTimer that calls HealthTableModel::refresh()
  */
@@ -91,6 +101,7 @@ class HealthTab : public QWidget {
 public:
 	explicit HealthTab(EndpointRegistry &registry,
 	                   HealthSampler    &sampler,
+	                   AlertMonitor     &alerts,
 	                   QWidget          *parent = nullptr);
 	~HealthTab() override = default;
 
@@ -102,7 +113,10 @@ private:
 
 	EndpointRegistry   &m_registry;
 	HealthSampler      &m_sampler;
+	AlertMonitor       &m_alerts;
 
+	QCheckBox          *m_sound_check{nullptr};
+	QCheckBox          *m_ws_check   {nullptr};
 	QTableView         *m_table      {nullptr};
 	HealthTableModel   *m_model      {nullptr};
 	QLabel             *m_footer     {nullptr};

@@ -91,6 +91,7 @@ target_sources(
     src/core/StreamlabsTikTok.cpp
     src/core/StreamlabsLogin.cpp
     src/core/AutosavePolicy.cpp
+    src/core/AlertPolicy.cpp
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp
@@ -102,6 +103,7 @@ target_sources(
     src/pipeline/ControllerReaper.cpp
     src/pipeline/HealthSampler.cpp
     src/pipeline/Autosave.cpp
+    src/pipeline/AlertMonitor.cpp
 
     # UI layer
     src/ui/MultistreamDock.cpp
@@ -129,6 +131,11 @@ if(SMULTI_STREAMLABS_TIKTOK)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE SMULTI_STREAMLABS_TIKTOK=1)
   # winhttp: API calls; crypt32: token vault (DPAPI); ws2_32 + bcrypt: browser login (loopback callback, PKCE)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winhttp crypt32 ws2_32 bcrypt)
+endif()
+
+# winmm: PlaySoundW for the optional local alert sound (system DLL, no file shipped; Qt Multimedia is not used)
+if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winmm)
 endif()
 
 # Include directories

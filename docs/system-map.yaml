@@ -29,6 +29,7 @@ size_ignore:
   - "cmake/.CMakeBuildNumber"
   - "**/*.subagent"
   - "*.subagent"
+  - "src/third_party/**"
 
 nodes:
   - id: endpoint-model
@@ -633,6 +634,7 @@ nodes:
     owns: [output.state-machine, output.reconnect-policy, output.libobs-objects]
     needs: [encoder-factory, canvas-selection, controller-reaper, streamlabs-client]
     code:
+      - src/core/OutputState.hpp
       - src/pipeline/OutputController.hpp
       - src/pipeline/OutputController.cpp
     works_when:
@@ -679,6 +681,9 @@ nodes:
     works_when:
       - id: health-sampling.rolling
         behavior: "Actual bitrate is a rolling average reset on inactive transition."
+        verification: []
+      - id: health-sampling.total-frames
+        behavior: "HealthSnapshot.total_frames is obs_output_get_total_frames of the running output (read with the other sample fields under OutputController's lock in OutputController::sample(), SampleData.total_frames) and 0 for an endpoint that is not streaming; AlertMonitor needs it for the dropped-frame ratio. Only compiled locally, not run in OBS."
         verification: []
     status: building
   - id: main-stream-linking
@@ -771,7 +776,7 @@ nodes:
     lane: ui
     goal: "User sees live health per endpoint."
     owns: [ui.health-tab]
-    needs: [health-sampling]
+    needs: [health-sampling, alert-monitor]
     code:
       - src/ui/HealthTab.hpp
       - src/ui/HealthTab.cpp
@@ -779,12 +784,18 @@ nodes:
       - id: ui-health-tab.grid
         behavior: "Health grid updates incrementally each tick."
         verification: []
+      - id: ui-health-tab.alert-visible
+        behavior: "A row whose endpoint has an active alert has a red background and the alert reasons at the top of its tooltip (above last_error); the row changes as soon as the alert is raised or cleared. Two checkboxes below the grid, 'Play a sound on alerts' (default off) and 'Send alerts to obs-websocket (vendor event)' (default on), are saved to alerts.json immediately and restored on the next start. Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): with an endpoint live, unplug the network for about 20 s: the endpoint row turns red and its tooltip names the alert; after the network is back and about 10 s of Live the row is normal again. Toggle both checkboxes, restart OBS: they keep their state (not run, TASK-34)"
+            result: pending
     status: building
   - id: ui-dock
     lane: ui
     goal: "One OBS dock hosts the config and health tabs."
     owns: [ui.dock]
-    needs: [ui-config-tab, ui-health-tab]
+    needs: [ui-config-tab, ui-health-tab, alert-monitor]
     code:
       - src/ui/MultistreamDock.hpp
       - src/ui/MultistreamDock.cpp
@@ -792,6 +803,12 @@ nodes:
       - id: ui-dock.dock
         behavior: "Dock registers once and is removed on unload."
         verification: []
+      - id: ui-dock.alert-badge
+        behavior: "The first tab reads 'Health (!)' while any endpoint has a warning alert, 'Health (!!)' while any has a critical alert, plain 'Health' otherwise; it follows AlertMonitor::levels_changed. Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): same network-unplug test as ui-health-tab.alert-visible: the tab title shows (!) during Reconnecting and (!!) after FailedHard, and plain Health again after recovery (not run, TASK-34)"
+            result: pending
     status: building
   - id: ui-vertical-dock
     lane: ui
@@ -971,6 +988,128 @@ nodes:
             reference: "OBS runtime check (ON build): Dima clicks 'Log in with Streamlabs…', logs in in the browser, the tab says 'You can close this tab', the dialog shows 'Connected as @user'; Cancel while waiting restores the buttons; with Streamlabs Desktop logged in, 'Use Streamlabs Desktop login' connects (not run in this session, TASK-32)"
             result: pending
     status: building
+  - id: alert-policy
+    lane: core
+    goal: "Live health problems of an endpoint are decided from its numbers without OBS, Qt or a clock, and are reported once per raise and once per clear."
+    owns: [alert.policy, alert.event-payload, alert.settings]
+    needs: []
+    code:
+      - src/core/AlertPolicy.hpp
+      - src/core/AlertPolicy.cpp
+      - tests/test_alert_policy.cpp
+    works_when:
+      - id: alert-policy.decide
+        behavior: "AlertPolicy::update takes one AlertInput per endpoint per 500 ms tick (state, target and actual kbps, cumulative dropped and total frames, explicit now_ms). Reconnecting raises a warning 'reconnecting', FailedHard a critical 'failed' (it replaces a raised 'reconnecting'), both at once. While Live and 10 s after Live began (startup grace, restarted by every reconnect): 'dropped_frames' (warning) when the last 10 s hold dropped_delta/frames_delta >= 2 % and dropped_delta >= 10, 'low_bitrate' (warning) when actual < 50 % of target continuously for 15 s. A raised alert clears after its condition was false for 10 s in a row (state alerts: after 10 s of Live; Idle clears everything at once) and may re-raise at once. A counter that goes backwards (new session) or frames_total 0 restarts the window, never a negative delta. Raise and clear are edges: a standing condition yields one transition. Thresholds are the AlertThresholds defaults."
+        verification:
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_reconnecting_raises_warning
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_failed_hard_raises_critical
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_dropped_frames_over_threshold_raises
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_dropped_frames_below_threshold_silent
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_low_bitrate_after_15s_raises
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_short_bitrate_dip_silent
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_startup_grace
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_hysteresis_clears_after_hold
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_raise_is_edge_triggered
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_policy_counter_reset_no_negative
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+      - id: alert-policy.payload
+        behavior: "alert_event_payload(transition) has exactly the fields endpoint_id, endpoint_name, level ('warning'|'critical'), reason, active (bool) and state; it takes no server URL, key, token or last_error, so none can appear."
+        verification:
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_event_payload_has_no_secrets
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+      - id: alert-policy.settings
+        behavior: "AlertSettings {sound_enabled=false, websocket_enabled=true} round-trips through obs_data (alerts.json); missing keys keep the defaults. alert_sound_allowed allows at most one sound per 30 s across endpoints."
+        verification:
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: alert_settings_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_alert_policy.cpp
+            check: sound_throttle_once_per_30s
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R alert_, local run 2026-10-20; stub AlertPolicy: 11 of 13 new tests failed (the two silent-case tests pass vacuously on a stub), 13/13 passed after implementation; full ctest 174/174 (TASK-34)"
+            checked_at: 2026-10-20
+    status: building
+  - id: alert-monitor
+    lane: pipeline
+    goal: "A live health problem reaches the streamer within a second: a badge in the dock, an optional local sound and an obs-websocket vendor event."
+    owns: [alert.monitor, alert.websocket-vendor]
+    needs: [alert-policy, health-sampling, endpoint-registry]
+    code:
+      - src/pipeline/AlertMonitor.hpp
+      - src/pipeline/AlertMonitor.cpp
+      - src/third_party/obs-websocket/obs-websocket-api.h
+      - src/third_party/obs-websocket/README.md
+    works_when:
+      - id: alert-monitor.websocket-event
+        behavior: "On each raise and each clear (UI thread, 500 ms timer) the monitor emits obs-websocket vendor event 'alert' under the vendor 'streammulticast' with the alert-policy.payload fields, when 'Send alerts to obs-websocket' is on and the vendor registered in obs_module_post_load; obs-websocket missing, disabled or too old logs one LOG_INFO line and everything else keeps working. Subscribers must opt in to the Vendors event subscription (1 << 9). The vendored obs-websocket-api.h is unmodified (obsproject/obs-websocket 68bebc28be57a8ca371404182113e16eeac74cbf, GPL-2.0-or-later). Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): with an endpoint live, unplug the network for about 20 s; an obs-websocket client subscribed to Vendors (e.g. a small node script) receives op 5 VendorEvent {vendorName:'streammulticast', eventType:'alert', eventData:{..., active:true}}, later active:false (not run, TASK-34)"
+            result: pending
+      - id: alert-monitor.sound
+        behavior: "With 'Play a sound on alerts' on, each raise plays the Windows 'SystemExclamation' alias through PlaySoundW (asynchronous, local only, no file shipped), at most once per 30 s across endpoints; off by default. winmm is the only new import (no Qt Multimedia). Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): enable the sound checkbox, repeat the network-unplug test: one exclamation sound at the raise, none repeated within 30 s (not run, TASK-34)"
+            result: pending
+    status: building
   - id: collection-autosave
     lane: pipeline
     goal: "Edits the plugin makes to the owned vertical canvas reach the scene collection file within seconds, so an OBS crash does not lose them."
@@ -1033,7 +1172,7 @@ nodes:
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, collection-autosave, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, collection-autosave, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow, alert-monitor]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h
@@ -1041,6 +1180,9 @@ nodes:
     works_when:
       - id: plugin-entry.load-unload
         behavior: "Load then unload leaves no running threads or dangling references."
+        verification: []
+      - id: plugin-entry.alerts-wiring
+        behavior: "obs_module_load creates and starts the AlertMonitor after the HealthSampler and hands it to the dock; obs_module_post_load (new) registers the obs-websocket vendor; EXIT and obs_module_unload stop the monitor before HealthSampler::stop(), unload releases the vendor handle and destroys the monitor after the dock is removed and before the registry. Only compiled locally, not run in OBS."
         verification: []
     status: building
   - id: test-harness

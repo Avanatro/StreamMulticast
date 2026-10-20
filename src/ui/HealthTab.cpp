@@ -14,18 +14,44 @@ GPLv2 — see LICENSE for full text.
 #include <QDesktopServices>
 #include <QUrl>
 #include <QFont>
+#include <QCheckBox>
+#include <QStringList>
 
 namespace smulti {
+
+namespace {
+
+QString alert_reason_text(const std::string &reason)
+{
+	if (reason == kAlertReasonReconnecting)
+		return QObject::tr("Reconnecting");
+	if (reason == kAlertReasonFailed)
+		return QObject::tr("Output failed");
+	if (reason == kAlertReasonDropped)
+		return QObject::tr("Dropped frames: at least 2 % of the last 10 seconds");
+	if (reason == kAlertReasonLowBitrate)
+		return QObject::tr("Bitrate below 50 % of target for 15 seconds");
+	return QString::fromStdString(reason);
+}
+
+bool same_alert(const AlertStatus &a, const AlertStatus &b)
+{
+	return a.level == b.level && a.reasons == b.reasons;
+}
+
+} // namespace
 
 /* -----------------------------------------------------------------------
  * HealthTableModel
  * ----------------------------------------------------------------------- */
 HealthTableModel::HealthTableModel(EndpointRegistry &registry,
                                    HealthSampler    &sampler,
+                                   AlertMonitor     &alerts,
                                    QObject          *parent)
 	: QAbstractTableModel(parent)
 	, m_registry(registry)
 	, m_sampler(sampler)
+	, m_alerts(alerts)
 {
 }
 
@@ -127,10 +153,25 @@ QVariant HealthTableModel::data(const QModelIndex &index, int role) const
 		return QBrush(state_color(state));
 	}
 
+	auto alert_it = m_alert_cache.find(ep.id);
+	const AlertStatus *alert = alert_it != m_alert_cache.end() ? &alert_it->second : nullptr;
+
+	if (role == Qt::BackgroundRole && alert)
+		return QBrush(QColor(192, 57, 43, 110)); // red, translucent so it works on light and dark themes
+
 	if (role == Qt::ToolTipRole) {
-		if (!snap || snap->last_error.empty())
+		QStringList lines;
+		if (alert) {
+			QStringList reasons;
+			for (const auto &r : alert->reasons)
+				reasons << alert_reason_text(r);
+			lines << tr("Alert: %1").arg(reasons.join(QStringLiteral("; ")));
+		}
+		if (snap && !snap->last_error.empty())
+			lines << QString::fromStdString(snap->last_error);
+		if (lines.isEmpty())
 			return {};
-		return QString::fromStdString(snap->last_error);
+		return lines.join(QChar(0x0A));
 	}
 
 	return {};
@@ -140,6 +181,7 @@ void HealthTableModel::refresh()
 {
 	auto new_endpoints = m_registry.all();
 	auto new_snapshots = m_sampler.snapshot();
+	auto new_alerts    = m_alerts.statuses();
 
 	/* H2 fix: beginResetModel()/endResetModel() on every 500 ms poll tick
 	 * invalidated selection, scroll position and every persistent model
@@ -164,6 +206,7 @@ void HealthTableModel::refresh()
 		beginResetModel();
 		m_endpoints_cache = std::move(new_endpoints);
 		m_snapshot_cache  = std::move(new_snapshots);
+		m_alert_cache     = std::move(new_alerts);
 		endResetModel();
 		return;
 	}
@@ -174,9 +217,11 @@ void HealthTableModel::refresh()
 	 * observes the new values. */
 	auto old_endpoints_cache = std::move(m_endpoints_cache);
 	auto old_snapshot_cache  = std::move(m_snapshot_cache);
+	auto old_alert_cache     = std::move(m_alert_cache);
 
 	m_endpoints_cache = std::move(new_endpoints);
 	m_snapshot_cache  = std::move(new_snapshots);
+	m_alert_cache     = std::move(new_alerts);
 
 	for (int row = 0; row < static_cast<int>(m_endpoints_cache.size()); ++row) {
 		const Endpoint &old_ep = old_endpoints_cache[static_cast<size_t>(row)];
@@ -250,11 +295,21 @@ void HealthTableModel::refresh()
 			last_changed  = COL_COUNT - 1;
 		}
 
+		/* An alert raised or cleared changes the row background and tooltip in every column. */
+		auto old_alert = old_alert_cache.find(old_ep.id);
+		auto new_alert = m_alert_cache.find(new_ep.id);
+		const bool old_has = old_alert != old_alert_cache.end();
+		const bool new_has = new_alert != m_alert_cache.end();
+		if (old_has != new_has || (old_has && !same_alert(old_alert->second, new_alert->second))) {
+			first_changed = 0;
+			last_changed  = COL_COUNT - 1;
+		}
+
 		if (first_changed >= 0) {
 			QModelIndex top_left     = index(row, first_changed);
 			QModelIndex bottom_right = index(row, last_changed);
 			emit dataChanged(top_left, bottom_right,
-			                  {Qt::DisplayRole, Qt::ForegroundRole, Qt::ToolTipRole});
+			                  {Qt::DisplayRole, Qt::ForegroundRole, Qt::ToolTipRole, Qt::BackgroundRole});
 		}
 	}
 }
@@ -264,10 +319,12 @@ void HealthTableModel::refresh()
  * ----------------------------------------------------------------------- */
 HealthTab::HealthTab(EndpointRegistry &registry,
                      HealthSampler    &sampler,
+                     AlertMonitor     &alerts,
                      QWidget          *parent)
 	: QWidget(parent)
 	, m_registry(registry)
 	, m_sampler(sampler)
+	, m_alerts(alerts)
 {
 	setup_ui();
 }
@@ -279,7 +336,7 @@ void HealthTab::setup_ui()
 	layout->setSpacing(4);
 
 	/* Live-grid table */
-	m_model = new HealthTableModel(m_registry, m_sampler, this);
+	m_model = new HealthTableModel(m_registry, m_sampler, m_alerts, this);
 	m_table = new QTableView(this);
 	m_table->setModel(m_model);
 	m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -291,6 +348,23 @@ void HealthTab::setup_ui()
 	m_table->setAlternatingRowColors(true);
 
 	layout->addWidget(m_table, 1 /* stretch */);
+
+	/* Alert settings (persisted by AlertMonitor in alerts.json). Set the state before connecting. */
+	const AlertSettings alert_settings = m_alerts.settings();
+	m_sound_check = new QCheckBox(tr("Play a sound on alerts"), this);
+	m_sound_check->setChecked(alert_settings.sound_enabled);
+	m_ws_check = new QCheckBox(tr("Send alerts to obs-websocket (vendor event)"), this);
+	m_ws_check->setChecked(alert_settings.websocket_enabled);
+	layout->addWidget(m_sound_check);
+	layout->addWidget(m_ws_check);
+	auto apply_alert_settings = [this] {
+		AlertSettings s;
+		s.sound_enabled     = m_sound_check->isChecked();
+		s.websocket_enabled = m_ws_check->isChecked();
+		m_alerts.set_settings(s);
+	};
+	connect(m_sound_check, &QCheckBox::toggled, this, apply_alert_settings);
+	connect(m_ws_check, &QCheckBox::toggled, this, apply_alert_settings);
 
 	/* Footer — cross-sell link to Stream Health Doctor plus a discreet
 	 * Avanatro credit linking to the homepage.

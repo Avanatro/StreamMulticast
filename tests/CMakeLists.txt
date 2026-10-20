@@ -26,6 +26,7 @@ set(SMULTI_TEST_SOURCES
     test_vertical_transition.cpp
     test_streamlabs_login.cpp
     test_autosave_policy.cpp
+    test_alert_policy.cpp
 )
 
 add_executable(
@@ -48,6 +49,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/VerticalTransition.cpp
   ${CMAKE_SOURCE_DIR}/src/core/StreamlabsLogin.cpp
   ${CMAKE_SOURCE_DIR}/src/core/AutosavePolicy.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/AlertPolicy.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(

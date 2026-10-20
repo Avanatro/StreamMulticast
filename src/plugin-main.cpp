@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "core/EndpointRegistry.hpp"
 #include "core/LinkedStart.hpp"
 #include "core/MainServiceTarget.hpp"
+#include "pipeline/AlertMonitor.hpp"
 #include "pipeline/Autosave.hpp"
 #include "pipeline/ControllerReaper.hpp"
 #include "pipeline/HealthSampler.hpp"
@@ -55,6 +56,7 @@ static std::unique_ptr<smulti::ControllerReaper>  g_reaper;
 static std::unique_ptr<smulti::ConfigStore>      g_config_store;
 static std::unique_ptr<smulti::EndpointRegistry> g_registry;
 static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
+static std::unique_ptr<smulti::AlertMonitor>     g_alert_monitor; /* UI-thread timer; stopped before g_health_sampler, destroyed before g_registry */
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static std::unique_ptr<smulti::VerticalRecorder> g_vertical_recorder; /* shut down before g_owned_canvas goes, destroyed after the dock */
 /* UI-thread context for calls posted from libobs threads (vertical recorder "stop" signal, hotkey).
@@ -347,6 +349,8 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
+		if (g_alert_monitor)
+			g_alert_monitor->stop(); // before the sampler it reads
 		if (g_health_sampler)
 			g_health_sampler->stop();
 	}
@@ -394,6 +398,11 @@ bool obs_module_load()
 	g_health_sampler = std::make_unique<smulti::HealthSampler>(*g_registry);
 	g_health_sampler->start();
 
+	/* 4b. Live health alerts: reads the sampler on a UI-thread timer. The obs-websocket vendor is
+	 * registered later, in obs_module_post_load(). */
+	g_alert_monitor = std::make_unique<smulti::AlertMonitor>(*g_registry, *g_health_sampler);
+	g_alert_monitor->start();
+
 	/* 5. Register frontend event handler (for linked-to-main-stream behaviour) */
 	// AVANATRO-VERIFY: obs_frontend_add_event_callback signature — verify it exists in
 	// obs-frontend-api.h for OBS 30+ (it does in OBS 30.x, but confirm 31.x didn't rename it).
@@ -413,7 +422,7 @@ bool obs_module_load()
 	 * Prototype from OBS 30.2+: bool obs_frontend_add_dock_by_id(const char *id,
 	 *   const char *title, QWidget *widget, Qt::DockWidgetArea area = Qt::RightDockWidgetArea);
 	 * Use 3-arg form for broadest compatibility. */
-	g_dock = new smulti::MultistreamDock(*g_registry, *g_health_sampler);
+	g_dock = new smulti::MultistreamDock(*g_registry, *g_health_sampler, *g_alert_monitor);
 
 	/* obs_frontend_add_dock_by_id() returns false BEFORE calling setWidget()
 	 * on a duplicate dock id (see OBSStudioAPI.cpp: the id-collision check
@@ -446,6 +455,15 @@ bool obs_module_load()
 
 	obs_log(LOG_INFO, "StreamMulticast v%s loaded successfully", PLUGIN_VERSION);
 	return true;
+}
+
+/* -----------------------------------------------------------------------
+ * obs_module_post_load — called by OBS once every module has loaded. The obs-websocket vendor API
+ * must only be registered from here (the plugin's alert events go through it).
+ * ----------------------------------------------------------------------- */
+void obs_module_post_load()
+{
+	smulti::alerts_register_vendor();
 }
 
 /* -----------------------------------------------------------------------
@@ -509,6 +527,12 @@ void obs_module_unload()
 	/* Drop the owned-canvas reference before the registry goes away. */
 	g_owned_canvas.reset();
 
+	/* Alerts read the sampler: stop them first. The object itself outlives the dock (its widgets hold a
+	 * reference) and is destroyed below, before the registry. */
+	if (g_alert_monitor)
+		g_alert_monitor->stop();
+	smulti::alerts_release_vendor();
+
 	/* Stop health sampler thread */
 	if (g_health_sampler) {
 		g_health_sampler->stop();
@@ -536,6 +560,9 @@ void obs_module_unload()
 
 	/* The dock referenced the recorder. After shutdown() it refuses start() and never touches the owned canvas. */
 	g_vertical_recorder.reset();
+
+	/* The dock is gone, nothing references the alert monitor any more. */
+	g_alert_monitor.reset();
 
 	/* Destroying the registry enqueues every remaining OutputController to
 	 * the reaper (see EndpointRegistry::~EndpointRegistry) instead of

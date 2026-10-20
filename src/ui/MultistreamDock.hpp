@@ -15,6 +15,7 @@ namespace smulti {
 
 class EndpointRegistry;
 class HealthSampler;
+class AlertMonitor;
 class HealthTab;
 class ConfigTab;
 
@@ -40,14 +41,18 @@ class MultistreamDock : public QWidget {
 public:
 	explicit MultistreamDock(EndpointRegistry &registry,
 	                         HealthSampler    &sampler,
+	                         AlertMonitor     &alerts,
 	                         QWidget          *parent = nullptr);
 	~MultistreamDock() override = default;
 
 private:
 	void setup_ui();
+	/** "Health", "Health (!)" while a warning is active, "Health (!!)" while a critical alert is. */
+	void update_health_tab_title();
 
 	EndpointRegistry &m_registry;
 	HealthSampler    &m_sampler;
+	AlertMonitor     &m_alerts;
 
 	QTabWidget *m_tabs      {nullptr};
 	HealthTab  *m_health_tab{nullptr};

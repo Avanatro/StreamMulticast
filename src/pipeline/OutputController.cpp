@@ -147,6 +147,7 @@ OutputController::SampleData OutputController::sample() const
 	if (data.active) {
 		data.total_bytes    = obs_output_get_total_bytes(m_output);
 		data.frames_dropped = obs_output_get_frames_dropped(m_output);
+		data.total_frames   = obs_output_get_total_frames(m_output);
 	}
 	return data;
 }

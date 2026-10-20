@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #pragma once
 
 #include "../core/Endpoint.hpp"
+#include "../core/OutputState.hpp"
 #include "EncoderFactory.hpp"
 #ifdef SMULTI_STREAMLABS_TIKTOK
 #include "../core/StreamlabsTikTok.hpp"
@@ -36,22 +37,6 @@ typedef struct obs_canvas obs_canvas_t;
 namespace smulti {
 
 class ControllerReaper;
-
-/**
- * OutputState — state machine for a single RTMP output.
- *
- * Transitions:
- *   Idle → Starting → Live → Reconnecting → Live
- *                          ↘ FailedHard
- *   Any → Idle (via stop())
- */
-enum class OutputState : int {
-	Idle         = 0,
-	Starting     = 1,
-	Live         = 2,
-	Reconnecting = 3,
-	FailedHard   = 4,
-};
 
 /**
  * ReconnectSchedule — pure function, testable without libobs.
@@ -197,6 +182,7 @@ public:
 		bool     active         {false};
 		uint64_t total_bytes    {0};
 		int      frames_dropped {0};
+		int      total_frames   {0};  ///< obs_output_get_total_frames: frames handed to the output this session
 	};
 
 	/**
