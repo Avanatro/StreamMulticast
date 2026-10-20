@@ -19,6 +19,8 @@ GPLv2 — see LICENSE for full text.
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // libobs forward declarations
 struct obs_output;
@@ -75,14 +77,22 @@ public:
 	VerticalRecorder(const VerticalRecorder &) = delete;
 	VerticalRecorder &operator=(const VerticalRecorder &) = delete;
 
-	/* ---- settings (persisted in <module config>/vertical-record.json with the hotkey binding) ---- */
+	/*
+	 * ---- settings (persisted in <module config>/vertical-record.json with the hotkey bindings) ----
+	 * The recorder is the only writer of that file; the vertical replay buffer reads its part
+	 * (settings().replay, resolve_replay_folder()) and registers its hotkeys here (add_hotkey).
+	 */
 	VerticalRecordSettings settings() const;
 	void set_settings(const VerticalRecordSettings &settings); ///< UI thread; writes the file
-	void set_hotkey(size_t hotkey_id);                         ///< loads the saved binding into it
+	void set_hotkey(size_t hotkey_id);                         ///< the record hotkey; loads the saved binding into it
+	/** Persist `hotkey_id`'s binding under `key` of the settings file; loads the saved binding into it. */
+	void add_hotkey(const std::string &key, size_t hotkey_id);
 	void save_settings_file() const;
 
 	/** The folder a start would record to, or why it is refused (reads the active profile). UI thread. */
 	VerticalRecordFolder resolve_folder() const;
+	/** The vertical replay buffer's clip folder (settings().replay.folder), same rules (never C:). UI thread. */
+	VerticalRecordFolder resolve_replay_folder() const;
 
 	/* ---- control (UI thread) ---- */
 	bool start(bool with_main = false);
@@ -154,7 +164,7 @@ private:
 	bool m_restart_with_main = false; ///< "started with main" of the session the pending restart continues
 	std::string m_error;
 	VerticalRecordSettings m_settings;
-	size_t m_hotkey = static_cast<size_t>(-1);
+	std::vector<std::pair<std::string, size_t>> m_hotkeys; ///< settings-file key -> hotkey id
 	std::atomic<std::uint64_t> m_session_id{0};
 	std::function<void()> m_listener;
 	bool m_shut_down = false;

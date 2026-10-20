@@ -32,6 +32,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "pipeline/OutputController.hpp"
 #include "pipeline/OwnedCanvas.hpp"
 #include "pipeline/VerticalRecorder.hpp"
+#include "pipeline/VerticalReplayBuffer.hpp"
 #ifdef SMULTI_STREAMLABS_TIKTOK
 #include "pipeline/StreamlabsClient.hpp"
 #include "pipeline/StreamlabsLoginFlow.hpp"
@@ -59,6 +60,8 @@ static std::unique_ptr<smulti::HealthSampler>    g_health_sampler;
 static std::unique_ptr<smulti::AlertMonitor>     g_alert_monitor; /* UI-thread timer; stopped before g_health_sampler, destroyed before g_registry */
 static std::unique_ptr<smulti::OwnedCanvas>      g_owned_canvas; /* created after the registry, destroyed before it */
 static std::unique_ptr<smulti::VerticalRecorder> g_vertical_recorder; /* shut down before g_owned_canvas goes, destroyed after the dock */
+/* Vertical replay buffer; its settings and hotkey bindings live in g_vertical_recorder's file. Same lifetime. */
+static std::unique_ptr<smulti::VerticalReplayBuffer> g_vertical_replay;
 /* UI-thread context for calls posted from libobs threads (vertical recorder "stop" signal, hotkey).
  * Deleted in unload only after every poster is disconnected; deleting it drops pending posts. */
 static std::atomic<QObject *>                    g_ui_context{nullptr};
@@ -68,6 +71,8 @@ static std::atomic<QObject *>                    g_ui_context{nullptr};
 static std::unique_ptr<smulti::StreamlabsClient> g_streamlabs;
 #endif
 static obs_hotkey_id                             g_record_hotkey = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id                             g_save_clip_hotkey = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id                             g_save_both_hotkey = OBS_INVALID_HOTKEY_ID;
 static bool                                      g_record_settings_saved = false;
 static smulti::MultistreamDock *                 g_dock = nullptr; /* owned by Qt only if registration succeeded — see obs_module_load */
 static std::atomic<bool> g_module_alive{false};
@@ -112,6 +117,41 @@ static void stop_vertical_recording(const char *reason)
 {
 	if (g_vertical_recorder)
 		g_vertical_recorder->stop_now(reason);
+}
+
+/* Forced, non-blocking stop of the vertical replay buffer (same call sites as the recording). UI thread. */
+static void stop_vertical_replay(const char *reason)
+{
+	if (g_vertical_replay)
+		g_vertical_replay->stop_now(reason);
+}
+
+/* Frontend hotkey "StreamMulticast: Save vertical clip" (hotkey thread). */
+static void on_save_clip_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || !g_module_alive.load())
+		return;
+	post_to_ui([]() {
+		if (g_module_alive.load() && g_vertical_replay)
+			g_vertical_replay->save();
+	});
+}
+
+/* Frontend hotkey "StreamMulticast: Save main + vertical clip" (hotkey thread). Frontend API: UI thread. */
+static void on_save_both_hotkey(void *, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || !g_module_alive.load())
+		return;
+	post_to_ui([]() {
+		if (!g_module_alive.load())
+			return;
+		if (obs_frontend_replay_buffer_active())
+			obs_frontend_replay_buffer_save();
+		else
+			obs_log(LOG_INFO, "main replay buffer not running, saving only the vertical clip");
+		if (g_vertical_replay)
+			g_vertical_replay->save();
+	});
 }
 
 /* Frontend hotkey "StreamMulticast: Start/Stop vertical recording" (hotkey thread). */
@@ -204,6 +244,7 @@ static void on_canvas_remove(void *, calldata_t *cd)
 	if (!uuid || g_owned_canvas->uuid() != uuid)
 		return;
 	stop_vertical_recording("vertical canvas removed"); // its canvas ref is released last, on the reaper
+	stop_vertical_replay("vertical canvas removed");
 	detach_vertical_scene_signals(); // before the canvas can go away
 	g_owned_canvas->release();
 	flush_vertical_preview();
@@ -268,6 +309,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		flush_config();
 		save_record_settings_once();
 		stop_vertical_recording("OBS is shutting down");
+		stop_vertical_replay("OBS is shutting down");
 		/* OBSBasic::closeEvent clears the canvases (dropping their refs) BEFORE EXIT is
 		 * emitted, but after this event, so the display must go now. */
 		shutdown_vertical_preview();
@@ -302,10 +344,17 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STOPPING) {
 		if (g_vertical_recorder)
 			g_vertical_recorder->on_main_recording_stopping();
+	} else if (event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED) {
+		if (g_vertical_replay)
+			g_vertical_replay->on_main_replay_started();
+	} else if (event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPING) {
+		if (g_vertical_replay)
+			g_vertical_replay->on_main_replay_stopping();
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
 		smulti::autosave_set_blocked(true); // cancels a pending save: the collection is being replaced
 		stop_provider_endpoints(); // ends a Streamlabs TikTok session (TASK-28)
 		stop_vertical_recording("scene collection changing"); // before the owned canvas reference goes
+		stop_vertical_replay("scene collection changing");
 		detach_vertical_scene_signals(); // before the owned canvas reference is dropped
 		if (g_owned_canvas)
 			g_owned_canvas->on_collection_changing(*g_registry);
@@ -350,6 +399,7 @@ static void on_frontend_event(enum obs_frontend_event event, void * /*private_da
 		}
 		shutdown_streamlabs(); // after the stops above queued their session ends
 		stop_vertical_recording("OBS exit");
+		stop_vertical_replay("OBS exit");
 		shutdown_vertical_preview();
 		if (g_owned_canvas)
 			g_owned_canvas->release();
@@ -406,6 +456,21 @@ bool obs_module_load()
 						       nullptr);
 	if (g_record_hotkey != OBS_INVALID_HOTKEY_ID)
 		g_vertical_recorder->set_hotkey(g_record_hotkey);
+
+	/* 3d. Vertical replay buffer. Its hotkeys have no default binding; the bindings are kept in
+	 * vertical-record.json by the recorder (not in the profile's basic.ini). */
+	g_vertical_replay = std::make_unique<smulti::VerticalReplayBuffer>(*g_owned_canvas, *g_reaper,
+									   *g_vertical_recorder, post_to_ui);
+	g_save_clip_hotkey = obs_hotkey_register_frontend("StreamMulticast.SaveVerticalClip",
+							  "StreamMulticast: Save vertical clip", on_save_clip_hotkey,
+							  nullptr);
+	if (g_save_clip_hotkey != OBS_INVALID_HOTKEY_ID)
+		g_vertical_recorder->add_hotkey("hotkey_save_vertical_clip", g_save_clip_hotkey);
+	g_save_both_hotkey = obs_hotkey_register_frontend("StreamMulticast.SaveBothClips",
+							  "StreamMulticast: Save main + vertical clip", on_save_both_hotkey,
+							  nullptr);
+	if (g_save_both_hotkey != OBS_INVALID_HOTKEY_ID)
+		g_vertical_recorder->add_hotkey("hotkey_save_both_clips", g_save_both_hotkey);
 
 	/* 4. Boot health sampler — starts background 2-Hz polling thread */
 	g_health_sampler = std::make_unique<smulti::HealthSampler>(*g_registry);
@@ -516,9 +581,13 @@ void obs_module_unload()
 	 * anymore (hotkey unregistered, output "stop" signal disconnected by shutdown), then drop pending posts.
 	 * The recorder object itself lives until the dock is gone; its reaper jobs drain in g_reaper->shutdown(). */
 	save_record_settings_once();
-	if (g_record_hotkey != OBS_INVALID_HOTKEY_ID)
-		obs_hotkey_unregister(g_record_hotkey);
-	g_record_hotkey = OBS_INVALID_HOTKEY_ID;
+	for (obs_hotkey_id *hotkey : {&g_record_hotkey, &g_save_clip_hotkey, &g_save_both_hotkey}) {
+		if (*hotkey != OBS_INVALID_HOTKEY_ID)
+			obs_hotkey_unregister(*hotkey);
+		*hotkey = OBS_INVALID_HOTKEY_ID;
+	}
+	if (g_vertical_replay)
+		g_vertical_replay->shutdown();
 	if (g_vertical_recorder)
 		g_vertical_recorder->shutdown();
 	/* Streamlabs: the stops above queued their session ends; run them now, join the worker,
@@ -571,7 +640,9 @@ void obs_module_unload()
 	g_vertical_dock_registered = false;
 	g_vertical_dock.clear();
 
-	/* The dock referenced the recorder. After shutdown() it refuses start() and never touches the owned canvas. */
+	/* The dock referenced the recorder and the replay buffer. After shutdown() they refuse start() and never touch
+	 * the owned canvas. The replay buffer reads the recorder's settings: it goes first. */
+	g_vertical_replay.reset();
 	g_vertical_recorder.reset();
 
 	/* The dock is gone, nothing references the alert monitor any more. */

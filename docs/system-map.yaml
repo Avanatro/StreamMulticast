@@ -543,6 +543,7 @@ nodes:
     lane: pipeline
     goal: "The owned vertical canvas can be recorded to a file, by hand, by hotkey or together with the main recording."
     owns: [recording.vertical-output, recording.vertical-settings]
+    # recording.vertical-settings includes the replay object and all three hotkey bindings (the recorder is the only writer of vertical-record.json)
     needs: [owned-vertical-canvas, encoder-factory, controller-reaper, encoder-recovery]
     code:
       - src/core/VerticalRecord.hpp
@@ -637,6 +638,64 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: while the vertical recording runs, switch the scene collection and quit OBS; the log shows 'vertical recording: stopped (...)', the MKV is playable and no crash file is written (not run in this session; plugin target compiled, TASK-27)"
+            result: pending
+    status: building
+  - id: vertical-replay
+    lane: pipeline
+    goal: "A moment on the vertical canvas becomes a ready 9:16 clip with one hotkey, without re-cutting."
+    owns: [replay.vertical-output, replay.vertical-clip-name]
+    needs: [owned-vertical-canvas, encoder-factory, controller-reaper, vertical-recording]
+    code:
+      - src/pipeline/VerticalReplayBuffer.hpp
+      - src/pipeline/VerticalReplayBuffer.cpp
+    works_when:
+      - id: vertical-replay.clip-name
+        behavior: "Pure (core/VerticalRecord): VerticalReplaySettings {enabled_with_main_replay true, seconds 30 clamped 30..60, max_size_mb 512 clamped 64..2048, folder E:\\Videos\\Clips\\vertical} is saved as the 'replay' object of vertical-record.json by the same vertical_record_settings_save/load (a file without it loads the defaults; values are clamped on load and save). clip_file_stem(date, scene) is '<CCYY-MM-DD hh-mm-ss>-<scene>' with \\ / : * ? \" < > | and control characters as '_', the scene cut to 80 bytes (never inside a UTF-8 sequence), trailing dots and spaces trimmed, empty -> 'vertical'; the clip path is vertical_record_file_path(folder, stem, exists, '.mp4') (' (N)' when the file exists, never overwritten)."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_replay_settings_roundtrip_and_defaults
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_replay_seconds_clamped
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_clip_stem_has_date_and_scene
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_clip_stem_sanitizes_scene_name
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_clip_path_avoids_existing_files
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+      - id: vertical-replay.no-drive-c
+        behavior: "The clip folder goes through resolve_vertical_record_folder (VerticalRecorder::resolve_replay_folder, main recording path + /Vertical when empty): every C: form is refused with the recording's message and the buffer does not start; the replay_buffer output's directory is that resolved folder and the rename target is built inside it. VerticalReplayBuffer.cpp contains no hard-coded C: path (rg check, no match, local run 2026-10-20)."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_record.cpp
+            check: vertical_replay_folder_refuses_drive_c
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R \"vertical_replay_|vertical_clip_|vertical_record_\", local run 2026-10-20; RED with stubs (clamp/local_time/clip_file_stem empty, extension ignored, no replay keys saved): 5 of 6 new tests failed (vertical_replay_folder_refuses_drive_c passes on the stub: it pins the reused resolve_vertical_record_folder), 17/17 passed after implementation; full ctest 188/188 (TASK-36)"
+            checked_at: 2026-10-20
+      - id: vertical-replay.saves-clip
+        behavior: "VerticalReplayBuffer::start (UI thread) reads the replay settings, resolves the folder, takes a strong ref of the owned canvas and creates its own video encoder (choose_vertical_record_encoder: NVENC HEVC CQP 20, else x264 CRF 20; a refused NVENC start is retried once with vertical_record_fallback_encoder) plus AAC 160 kbps from mix 0, and a libobs replay_buffer output (max_time_sec, max_size_mb, directory, format '%CCYY-%MM-%DD %hh-%mm-%ss Vertical replay', extension mp4, allow_spaces). save() records the date and OwnedCanvas::active_scene_name (the destination while a transition runs) and calls the output's proc 'save'; the output's 'saved' signal (mux thread) calls get_last_replay and os_rename to the clip path, logs 'vertical replay: clip saved ...' and posts the dock refresh. It starts on REPLAY_BUFFER_STARTED when enabled_with_main_replay is on and stops on REPLAY_BUFFER_STOPPING only when started that way; the dock has a manual Start/Stop. Hotkeys 'StreamMulticast: Save vertical clip' and 'StreamMulticast: Save main + vertical clip' (obs_frontend_replay_buffer_save when obs_frontend_replay_buffer_active, then the vertical save), no default binding, bindings in vertical-record.json. Lifetime as vertical-recording.lifetime: stop_now on canvas_remove, SCENE_COLLECTION_CHANGING, SCRIPTING_SHUTDOWN, EXIT and unload, canvas ref released last on the reaper. Only compiled (both flag builds), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check (Dima): start the main replay buffer in the Stream profile, bind 'Save vertical clip' in Settings > Hotkeys, press it after 40 s: E:\\Videos\\Clips\\vertical\\<date>-V Gaming.mp4 exists, 9:16, about 30 s long; 'Save main + vertical clip' also writes the main clip to E:\\Videos\\Stream (not run in this session; TASK-36)"
             result: pending
     status: building
   - id: encoder-recovery
@@ -1258,7 +1317,7 @@ nodes:
     lane: entry
     goal: "Module load wires singletons in order and unload tears them down without blocking."
     owns: [module.lifecycle-wiring]
-    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, collection-autosave, scene-link, vertical-recording, streamlabs-client, streamlabs-login-flow, alert-monitor]
+    needs: [config-persistence, endpoint-registry, health-sampling, controller-reaper, ui-dock, ui-vertical-dock, main-stream-linking, owned-vertical-canvas, collection-autosave, scene-link, vertical-recording, vertical-replay, streamlabs-client, streamlabs-login-flow, alert-monitor]
     code:
       - src/plugin-main.cpp
       - src/plugin-support.h
@@ -1269,6 +1328,9 @@ nodes:
         verification: []
       - id: plugin-entry.canvas-video-retry
         behavior: "on_frontend_event calls ensure_owned_canvas_and_follow(false) after STREAMING_STOPPED, RECORDING_STOPPED or REPLAY_BUFFER_STOPPED when the module is alive and OwnedCanvas::needs_video() is true (see owned-vertical-canvas.video-retry). Only compiled locally."
+        verification: []
+      - id: plugin-entry.vertical-replay-wiring
+        behavior: "obs_module_load creates the VerticalReplayBuffer after the recorder and registers the frontend hotkeys StreamMulticast.SaveVerticalClip and StreamMulticast.SaveBothClips (bindings via VerticalRecorder::add_hotkey); REPLAY_BUFFER_STARTED / STOPPING drive it; stop_vertical_replay sits next to every stop_vertical_recording (canvas_remove, SCENE_COLLECTION_CHANGING, SCRIPTING_SHUTDOWN, EXIT); unload saves the bindings, unregisters all three hotkeys, shuts the buffer down before the UI post context goes and destroys it after the dock, before the recorder. Only compiled locally."
         verification: []
       - id: plugin-entry.alerts-wiring
         behavior: "obs_module_load creates and starts the AlertMonitor after the HealthSampler and hands it to the dock; obs_module_post_load (new) registers the obs-websocket vendor; EXIT and obs_module_unload stop the monitor before HealthSampler::stop(), unload releases the vendor handle and destroys the monitor after the dock is removed and before the registry. Only compiled locally, not run in OBS."

@@ -99,6 +99,7 @@ target_sources(
     src/pipeline/CanvasSceneNames.cpp
     src/pipeline/OwnedCanvas.cpp
     src/pipeline/VerticalRecorder.cpp
+    src/pipeline/VerticalReplayBuffer.cpp
     src/pipeline/EncoderFactory.cpp
     src/pipeline/OutputController.cpp
     src/pipeline/ControllerReaper.cpp

@@ -10,6 +10,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <obs-data.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 
@@ -89,6 +90,15 @@ void vertical_record_settings_save(obs_data_t *data, const VerticalRecordSetting
 		return;
 	obs_data_set_bool(data, kVerticalRecordWithMainKey, settings.record_with_main);
 	obs_data_set_string(data, kVerticalRecordFolderKey, settings.folder.c_str());
+
+	const VerticalReplaySettings r = clamp_vertical_replay_settings(settings.replay);
+	obs_data_t *replay = obs_data_create();
+	obs_data_set_bool(replay, kVerticalReplayWithMainKey, r.enabled_with_main_replay);
+	obs_data_set_int(replay, kVerticalReplaySecondsKey, r.seconds);
+	obs_data_set_int(replay, kVerticalReplayMaxSizeKey, r.max_size_mb);
+	obs_data_set_string(replay, kVerticalReplayFolderKey, r.folder.c_str());
+	obs_data_set_obj(data, kVerticalReplayKey, replay);
+	obs_data_release(replay);
 }
 
 VerticalRecordSettings vertical_record_settings_load(obs_data_t *data)
@@ -100,7 +110,32 @@ VerticalRecordSettings vertical_record_settings_load(obs_data_t *data)
 		out.record_with_main = obs_data_get_bool(data, kVerticalRecordWithMainKey);
 	const char *folder = obs_data_get_string(data, kVerticalRecordFolderKey);
 	out.folder = folder ? folder : "";
+
+	/* A file written before the replay buffer existed has no "replay" object: defaults. */
+	obs_data_t *replay = obs_data_get_obj(data, kVerticalReplayKey);
+	if (replay) {
+		VerticalReplaySettings &r = out.replay;
+		if (obs_data_has_user_value(replay, kVerticalReplayWithMainKey))
+			r.enabled_with_main_replay = obs_data_get_bool(replay, kVerticalReplayWithMainKey);
+		if (obs_data_has_user_value(replay, kVerticalReplaySecondsKey))
+			r.seconds = static_cast<int>(obs_data_get_int(replay, kVerticalReplaySecondsKey));
+		if (obs_data_has_user_value(replay, kVerticalReplayMaxSizeKey))
+			r.max_size_mb = static_cast<int>(obs_data_get_int(replay, kVerticalReplayMaxSizeKey));
+		if (obs_data_has_user_value(replay, kVerticalReplayFolderKey)) {
+			const char *f = obs_data_get_string(replay, kVerticalReplayFolderKey);
+			r.folder = f ? f : "";
+		}
+		obs_data_release(replay);
+	}
+	out.replay = clamp_vertical_replay_settings(out.replay);
 	return out;
+}
+
+VerticalReplaySettings clamp_vertical_replay_settings(VerticalReplaySettings settings)
+{
+	settings.seconds = std::clamp(settings.seconds, kVerticalReplayMinSeconds, kVerticalReplayMaxSeconds);
+	settings.max_size_mb = std::clamp(settings.max_size_mb, kVerticalReplayMinSizeMb, kVerticalReplayMaxSizeMb);
+	return settings;
 }
 
 bool path_is_on_drive_c(const std::string &path)
@@ -179,13 +214,48 @@ std::string format_record_file_stem(const std::string &format, const std::tm &ti
 }
 
 std::string vertical_record_file_path(const std::string &folder, const std::string &stem,
-				      const std::function<bool(const std::string &)> &exists)
+				      const std::function<bool(const std::string &)> &exists, const std::string &extension)
 {
 	const std::string base = trim_trailing_separators(folder) + "/" + stem;
-	std::string path = base + ".mkv";
+	std::string path = base + extension;
 	for (int n = 2; exists && exists(path) && n < 1000; ++n)
-		path = base + " (" + std::to_string(n) + ").mkv";
+		path = base + " (" + std::to_string(n) + ")" + extension;
 	return path;
+}
+
+std::tm local_time(std::time_t t)
+{
+	std::tm out = {};
+#ifdef _WIN32
+	localtime_s(&out, &t);
+#else
+	localtime_r(&t, &out);
+#endif
+	return out;
+}
+
+std::string clip_file_stem(const std::tm &date, const std::string &scene_name)
+{
+	constexpr size_t kMaxSceneBytes = 80;
+	std::string scene;
+	scene.reserve(scene_name.size());
+	for (char ch : scene_name) {
+		const unsigned char c = static_cast<unsigned char>(ch);
+		const bool forbidden = c < 0x20 || c == 0x7F || std::string("\\/:*?\"<>|").find(ch) != std::string::npos;
+		scene += forbidden ? '_' : ch;
+	}
+	if (scene.size() > kMaxSceneBytes) {
+		size_t cut = kMaxSceneBytes;
+		/* back off over UTF-8 continuation bytes (10xxxxxx) so a multi-byte character is never split */
+		while (cut > 0 && (static_cast<unsigned char>(scene[cut]) & 0xC0) == 0x80)
+			--cut;
+		scene.resize(cut);
+	}
+	while (!scene.empty() && (scene.back() == '.' || scene.back() == ' '))
+		scene.pop_back();
+	if (scene.empty())
+		scene = "vertical";
+	return format_record_file_stem("%CCYY-%MM-%DD %hh-%mm-%ss", date) + "-" + scene;
 }
 
 std::string remux_target_path(const std::string &recorded_path)

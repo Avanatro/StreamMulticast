@@ -56,18 +56,6 @@ bool profile_auto_remux()
 	return profile && config_get_bool(profile, "Video", "AutoRemux");
 }
 
-std::tm local_now()
-{
-	const std::time_t now = std::time(nullptr);
-	std::tm t = {};
-#ifdef _WIN32
-	localtime_s(&t, &now);
-#else
-	localtime_r(&now, &t);
-#endif
-	return t;
-}
-
 bool remux_progress(void *param, float)
 {
 	/* returning false aborts the remux job */
@@ -111,14 +99,27 @@ void VerticalRecorder::set_settings(const VerticalRecordSettings &settings)
 
 void VerticalRecorder::set_hotkey(size_t hotkey_id)
 {
+	add_hotkey(kHotkeyKey, hotkey_id);
+}
+
+void VerticalRecorder::add_hotkey(const std::string &key, size_t hotkey_id)
+{
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_hotkey = hotkey_id;
+		bool replaced = false;
+		for (auto &entry : m_hotkeys) {
+			if (entry.first == key) {
+				entry.second = hotkey_id;
+				replaced = true;
+			}
+		}
+		if (!replaced)
+			m_hotkeys.emplace_back(key, hotkey_id);
 	}
 	const std::string path = settings_path();
 	obs_data_t *data = path.empty() ? nullptr : obs_data_create_from_json_file(path.c_str());
 	if (data) {
-		obs_data_array_t *binding = obs_data_get_array(data, kHotkeyKey);
+		obs_data_array_t *binding = obs_data_get_array(data, key.c_str());
 		if (binding)
 			obs_hotkey_load(hotkey_id, binding);
 		obs_data_array_release(binding);
@@ -132,17 +133,19 @@ void VerticalRecorder::save_settings_file() const
 	if (path.empty())
 		return;
 	VerticalRecordSettings settings;
-	size_t hotkey;
+	std::vector<std::pair<std::string, size_t>> hotkeys;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		settings = m_settings;
-		hotkey = m_hotkey;
+		hotkeys = m_hotkeys;
 	}
 	obs_data_t *data = obs_data_create();
 	vertical_record_settings_save(data, settings);
-	if (hotkey != kNoHotkey) {
+	for (const auto &[key, hotkey] : hotkeys) {
+		if (hotkey == kNoHotkey)
+			continue;
 		obs_data_array_t *binding = obs_hotkey_save(hotkey);
-		obs_data_set_array(data, kHotkeyKey, binding);
+		obs_data_set_array(data, key.c_str(), binding);
 		obs_data_array_release(binding);
 	}
 	if (!obs_data_save_json_safe(data, path.c_str(), "tmp", "bak"))
@@ -153,6 +156,11 @@ void VerticalRecorder::save_settings_file() const
 VerticalRecordFolder VerticalRecorder::resolve_folder() const
 {
 	return resolve_vertical_record_folder(main_record_path(), settings().folder);
+}
+
+VerticalRecordFolder VerticalRecorder::resolve_replay_folder() const
+{
+	return resolve_vertical_record_folder(main_record_path(), settings().replay.folder);
 }
 
 /* ---- state --------------------------------------------------------------- */
@@ -244,7 +252,7 @@ bool VerticalRecorder::start_session(bool with_main, const std::optional<RecordE
 	}
 
 	const std::string file = vertical_record_file_path(
-		folder.folder, format_record_file_stem(kVerticalRecordFileStemFormat, local_now()),
+		folder.folder, format_record_file_stem(kVerticalRecordFileStemFormat, local_time(std::time(nullptr))),
 		[](const std::string &p) { return os_file_exists(p.c_str()); });
 
 	const std::set<std::string> &available = EncoderFactory::available_encoder_types();

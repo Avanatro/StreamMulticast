@@ -179,3 +179,135 @@ SMULTI_TEST(vertical_record_runtime_fallback_choice)
 	for (long long code : {0LL, -5LL, -4LL, -7LL})
 		EXPECT_TRUE(!smulti::vertical_record_runtime_fallback(code, "obs_nvenc_hevc_tex", false, all).has_value());
 }
+
+/* ---- vertical replay buffer (TASK-36) ---- */
+
+SMULTI_TEST(vertical_replay_settings_roundtrip_and_defaults)
+{
+	/* defaults, also for a file written before the "replay" object existed */
+	obs_data_t *old_file = obs_data_create();
+	obs_data_set_bool(old_file, "record_with_main", false);
+	obs_data_set_string(old_file, "folder", "F:/Shorts");
+	const VerticalRecordSettings old = smulti::vertical_record_settings_load(old_file);
+	obs_data_release(old_file);
+	EXPECT_EQ(old.record_with_main, false);
+	EXPECT_EQ(old.replay.enabled_with_main_replay, true);
+	EXPECT_EQ(old.replay.seconds, 30);
+	EXPECT_EQ(old.replay.max_size_mb, 512);
+	EXPECT_EQ(old.replay.folder, "E:\\Videos\\Clips\\vertical");
+
+	VerticalRecordSettings s;
+	s.replay.enabled_with_main_replay = false;
+	s.replay.seconds = 45;
+	s.replay.max_size_mb = 1024;
+	s.replay.folder = "F:/Clips";
+	obs_data_t *data = obs_data_create();
+	smulti::vertical_record_settings_save(data, s);
+	/* one "replay" object in the same file */
+	obs_data_t *replay = obs_data_get_obj(data, "replay");
+	EXPECT_TRUE(replay != nullptr);
+	EXPECT_EQ(obs_data_get_int(replay, "seconds"), 45);
+	obs_data_release(replay);
+	const VerticalRecordSettings back = smulti::vertical_record_settings_load(data);
+	obs_data_release(data);
+	EXPECT_EQ(back.record_with_main, true);
+	EXPECT_EQ(back.replay.enabled_with_main_replay, false);
+	EXPECT_EQ(back.replay.seconds, 45);
+	EXPECT_EQ(back.replay.max_size_mb, 1024);
+	EXPECT_EQ(back.replay.folder, "F:/Clips");
+}
+
+SMULTI_TEST(vertical_replay_seconds_clamped)
+{
+	smulti::VerticalReplaySettings s;
+	s.seconds = 5;
+	s.max_size_mb = 10;
+	smulti::VerticalReplaySettings c = smulti::clamp_vertical_replay_settings(s);
+	EXPECT_EQ(c.seconds, 30);
+	EXPECT_EQ(c.max_size_mb, 64);
+	s.seconds = 600;
+	s.max_size_mb = 100000;
+	c = smulti::clamp_vertical_replay_settings(s);
+	EXPECT_EQ(c.seconds, 60);
+	EXPECT_EQ(c.max_size_mb, 2048);
+	s.seconds = 42;
+	s.max_size_mb = 300;
+	c = smulti::clamp_vertical_replay_settings(s);
+	EXPECT_EQ(c.seconds, 42);
+	EXPECT_EQ(c.max_size_mb, 300);
+
+	/* a hand-edited file is clamped on load */
+	obs_data_t *data = obs_data_create();
+	obs_data_t *replay = obs_data_create();
+	obs_data_set_int(replay, "seconds", 1);
+	obs_data_set_int(replay, "max_size_mb", 99999);
+	obs_data_set_obj(data, "replay", replay);
+	obs_data_release(replay);
+	const VerticalRecordSettings loaded = smulti::vertical_record_settings_load(data);
+	obs_data_release(data);
+	EXPECT_EQ(loaded.replay.seconds, 30);
+	EXPECT_EQ(loaded.replay.max_size_mb, 2048);
+}
+
+SMULTI_TEST(vertical_replay_folder_refuses_drive_c)
+{
+	/* the default clip folder is accepted */
+	const VerticalRecordFolder def =
+		smulti::resolve_vertical_record_folder("E:/Videos/Stream", smulti::VerticalReplaySettings{}.folder);
+	EXPECT_TRUE(def.ok);
+	EXPECT_EQ(def.folder, "E:\\Videos\\Clips\\vertical");
+	/* every C: form is refused, with the recording's message */
+	for (const char *c : {"C:\\Videos\\Clips", "c:/clips", "\\\\?\\C:\\Clips", "\\\\localhost\\C$\\Clips"}) {
+		const VerticalRecordFolder f = smulti::resolve_vertical_record_folder("E:/Videos/Stream", c);
+		EXPECT_TRUE(!f.ok);
+		EXPECT_TRUE(f.reason.find("never go to C:") != std::string::npos);
+	}
+	/* an empty clip folder never falls back to a C: main path either */
+	EXPECT_TRUE(!smulti::resolve_vertical_record_folder("C:/Users/Avana/Videos", "").ok);
+}
+
+SMULTI_TEST(vertical_clip_stem_has_date_and_scene)
+{
+	EXPECT_EQ(smulti::clip_file_stem(fixed_time(), "V Gaming"), "2026-10-19 07-05-09-V Gaming");
+	EXPECT_EQ(smulti::clip_file_stem(fixed_time(), ""), "2026-10-19 07-05-09-vertical");
+	/* local_time gives the calendar parts the stem uses */
+	const std::tm t = smulti::local_time(std::time(nullptr));
+	EXPECT_TRUE(t.tm_year >= 2026 - 1900);
+	EXPECT_TRUE(t.tm_mday >= 1);
+}
+
+SMULTI_TEST(vertical_clip_stem_sanitizes_scene_name)
+{
+	const std::tm t = fixed_time();
+	const std::string prefix = "2026-10-19 07-05-09-";
+	EXPECT_EQ(smulti::clip_file_stem(t, "a\\b/c:d*e?f\"g<h>i|j"), prefix + "a_b_c_d_e_f_g_h_i_j");
+	EXPECT_EQ(smulti::clip_file_stem(t, std::string("tab\there\x01") + "x"), prefix + "tab_here_x");
+	EXPECT_EQ(smulti::clip_file_stem(t, "Scene. . "), prefix + "Scene");
+	EXPECT_EQ(smulti::clip_file_stem(t, " .. "), prefix + "vertical");
+	/* cut to 80 bytes */
+	const std::string long_name(200, 'x');
+	EXPECT_EQ(smulti::clip_file_stem(t, long_name), prefix + std::string(80, 'x'));
+	/* never inside a UTF-8 sequence: 79 x + "\xC3\xA4" (a-umlaut) keeps 79 x */
+	EXPECT_EQ(smulti::clip_file_stem(t, std::string(79, 'x') + "\xC3\xA4"), prefix + std::string(79, 'x'));
+	/* a cut that leaves a trailing space is trimmed again */
+	EXPECT_EQ(smulti::clip_file_stem(t, std::string(79, 'x') + "  tail"), prefix + std::string(79, 'x'));
+	/* non-ASCII names are kept */
+	EXPECT_EQ(smulti::clip_file_stem(t, "Kapelle \xC3\xA4"), prefix + "Kapelle \xC3\xA4");
+}
+
+SMULTI_TEST(vertical_clip_path_avoids_existing_files)
+{
+	std::set<std::string> existing;
+	auto exists = [&existing](const std::string &p) { return existing.count(p) > 0; };
+	const std::string stem = "2026-10-19 07-05-09-V Gaming";
+	EXPECT_EQ(smulti::vertical_record_file_path("E:/Clips/vertical/", stem, exists, ".mp4"),
+		  "E:/Clips/vertical/2026-10-19 07-05-09-V Gaming.mp4");
+	existing.insert("E:/Clips/vertical/2026-10-19 07-05-09-V Gaming.mp4");
+	EXPECT_EQ(smulti::vertical_record_file_path("E:/Clips/vertical", stem, exists, ".mp4"),
+		  "E:/Clips/vertical/2026-10-19 07-05-09-V Gaming (2).mp4");
+	existing.insert("E:/Clips/vertical/2026-10-19 07-05-09-V Gaming (2).mp4");
+	EXPECT_EQ(smulti::vertical_record_file_path("E:/Clips/vertical", stem, exists, ".mp4"),
+		  "E:/Clips/vertical/2026-10-19 07-05-09-V Gaming (3).mp4");
+	/* the recording keeps its MKV default */
+	EXPECT_EQ(smulti::vertical_record_file_path("E:/R", "s", exists), "E:/R/s.mkv");
+}
