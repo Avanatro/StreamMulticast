@@ -456,23 +456,14 @@ bool OutputController::start_output()
 		return false;
 	}
 
-	/* Create and attach encoders */
+	/* Create and attach encoders (a video encoder the configured backend cannot
+	 * create is retried once with x264, see create_start_encoders). */
 	const bool x264 = x264_registered();
-	EncoderBackend backend;
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		backend = effective_backend_locked(x264);
-	}
-	obs_encoder_t *video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", rv.video, backend);
-	obs_encoder_t *audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
+	video_t *video = rv.video; // stays valid: the canvas ref moves into m_canvas below
+	obs_encoder_t *video_enc = nullptr;
+	obs_encoder_t *audio_enc = nullptr;
 
-	if (!video_enc || !audio_enc) {
-		obs_log(LOG_ERROR, "OutputController [%s]: encoder creation failed",
-		        m_endpoint.name.c_str());
-		if (video_enc)
-			obs_encoder_release(video_enc);
-		if (audio_enc)
-			obs_encoder_release(audio_enc);
+	if (!create_start_encoders(video, x264, video_enc, audio_enc)) {
 		discard_canvas_candidate(rv);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_state      = OutputState::FailedHard;
@@ -509,24 +500,91 @@ bool OutputController::start_output()
 	}
 	release_replaced_canvas(replaced, adopted);
 
-	obs_output_set_video_encoder(output, video_enc);
-	obs_output_set_audio_encoder(output, audio_enc, 0 /* track index */);
+	for (;;) {
+		obs_output_set_video_encoder(output, video_enc);
+		obs_output_set_audio_encoder(output, audio_enc, 0 /* track index */);
 
-	bool started = obs_output_start(output);
-	if (!started) {
-		const char *err = obs_output_get_last_error(output);
+		if (obs_output_start(output))
+			return true; // state transitions to Live via on_start_signal callback
+
+		/* A synchronous refusal never comes from the network (rtmp_output connects
+		 * on its own thread and reports -2/-3 as a stop code): after the service
+		 * check only the encoder initialization can refuse.  Read the facts
+		 * before the encoders are released. */
+		const char *raw_err  = obs_output_get_last_error(output);
+		const char *raw_venc = obs_encoder_get_last_error(video_enc);
+		const std::string err      = raw_err ? raw_err : "";
+		const std::string venc_err = raw_venc ? raw_venc : "";
+		StartFailure failure{StartFailureKind::StartRefused};
+		failure.video_encoder_error = !venc_err.empty();
+		failure.service_ready       = obs_service_can_try_to_connect(obs_output_get_service(output));
+		const bool encoder_refused  = is_encoder_start_failure(failure);
 		obs_log(LOG_ERROR, "OutputController [%s]: obs_output_start failed: %s",
-		        m_endpoint.name.c_str(), err ? err : "(no error)");
+		        m_endpoint.name.c_str(), err.empty() ? "(no error)" : err.c_str());
 
+		bool retry;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			do_release_encoders_locked();
+			retry = first_start_fallback_locked(failure, x264);
+			if (!retry) {
+				m_state = OutputState::FailedHard;
+				if (encoder_refused)
+					m_last_error = "Encoder failed to start" +
+						       (!venc_err.empty() ? ": " + venc_err : !err.empty() ? ": " + err : std::string());
+				else
+					m_last_error = !err.empty() ? err : "Output failed to start (service not ready)";
+			}
+		}
+		if (!retry)
+			return false;
+		announce_first_start_fallback(venc_err.empty() ? err.c_str() : venc_err.c_str());
+
+		if (!create_start_encoders(video, x264, video_enc, audio_enc)) {
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_state      = OutputState::FailedHard;
+			m_last_error = "Encoder unavailable — check backend settings";
+			return false;
+		}
 		std::lock_guard<std::mutex> lock(m_mutex);
-		do_release_encoders_locked();
-		m_state      = OutputState::FailedHard;
-		m_last_error = err ? err : "RTMP connect failed";
-		return false;
+		m_video_enc = video_enc;
+		m_audio_enc = audio_enc;
 	}
+}
 
-	/* State transitions to Live via on_start_signal callback */
-	return true;
+bool OutputController::create_start_encoders(video_t *video, bool x264, obs_encoder_t *&video_enc,
+					     obs_encoder_t *&audio_enc)
+{
+	for (;;) {
+		EncoderBackend backend;
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			backend = effective_backend_locked(x264);
+		}
+		video_enc = m_factory.create_video_encoder(m_endpoint, "smulti", video, backend);
+		audio_enc = m_factory.create_audio_encoder(m_endpoint, "smulti");
+		if (video_enc && audio_enc)
+			return true;
+
+		obs_log(LOG_ERROR, "OutputController [%s]: encoder creation failed",
+		        m_endpoint.name.c_str());
+		const bool video_failed = !video_enc;
+		if (video_enc)
+			obs_encoder_release(video_enc);
+		if (audio_enc)
+			obs_encoder_release(audio_enc);
+		video_enc = nullptr;
+		audio_enc = nullptr;
+
+		bool retry = false;
+		if (video_failed) {
+			std::lock_guard<std::mutex> lock(m_mutex);
+			retry = first_start_fallback_locked(StartFailure{StartFailureKind::EncoderCreate}, x264);
+		}
+		if (!retry)
+			return false;
+		announce_first_start_fallback("the video encoder could not be created");
+	}
 }
 
 /* -----------------------------------------------------------------------
@@ -823,6 +881,22 @@ bool OutputController::encoder_fallback_switched_locked(bool switched, bool x264
 	return true;
 }
 
+bool OutputController::first_start_fallback_locked(const StartFailure &failure, bool x264)
+{
+	if (!on_first_start_failure(m_recovery, failure, m_endpoint.encoder_backend, x264))
+		return false;
+	m_last_error = kEncoderFallbackError;
+	return true;
+}
+
+void OutputController::announce_first_start_fallback(const char *what) const
+{
+	obs_log(LOG_WARNING, "OutputController [%s]: %s refused the first start (%s), retrying once with x264 veryfast "
+	                     "for this session",
+	        m_endpoint.name.c_str(), backend_short_name(m_endpoint.encoder_backend),
+	        what && *what ? what : "no error text");
+}
+
 void OutputController::announce_encoder_fallback() const
 {
 	obs_log(LOG_WARNING, "OutputController [%s]: %s failed %d times, falling back to x264 veryfast for this session",
@@ -901,8 +975,16 @@ void OutputController::handle_stop(int code)
 	const bool x264 = x264_registered();
 	std::thread stale_thread;
 	bool fallback_switched;
+	bool first_start_fallback = false;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		/* Still Starting (never Live this session): an encode error is a refused
+		 * first start, the reconnect below already uses x264. */
+		if (m_state == OutputState::Starting) {
+			StartFailure failure{StartFailureKind::StopBeforeLive};
+			failure.stop_code   = code;
+			first_start_fallback = first_start_fallback_locked(failure, x264);
+		}
 		/* A minute of Live before this stop resets the encoder failure count. */
 		if (m_state == OutputState::Live && m_connected_since != std::chrono::steady_clock::time_point{}) {
 			const auto live = std::chrono::steady_clock::now() - m_connected_since;
@@ -914,7 +996,9 @@ void OutputController::handle_stop(int code)
 		if (m_reconnect_thread.joinable())
 			stale_thread = std::move(m_reconnect_thread);
 	}
-	if (fallback_switched)
+	if (first_start_fallback)
+		announce_first_start_fallback("encode error before going live");
+	else if (fallback_switched)
 		announce_encoder_fallback();
 	if (stale_thread.joinable())
 		stale_thread.join();

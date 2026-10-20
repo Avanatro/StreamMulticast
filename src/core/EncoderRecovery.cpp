@@ -46,6 +46,26 @@ void on_live_for(EncoderRecoveryState &state, int64_t live_ms)
 		on_live_stable(state);
 }
 
+bool is_encoder_start_failure(const StartFailure &f)
+{
+	switch (f.kind) {
+	case StartFailureKind::EncoderCreate:  return true;
+	case StartFailureKind::StartRefused:   return f.video_encoder_error || f.service_ready;
+	case StartFailureKind::StopBeforeLive: return f.stop_code == kStopCodeEncodeError;
+	}
+	return false;
+}
+
+bool on_first_start_failure(EncoderRecoveryState &state, const StartFailure &f, EncoderBackend configured,
+			    bool x264_available)
+{
+	if (!is_encoder_start_failure(f) || configured == EncoderBackend::X264 || !x264_available ||
+	    state.fallback_active)
+		return false;
+	state.fallback_active = true;
+	return true;
+}
+
 EncoderBackend effective_backend(EncoderBackend configured, const EncoderRecoveryState &state, bool x264_available)
 {
 	return state.fallback_active && x264_available ? EncoderBackend::X264 : configured;

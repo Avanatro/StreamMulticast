@@ -103,6 +103,12 @@ int reconnect_delay_seconds(int attempt, int max_attempts = 10);
  * non-x264 endpoint is re-created with x264 veryfast for the rest of the
  * session (one warning, m_last_error "Encoder fallback: x264 veryfast");
  * start() resets it, m_endpoint is never changed.  Backoff is unchanged.
+ * First start (before the session was ever Live): an encoder refusal
+ * (create failure, obs_output_start refused by the encoder, or a stop with
+ * OBS_OUTPUT_ENCODE_ERROR while Starting; on_first_start_failure) switches
+ * the same session fallback on at once: start_output() retries once with x264
+ * right away, a pre-Live encode error reconnects with x264.  One warning;
+ * network and key codes never fall back.
  *
  * Encoder ownership: obs_output_set_video/audio_encoder() takes its OWN
  * reference via obs_encoder_get_ref() (see libobs obs-output.c).  Our
@@ -308,6 +314,11 @@ private:
 	EncoderBackend effective_backend_locked(bool x264_registered) const;
 	bool encoder_fallback_switched_locked(bool switched, bool x264_registered);
 	void announce_encoder_fallback() const;
+	/** First-start encoder refusal (on_first_start_failure), m_mutex HELD; sets m_last_error when true. */
+	bool first_start_fallback_locked(const StartFailure &failure, bool x264_registered);
+	void announce_first_start_fallback(const char *what) const;
+	/** Video + audio encoder of `backend`; on a video create failure retries once with x264 (first start). */
+	bool create_start_encoders(video_t *video, bool x264, obs_encoder_t *&video_enc, obs_encoder_t *&audio_enc);
 
 	/**
 	 * reconnect_thread_func — exponential backoff reconnect loop.
