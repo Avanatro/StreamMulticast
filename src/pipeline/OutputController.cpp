@@ -509,15 +509,18 @@ bool OutputController::start_output()
 
 		/* A synchronous refusal never comes from the network (rtmp_output connects
 		 * on its own thread and reports -2/-3 as a stop code): after the service
-		 * check only the encoder initialization can refuse.  Read the facts
-		 * before the encoders are released. */
+		 * check an already active output or the encoder initialization (video or
+		 * audio) refuses.  Read the facts before the encoders are released. */
 		const char *raw_err  = obs_output_get_last_error(output);
 		const char *raw_venc = obs_encoder_get_last_error(video_enc);
 		const std::string err      = raw_err ? raw_err : "";
 		const std::string venc_err = raw_venc ? raw_venc : "";
 		StartFailure failure{StartFailureKind::StartRefused};
 		failure.video_encoder_error = !venc_err.empty();
-		failure.service_ready       = obs_service_can_try_to_connect(obs_output_get_service(output));
+		/* An output still active (a reconnect attempt connecting) is refused by
+		 * can_begin_data_capture: not the encoder's, no x264 retry. */
+		failure.service_ready       = !obs_output_active(output) &&
+		                              obs_service_can_try_to_connect(obs_output_get_service(output));
 		const bool encoder_refused  = is_encoder_start_failure(failure);
 		obs_log(LOG_ERROR, "OutputController [%s]: obs_output_start failed: %s",
 		        m_endpoint.name.c_str(), err.empty() ? "(no error)" : err.c_str());

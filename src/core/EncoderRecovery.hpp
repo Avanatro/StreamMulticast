@@ -68,9 +68,11 @@ void on_live_for(EncoderRecoveryState &state, int64_t live_ms);
  * First start of a session (before it was ever Live). Facts the adapter gathers; no OBS types.
  * - EncoderCreate: the video encoder could not be created.
  * - StartRefused: obs_output_start returned false. For rtmp_output that call never touches the network (the
- *   connect runs on its own thread and reports -2/-3 as a stop code): after the service check the only
- *   refusing step is the encoder initialization (libobs rtmp_stream_start / obs_output_initialize_encoders).
- *   So it is an encoder refusal when the video encoder reported an error, or when the service could connect.
+ *   connect runs on its own thread and reports -2/-3 as a stop code): after the service check the refusing
+ *   steps are an output that is already active (can_begin_data_capture) and the encoder initialization, video or
+ *   audio (libobs rtmp_stream_start / obs_output_initialize_encoders). So it is an encoder refusal when the video
+ *   encoder reported an error, or when the service could connect and the output was not active
+ *   (`service_ready`; an audio-init refusal is counted as the encoder's too).
  * - StopBeforeLive: a stop code arrived while the session was still Starting; only
  *   OBS_OUTPUT_ENCODE_ERROR is the encoder's, network and key codes never are.
  */

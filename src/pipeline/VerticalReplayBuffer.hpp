@@ -67,8 +67,8 @@ enum class VerticalReplayState : int {
  * still buffering stops with OBS_OUTPUT_ENCODE_ERROR, finish() keeps the error in last_error() (dock status),
  * logs one warning and posts one restart with x264 CRF 20 (the buffered seconds before the error are lost). A
  * pending restart is cancelled by stop / stop_now / shutdown and, for a buffer started with the main replay
- * buffer, by on_main_replay_stopping. A second encode error, or a failed restart, ends the buffer; save() then
- * logs a warning with the reason instead of the plain "not buffering" line.
+ * buffer, by on_main_replay_stopping. A second encode error, any other error stop, or a failed restart ends the
+ * buffer; save() then logs a warning with the reason instead of the plain "not buffering" line.
  */
 class VerticalReplayBuffer {
 public:
@@ -146,7 +146,8 @@ private:
 	/* A runtime restart posted by finish(): cleared by every stop path, consumed by restart_after_encode_error. */
 	bool m_restart_pending = false;
 	bool m_restart_with_main = false;  ///< "started with main" of the session the pending restart continues
-	bool m_restart_failed = false;     ///< the runtime restart was refused; save() warns until the next start
+	/** Ended by an error without a restart (or the restart failed); save() warns until the next start. */
+	bool m_stopped_on_error = false;
 	std::atomic<std::uint64_t> m_session_id{0};
 	std::function<void()> m_listener;
 	bool m_shut_down = false;

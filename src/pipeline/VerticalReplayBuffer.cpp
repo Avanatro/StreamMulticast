@@ -148,6 +148,7 @@ bool VerticalReplayBuffer::start_session(bool with_main, const std::optional<Rec
 		/* Before any posted finish() of this session can run (both on the UI thread). */
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_runtime_restarted = runtime_restart;
+		m_stopped_on_error = false; // cleared only by a successful start
 	}
 
 	obs_log(LOG_INFO, "vertical replay: buffering %d s (max %d MB) into \"%s\" (%s %s %d%s)", settings.seconds,
@@ -195,7 +196,6 @@ bool VerticalReplayBuffer::try_start(const RecordEncoderChoice &choice, obs_canv
 		m_pending = PendingClip{};
 		m_error.clear();
 		m_encoder_id = choice.type_id;
-		m_restart_failed = false;
 		m_session_id.fetch_add(1);
 	}
 
@@ -248,7 +248,7 @@ bool VerticalReplayBuffer::save()
 {
 	obs_output_t *output = nullptr;
 	obs_canvas_t *canvas = nullptr;
-	bool restart_failed = false;
+	bool stopped_on_error = false;
 	std::string error;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
@@ -256,14 +256,12 @@ bool VerticalReplayBuffer::save()
 			output = m_session.output;
 			canvas = m_session.canvas;
 		}
-		restart_failed = m_restart_failed;
+		stopped_on_error = m_stopped_on_error;
 		error = m_error;
 	}
 	if (!output || !obs_output_active(output)) {
-		if (restart_failed)
-			obs_log(LOG_WARNING,
-				"vertical replay: NO CLIP SAVED, the buffer stopped after an encode error and its restart "
-				"failed: %s",
+		if (stopped_on_error)
+			obs_log(LOG_WARNING, "vertical replay: NO CLIP SAVED, the buffer stopped with an error: %s",
 				error.c_str());
 		else
 			obs_log(LOG_INFO, "vertical replay: not buffering, no clip saved");
@@ -463,6 +461,8 @@ void VerticalReplayBuffer::finish(std::uint64_t session, long long code)
 				  (err ? std::string(": ") + err : "");
 			if (restart)
 				m_error += " (encode error with " + failed_encoder + ", restarting with " + restart->type_id + ")";
+			else
+				m_stopped_on_error = true; // no restart: save() warns until the next start
 			error = m_error;
 		}
 		s = detach_locked();
@@ -516,7 +516,7 @@ void VerticalReplayBuffer::restart_after_encode_error(const RecordEncoderChoice 
 	}
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_restart_failed = true;
+		m_stopped_on_error = true;
 		m_error = "Encode error with " + failed_encoder + ", the restart with " + choice.type_id +
 			  " failed: " + m_error;
 	}
