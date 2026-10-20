@@ -93,6 +93,7 @@ target_sources(
     src/core/AutosavePolicy.cpp
     src/core/AlertPolicy.cpp
     src/core/EncoderRecovery.cpp
+    src/core/SafeZone.cpp
 
     # Pipeline layer
     src/pipeline/CanvasLookup.cpp

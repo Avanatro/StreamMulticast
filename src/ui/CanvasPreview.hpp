@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #pragma once
 
 #include "../core/PreviewEdit.hpp"
+#include "../core/SafeZone.hpp"
 
 #include <QtCore/QElapsedTimer>
 #include <QtWidgets/QWidget>
@@ -85,6 +86,13 @@ public:
 	/** Called on the UI thread when an edit finished (drag release, Escape, undo, nudge). */
 	void set_edit_listener(std::function<void()> listener) { m_edit_listener = std::move(listener); }
 
+	/**
+	 * Safe-zone overlay (preview only, drawn in draw_overlay, never rendered into the canvas) and its
+	 * drag snapping. UI thread. Off by default.
+	 */
+	void set_safe_zone(safe_zone::Profile profile);
+	safe_zone::Profile safe_zone() const { return m_safe_profile; }
+
 	/** Re-read the selected/hovered item geometry for the overlay. UI thread. */
 	void refresh_overlay();
 
@@ -155,12 +163,13 @@ private:
 		bool hovered = false;
 		Corners hovered_corners{};
 		float dpr = 1.0f; ///< device px per logical px, so line/handle sizes match the hit radius
+		safe_zone::Profile safe_profile = safe_zone::Profile::Off;
 	};
 
 	void create_display();
 	void destroy_display();
 	static void draw(void *param, uint32_t cx, uint32_t cy);
-	static void draw_overlay(const Overlay &ov, float canvas_per_px);
+	static void draw_overlay(const Overlay &ov, layout::Size canvas, float canvas_per_px);
 
 	bool editing_allowed() const;
 	bool take_snapshot(Snapshot &out) const;
@@ -192,6 +201,7 @@ private:
 	preview_edit::NudgeBurst m_nudge_burst; ///< consecutive arrow nudges share one undo step
 	QElapsedTimer m_clock;                  ///< monotonic ms for the nudge burst
 	int64_t m_hover_id = 0;
+	safe_zone::Profile m_safe_profile = safe_zone::Profile::Off;
 
 	std::mutex m_overlay_mutex; ///< guards m_overlay (UI writes, graphics thread copies)
 	Overlay m_overlay;

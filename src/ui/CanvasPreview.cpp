@@ -39,6 +39,10 @@ constexpr uint32_t kBackgroundColor = 0xFF1A1A1A; // opaque dark grey, also the 
 /* Overlay sizes in logical widget px; the draw scales them by the device pixel ratio and converts them
  * to canvas units, so they match the hit radius (kHandleRadiusPx * dpr). */
 constexpr float kSelectLinePx = 2.0f;
+constexpr float kSafeZoneAlpha = 0.25f; ///< unsafe-area fill
+constexpr float kSafeLinePx = 1.0f;
+constexpr float kSafeDashPx = 8.0f;
+constexpr float kSafeMarkerPx = 10.0f;
 constexpr float kHoverLinePx = 1.0f;
 constexpr float kHandleDrawPx = 4.0f; ///< half side of a handle square (hit radius is larger, see PreviewEdit)
 constexpr float kHoverColor[3] = {0.0f, 0.5f, 1.0f};
@@ -90,6 +94,7 @@ void CanvasPreview::shutdown()
 		std::lock_guard<std::mutex> lock(m_overlay_mutex);
 		m_overlay = Overlay{};
 	}
+	m_safe_profile = safe_zone::Profile::Off;
 	destroy_display();
 }
 
@@ -240,7 +245,7 @@ void CanvasPreview::draw(void *param, uint32_t cx, uint32_t cy)
 				 -static_cast<float>(vp.y) * upx_y, (static_cast<float>(cy) - static_cast<float>(vp.y)) * upx_y,
 				 -100.0f, 100.0f);
 			gs_set_viewport(0, 0, static_cast<int>(cx), static_cast<int>(cy));
-			draw_overlay(ov, (upx_x + upx_y) * 0.5f * ov.dpr);
+			draw_overlay(ov, {cw, ch}, (upx_x + upx_y) * 0.5f * ov.dpr);
 			gs_projection_pop();
 			gs_viewport_pop();
 		}
@@ -290,6 +295,33 @@ void draw_outline(const std::array<Vec2, 4> &c, float thickness)
 		draw_line(c[i], c[(i + 1) % c.size()], thickness);
 }
 
+void draw_rect(const layout::Rect &r)
+{
+	if (r.w <= 0 || r.h <= 0)
+		return;
+	const float x0 = static_cast<float>(r.x), y0 = static_cast<float>(r.y);
+	const float x1 = x0 + static_cast<float>(r.w), y1 = y0 + static_cast<float>(r.h);
+	gs_render_start(true);
+	gs_vertex2f(x0, y0);
+	gs_vertex2f(x1, y0);
+	gs_vertex2f(x0, y1);
+	gs_vertex2f(x1, y1);
+	gs_render_stop(GS_TRISTRIP);
+}
+
+/* Dashed line a -> b, dash and gap `dash` canvas units long. */
+void draw_dashed_line(Vec2 a, Vec2 b, float thickness, float dash)
+{
+	const float len = std::hypot(b.x - a.x, b.y - a.y);
+	if (len < 1e-4f || dash <= 0.0f)
+		return;
+	const Vec2 u{(b.x - a.x) / len, (b.y - a.y) / len};
+	for (float t = 0.0f; t < len; t += dash * 2.0f) {
+		const float e = std::min(t + dash, len);
+		draw_line({a.x + u.x * t, a.y + u.y * t}, {a.x + u.x * e, a.y + u.y * e}, thickness);
+	}
+}
+
 Vec2 mid(Vec2 a, Vec2 b)
 {
 	return {(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
@@ -298,9 +330,10 @@ Vec2 mid(Vec2 a, Vec2 b)
 } // namespace
 
 /* Graphics thread, inside the canvas ortho: geometry only, no libobs object besides the base effect. */
-void CanvasPreview::draw_overlay(const Overlay &ov, float canvas_per_px)
+void CanvasPreview::draw_overlay(const Overlay &ov, layout::Size canvas, float canvas_per_px)
 {
-	if (!ov.selected && !ov.hovered)
+	const safe_zone::Zone zone = safe_zone::safe_zone_for(ov.safe_profile, canvas);
+	if (!zone.active && !ov.selected && !ov.hovered)
 		return;
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_eparam_t *color = solid ? gs_effect_get_param_by_name(solid, "color") : nullptr;
@@ -308,6 +341,41 @@ void CanvasPreview::draw_overlay(const Overlay &ov, float canvas_per_px)
 		return;
 
 	vec4 c;
+	/* Safe zone first, so the selection handles stay on top. Preview only: this runs after obs_canvas_render
+	 * and draws into the display, never into the canvas mix. */
+	if (zone.active) {
+		vec4_set(&c, 1.0f, 0.0f, 0.0f, kSafeZoneAlpha);
+		gs_effect_set_vec4(color, &c);
+		while (gs_effect_loop(solid, "Solid")) {
+			draw_rect(zone.unsafe_top);
+			draw_rect(zone.unsafe_bottom);
+			draw_rect(zone.unsafe_left);
+			draw_rect(zone.unsafe_right);
+			if (zone.has_action_column)
+				draw_rect(zone.action_column);
+		}
+		vec4_set(&c, 1.0f, 1.0f, 1.0f, 0.9f);
+		gs_effect_set_vec4(color, &c);
+		while (gs_effect_loop(solid, "Solid")) {
+			const float t = kSafeLinePx * canvas_per_px;
+			const float dash = kSafeDashPx * canvas_per_px;
+			const layout::Rect &r = zone.safe;
+			const Vec2 tl{static_cast<float>(r.x), static_cast<float>(r.y)};
+			const Vec2 tr{static_cast<float>(r.x + r.w), tl.y};
+			const Vec2 br{tr.x, static_cast<float>(r.y + r.h)};
+			const Vec2 bl{tl.x, br.y};
+			draw_dashed_line(tl, tr, t, dash);
+			draw_dashed_line(tr, br, t, dash);
+			draw_dashed_line(br, bl, t, dash);
+			draw_dashed_line(bl, tl, t, dash);
+			draw_square({tl.x + kSafeMarkerPx * canvas_per_px, tl.y + kSafeMarkerPx * canvas_per_px},
+				    kSafeMarkerPx * canvas_per_px * 0.5f); // text-free corner marker
+		}
+	}
+	if (!ov.selected && !ov.hovered) {
+		gs_load_vertexbuffer(nullptr);
+		return;
+	}
 	if (ov.hovered) {
 		vec4_set(&c, kHoverColor[0], kHoverColor[1], kHoverColor[2], 1.0f);
 		gs_effect_set_vec4(color, &c);
@@ -508,6 +576,13 @@ void CanvasPreview::set_selected_overlay(const preview_edit::Item *item)
 	}
 }
 
+void CanvasPreview::set_safe_zone(safe_zone::Profile profile)
+{
+	m_safe_profile = profile;
+	std::lock_guard<std::mutex> lock(m_overlay_mutex);
+	m_overlay.safe_profile = profile;
+}
+
 void CanvasPreview::refresh_overlay()
 {
 	Snapshot snap;
@@ -649,6 +724,8 @@ void CanvasPreview::mousePressEvent(QMouseEvent *event)
 	for (const auto &it : snap.items)
 		if (it.id != drag.id)
 			drag.others.push_back(it);
+	if (m_safe_profile != safe_zone::Profile::Off) // the safe rect snaps like another item's box
+		drag.others.push_back(safe_zone::safe_zone_snap_item(safe_zone::safe_zone_for(m_safe_profile, canvas_size())));
 	m_drag = std::move(drag);
 	preview_edit::end_nudge_burst(m_nudge_burst);
 	set_selected_overlay(&m_drag.start);
@@ -721,7 +798,9 @@ void CanvasPreview::finish_drag(bool restore)
 		}
 	}
 	refresh_overlay();
-	notify_edit();
+	/* Only a kept change is an edit: a plain click that selects, or Escape that restored the start, saves nothing. */
+	if (drag.changed && !restore)
+		notify_edit();
 }
 
 void CanvasPreview::nudge_selected(int dx, int dy, bool shift)
@@ -759,9 +838,7 @@ void CanvasPreview::undo_last()
 	preview_edit::end_nudge_burst(m_nudge_burst);
 	write_item(undo.scene_uuid, undo.before); // refused when the scene changed or the item is gone
 	refresh_overlay();
-	/* Only a kept change is an edit: a plain click that selects, or Escape that restored the start, saves nothing. */
-	if (drag.changed && !restore)
-		notify_edit();
+	notify_edit();
 }
 
 void CanvasPreview::keyPressEvent(QKeyEvent *event)

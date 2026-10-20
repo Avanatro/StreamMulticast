@@ -111,6 +111,17 @@ Pair with [Stream Health Doctor](https://tools.avanatro.com/stream-health/) for 
 
 The **StreamMulticast Vertical** dock preview can be edited like the OBS main preview: click an item to select it (the Sources tab row follows, and selecting a row highlights the item), drag to move it (snaps to the canvas edges, the centre lines and other items' edges; hold **Ctrl** to move freely), drag a corner handle to resize with the aspect ratio kept (**Shift** = free) or an edge handle to resize one axis. Arrow keys nudge by 1 px (**Shift** = 10 px), **Esc** cancels a running drag, **Ctrl+Z** undoes the last drag or the last series of arrow nudges (one step only; the OBS undo history covers the main canvas only). **Delete** does nothing in this preview. Locked and hidden items cannot be clicked; rotation, alignment and crop are kept as they are (use the transform panel or OBS for those).
 
+### Safe-zone overlay (TikTok / Shorts)
+
+The combo box **Safe zone** above the vertical preview shades the areas that the TikTok or YouTube Shorts app covers with its own interface (title bar, caption and comments, the button column on the right) in translucent red and outlines the remaining safe rectangle with a thin dashed white line. Dragging an item in the preview snaps its edges to that rectangle (hold **Ctrl** to move freely). The overlay is drawn in the preview only: it is never part of the canvas, so it does not appear in the stream or in a recording. The choice is remembered per user (OBS user config, section `StreamMulticast`, key `SafeZoneProfile`).
+
+**The numbers are approximate.** TikTok publishes no margins for LIVE; Shorts publishes none for organic video. Both sets below are for a 1080x1920 frame and are scaled linearly to other canvas sizes. They live in one table in `src/core/SafeZone.cpp`:
+
+| Profile | Top | Bottom | Left | Right | Source |
+|---|---|---|---|---|---|
+| TikTok (approx.) | 240 | 660 | 120 | 120 | TikTok's In-Feed Ads template (720x1280, scaled) as published by [socialync.io](https://socialync.io/tools/safe-zones/tiktok); the right-hand button column (x 900..1080, y 840..1260) is socialync.io's own measurement. Other tools give 160-254 top and 480-707 bottom, so check on your phone once. |
+| Shorts (approx.) | 288 | 672 | 48 | 192 | Google Ads Help, [safe zones for vertical video ads](https://support.google.com/google-ads/answer/9128498), 15 % / 35 % / 4 % / 18 % of the frame, as quoted by [socialync.io](https://www.socialync.io/tools/safe-zones/youtube-shorts) and [revid.ai](https://www.revid.ai/youtube-shorts-safe-zone). Published for ads. |
+
 ### Editing sources from the vertical dock
 
 The **Sources** tab and a right-click on an item (in the list or in the preview) offer **Properties...** (also a double-click on a row), **Filters...**, **Interact...** (browser sources and other interactive types), **Rename...**, **Lock / Unlock** and a **Transform** submenu (**Fit to canvas**, **Fill canvas**, **Reset transform**, **Center horizontally**, **Center vertically**). **Add source** has two entries: **Existing source...** and **New source...** (pick a type, name it, and its properties open). Sources are global in OBS: a source created here is a normal global OBS source (it is added to the vertical scene only, so the main window lists it under **Add > Existing**), and renaming or changing the properties or filters of a source that the main canvas also uses changes it there too (the rename dialog says so). Only the scene items of the vertical canvas are ever added, removed or moved.

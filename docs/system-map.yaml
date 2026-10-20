@@ -961,7 +961,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition, vertical-replay]
+    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition, vertical-replay, safe-zone]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -1061,6 +1061,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: from the vertical dock open the webcam's properties and filters, rename a source (shared warning when the main canvas uses it), lock/unlock, apply the Transform presets, create a new Color Source and Browser source (Interact works for the browser) (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-30)"
+            result: pending
+      - id: ui-vertical-dock.safe-zone-preview-only
+        behavior: "A Safe zone combo (Off / TikTok (approx.) / Shorts (approx.)) above the preview, remembered in the OBS user config (section StreamMulticast, key SafeZoneProfile), draws the unsafe areas as translucent red fills (alpha 0.25), the safe rect as a thin dashed white outline and a small corner marker, below the selection handles. It is drawn in CanvasPreview::draw_overlay, after obs_canvas_render, into the display only, so nothing reaches the canvas mix, encoders or recordings (rg SafeZone src/pipeline: no match). Dragging snaps to the safe rect while a profile is on. Tooltip: Approximate areas covered by the app UI. Preview only, never recorded or streamed."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: toggle TikTok (approx.), drag the webcam towards the right edge and it snaps at the safe line; start a vertical recording and the file shows no red areas; compare once on the phone during a TikTok LIVE and report if the numbers need adjusting (then only the table changes) (not run in this session; plugin target compiled with SMULTI_STREAMLABS_TIKTOK OFF and ON, TASK-37)"
             result: pending
     status: building
   - id: streamlabs-login
@@ -1263,6 +1269,50 @@ nodes:
             reference: "OBS runtime check (Dima): enable the sound checkbox, repeat the network-unplug test: one exclamation sound at the raise, none repeated within 30 s (not run, TASK-34)"
             result: pending
     status: building
+  - id: safe-zone
+    lane: core
+    goal: "Approximate TikTok / YouTube Shorts safe-zone rectangles for the vertical preview, scaled from one 1080x1920 table."
+    owns: [safe-zone.table]
+    needs: [layout-math, preview-edit]
+    code:
+      - src/core/SafeZone.hpp
+      - src/core/SafeZone.cpp
+      - tests/test_safe_zone.cpp
+    works_when:
+      - id: safe-zone.table
+        behavior: "OBS-free and Qt-free. One constexpr table with a source comment per row (TikTok approx.: top 240, bottom 660, left/right 120, button column x 900..1080 y 840..1260; Shorts approx.: top 288, bottom 672, left 48, right 192; sources in the code comment and README, all approximate). safe_zone_for(profile, canvas) scales x by width/1080 and y by height/1920 and returns the four unsafe bands, the optional button column and the safe rect; Off or an empty canvas gives an inactive, empty zone. safe_zone_snap_item(zone) is a pseudo preview_edit::Item at the safe rect, passed as an extra `others` entry to move_position (PreviewEdit API unchanged). Profile strings off|tiktok|shorts round-trip."
+        verification:
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: safe_zone_tiktok_1080x1920_matches_table
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: safe_zone_scales_with_canvas
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: safe_zone_off_is_empty
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: safe_zone_snap_item_matches_safe_rect
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: safe_zone_profile_string_roundtrip
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+    status: building
   - id: collection-autosave
     lane: pipeline
     goal: "Edits the plugin makes to the owned vertical canvas reach the scene collection file within seconds, so an OBS crash does not lose them."
@@ -1441,7 +1491,7 @@ nodes:
   - id: preview-edit
     lane: core
     goal: "Pure math for click-and-drag editing in the vertical preview: view mapping, item boxes, hit tests, snapping move, handle resize and nudge."
-    owns: [preview-edit.math]
+    owns: [preview-edit.math, preview-edit.snap-safe-zone]
     needs: [layout-math]
     code:
       - src/core/PreviewEdit.hpp
@@ -1547,6 +1597,15 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R preview_edit_, local run 2026-10-19; link failed before implementation (missing nudge_begins_step/end_nudge_burst), 16/16 passed after; full ctest 136/136 (TASK-29 fix round 1)"
             checked_at: 2026-10-19
+      - id: preview-edit.snap-safe-zone
+        behavior: "move_position snaps the moved box's edges to the safe-zone pseudo item (safe_zone_snap_item) passed in `others`, exactly like any other item's edges; Ctrl disables it. The API is unchanged."
+        verification:
+          - kind: automated
+            reference: tests/test_safe_zone.cpp
+            check: preview_edit_move_snaps_to_safe_zone_edge
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
     status: building
   - id: item-actions
     lane: core

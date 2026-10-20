@@ -16,6 +16,11 @@ GPLv2 — see LICENSE for full text.
 #include "../pipeline/VerticalRecorder.hpp"
 #include "../pipeline/VerticalReplayBuffer.hpp"
 
+#include "../core/SafeZone.hpp"
+
+#include <obs-frontend-api.h>
+#include <util/config-file.h>
+
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -24,6 +29,7 @@ GPLv2 — see LICENSE for full text.
 #include <QStyle>
 #include <QVBoxLayout>
 #include <QtWidgets/QCheckBox>
+#include <QtWidgets/QComboBox>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
@@ -49,8 +55,42 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 	 * last, after the preview and the list that reference it. */
 	m_selection = new VerticalSelection();
 
+	/* Safe-zone toggle above the preview. Preview only; the choice is a per-user UI flag. */
+	auto *zone_row = new QHBoxLayout();
+	auto *zone_label = new QLabel(tr("Safe zone:"), this);
+	m_safe_zone = new QComboBox(this);
+	m_safe_zone->addItem(tr("Off"), QString::fromLatin1(safe_zone::profile_to_string(safe_zone::Profile::Off)));
+	m_safe_zone->addItem(tr("TikTok (approx.)"),
+			     QString::fromLatin1(safe_zone::profile_to_string(safe_zone::Profile::TikTok)));
+	m_safe_zone->addItem(tr("Shorts (approx.)"),
+			     QString::fromLatin1(safe_zone::profile_to_string(safe_zone::Profile::Shorts)));
+	const QString zone_tip = tr("Approximate areas covered by the app UI. Preview only, never recorded or streamed.");
+	zone_label->setToolTip(zone_tip);
+	m_safe_zone->setToolTip(zone_tip);
+	zone_row->addWidget(zone_label);
+	zone_row->addWidget(m_safe_zone, 1);
+	layout->addLayout(zone_row);
+
 	m_preview = new CanvasPreview(canvas, *m_selection, this);
 	layout->addWidget(m_preview, 3);
+
+	{
+		const char *saved = nullptr;
+		if (config_t *cfg = obs_frontend_get_user_config())
+			saved = config_get_string(cfg, "StreamMulticast", "SafeZoneProfile");
+		const safe_zone::Profile start = safe_zone::profile_from_string(saved ? saved : "");
+		const int idx = m_safe_zone->findData(QString::fromLatin1(safe_zone::profile_to_string(start)));
+		m_safe_zone->setCurrentIndex(idx < 0 ? 0 : idx);
+		m_preview->set_safe_zone(start);
+	}
+	connect(m_safe_zone, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+		const std::string key = m_safe_zone->currentData().toString().toStdString();
+		m_preview->set_safe_zone(safe_zone::profile_from_string(key));
+		if (config_t *cfg = obs_frontend_get_user_config()) {
+			config_set_string(cfg, "StreamMulticast", "SafeZoneProfile", key.c_str());
+			config_save_safe(cfg, "tmp", nullptr);
+		}
+	});
 
 	/* No colours here: checked state and the theme's text-danger class mark a running recording. */
 	m_record = new QPushButton(tr("Record vertical"), this);

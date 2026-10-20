@@ -15,6 +15,7 @@ GPLv2 — see LICENSE for full text.
 #include <string>
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -131,6 +132,7 @@ private:
 	QLabel *m_replay_status = nullptr;
 	QLabel *m_replay_memory = nullptr;
 	CanvasPreview *m_preview = nullptr;
+	QComboBox *m_safe_zone = nullptr; ///< Off / TikTok / Shorts overlay profile (preview only)
 	VerticalSceneList *m_scenes = nullptr;
 	VerticalItemList *m_items = nullptr;
 	VerticalSceneLink *m_links = nullptr;

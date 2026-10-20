@@ -28,6 +28,7 @@ set(SMULTI_TEST_SOURCES
     test_autosave_policy.cpp
     test_alert_policy.cpp
     test_encoder_recovery.cpp
+    test_safe_zone.cpp
 )
 
 add_executable(
@@ -52,6 +53,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/AutosavePolicy.cpp
   ${CMAKE_SOURCE_DIR}/src/core/AlertPolicy.cpp
   ${CMAKE_SOURCE_DIR}/src/core/EncoderRecovery.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/SafeZone.cpp
 )
 target_compile_features(streammulticast_tests PRIVATE cxx_std_17)
 target_include_directories(
