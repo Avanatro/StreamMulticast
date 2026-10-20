@@ -52,7 +52,7 @@ using SceneFn = std::function<void(obs_scene_t *, const std::string &scene_uuid)
 /**
  * "Sources" tab of the vertical dock: the items of the ACTIVE scene (channel 0) of the owned canvas,
  * with add (existing or brand-new source), remove, move up/down, a visibility checkbox, item actions
- * (properties, filters, interact, rename, lock, transform presets) and the TransformEditor.
+ * (properties, filters, interact, rename, lock / unlock, lock all, transform presets) and the TransformEditor.
  *
  * Reference rules (same as VerticalSceneList, binding):
  *  - Every canvas, scene, source and scene item reference is taken and released inside one function
@@ -60,7 +60,7 @@ using SceneFn = std::function<void(obs_scene_t *, const std::string &scene_uuid)
  *    call or a frontend event. Items are identified by their numeric id between events.
  *  - The long-lived links are weak references (canvas, active scene source) plus connected signals:
  *    canvas channel_change / source_remove / source_rename and the scene signals item_add,
- *    item_remove, reorder, item_visible, refresh (callbacks only queue a coalesced refresh()) and
+ *    item_remove, reorder, item_visible, item_locked (an outside lock change shows at once), refresh (callbacks only queue a coalesced refresh()) and
  *    item_transform (queues only a coalesced transform panel reload; it can fire per frame).
  *  - Item ids are unique per scene only: the list remembers the scene uuid its ids came from and every
  *    libobs access passes it; a different active scene refuses the access.
@@ -119,9 +119,12 @@ private slots:
 	void on_item_changed(QListWidgetItem *item);
 
 private:
-	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, Fit, Fill, Reset, CenterH, CenterV,
+	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, LockAll, UnlockAll, Fit, Fill, Reset, CenterH, CenterV,
 			    CopyTransformToOtherScenes };
 
+	bool eventFilter(QObject *obj, QEvent *event) override;
+	void set_all_locked(std::string scene_uuid, bool lock);
+	void show_scene_lock_menu(const QPoint &global_pos, std::string scene_uuid);
 	void run_item_action(ItemAction action, std::string scene_uuid, int64_t id);
 	void rename_item(std::string scene_uuid, int64_t id);
 	void apply_transform(ItemAction action, std::string scene_uuid, int64_t id);

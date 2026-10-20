@@ -126,6 +126,14 @@ The combo box **Safe zone** above the vertical preview shades the areas that the
 
 The **Sources** tab and a right-click on an item (in the list or in the preview) offer **Properties...** (also a double-click on a row), **Filters...**, **Interact...** (browser sources and other interactive types), **Rename...**, **Lock / Unlock** and a **Transform** submenu (**Fit to canvas**, **Fill canvas**, **Reset transform**, **Center horizontally**, **Center vertically**). **Add source** has two entries: **Existing source...** and **New source...** (pick a type, name it, and its properties open). Sources are global in OBS: a source created here is a normal global OBS source (it is added to the vertical scene only, so the main window lists it under **Add > Existing**), and renaming or changing the properties or filters of a source that the main canvas also uses changes it there too (the rename dialog says so). Only the scene items of the vertical canvas are ever added, removed or moved.
 
+### Locking sources in the vertical editor
+
+Lock the sources of the vertical scenes so you cannot move them by accident. The lock is the normal OBS scene item lock, so it is saved in your scene collection and is the same one the OBS sources dock and obs-websocket (`SetSceneItemLocked`) use: lock an item there and the padlock in the **Sources** tab follows at once, and the other way round.
+
+- **Padlock per row:** click the padlock at the right end of a row in the **Sources** tab to lock or unlock that item (tooltip **Lock** / **Unlock**). Right-click an item (in the list or in the preview) for **Lock** / **Unlock**, **Lock all items in this scene** and **Unlock all items in this scene**; a right-click on the empty part of the list offers the last two.
+- **What a lock does:** a locked item can still be selected (click it, use its menu, open **Properties...** or **Filters...**) but it cannot be moved, resized or nudged with the arrow keys in the vertical preview. Its selection outline is dimmer and dashed and has no handles, so you can see why dragging does nothing.
+- **Copy transform:** **Transform > Copy transform to other vertical scenes** skips scenes where the item is locked and reports how many it skipped.
+
 ### Saving vertical edits
 
 Vertical edits are saved to the scene collection about 2 s after each change (a continuous series of edits, such as a long drag, still saves at least every 10 s), so an OBS crash does not lose the layout of the vertical scenes. Nothing is saved while a scene collection loads or OBS shuts down; OBS saves on exit itself.

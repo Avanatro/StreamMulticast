@@ -84,4 +84,7 @@ struct CopyPlan {
 CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &origin_scene_uuid,
 			     const std::vector<SceneItemRef> &candidates);
 
+/** How many scenes plan_copy_transform skipped because the item is locked. */
+size_t skipped_locked_count(const CopyPlan &plan);
+
 } // namespace smulti::item_actions

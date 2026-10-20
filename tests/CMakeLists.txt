@@ -23,6 +23,7 @@ set(SMULTI_TEST_SOURCES
     test_streamlabs_tiktok.cpp
     test_preview_edit.cpp
     test_item_actions.cpp
+    test_vertical_lock.cpp
     test_vertical_transition.cpp
     test_streamlabs_login.cpp
     test_autosave_policy.cpp
@@ -48,6 +49,7 @@ add_executable(
   ${CMAKE_SOURCE_DIR}/src/core/StreamlabsTikTok.cpp
   ${CMAKE_SOURCE_DIR}/src/core/PreviewEdit.cpp
   ${CMAKE_SOURCE_DIR}/src/core/ItemActions.cpp
+  ${CMAKE_SOURCE_DIR}/src/core/LockPolicy.cpp
   ${CMAKE_SOURCE_DIR}/src/core/VerticalTransition.cpp
   ${CMAKE_SOURCE_DIR}/src/core/StreamlabsLogin.cpp
   ${CMAKE_SOURCE_DIR}/src/core/AutosavePolicy.cpp

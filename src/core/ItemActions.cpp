@@ -125,4 +125,10 @@ CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &
 	return plan;
 }
 
+size_t skipped_locked_count(const CopyPlan &plan)
+{
+	return static_cast<size_t>(std::count_if(plan.skipped.begin(), plan.skipped.end(),
+						 [](const CopySkip &s) { return s.reason == "locked"; }));
+}
+
 } // namespace smulti::item_actions

@@ -997,7 +997,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition, vertical-replay, safe-zone]
+    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, lock-policy, vertical-transition, vertical-replay, safe-zone]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -1103,6 +1103,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: in V Gaming move 'Webcam', right-click > Transform > Copy transform to other vertical scenes > confirm: V Just Chatting and V Dev/Coding show the webcam at the same place; the main canvas scenes (Gaming, Just Chatting) are unchanged"
+            result: pending
+      - id: ui-vertical-dock.lock-sources
+        behavior: "Locking sources in the vertical editor (TASK-43). The native scene item lock (obs_sceneitem_set_locked / obs_sceneitem_locked) is the only lock state: it is saved by OBS in the scene collection and shared with the OBS sources dock and obs-websocket. Preview: a click selects the topmost visible item including locked ones (hit_item_selectable), but a locked item is never dragged, resized or nudged (lock_policy::can_edit / editable_ids gate the press, the handles, the hover cursor and the arrow keys; write_item still refuses a lock set meanwhile); its selection outline is dimmer (alpha 0.65) and dashed with no handles, so it is visible why dragging does nothing; its context menu (Properties, Filters, Lock/Unlock) still works. Sources tab: each row has a padlock in a right-hand zone (QStyledItemDelegate; a click in the zone toggles the lock and does not change the selection; tooltip Lock / Unlock; the row data mirrors obs_sceneitem_locked on every refresh); the item menus (list and preview) offer Lock / Unlock, Lock all items in this scene and Unlock all items in this scene, and so does a right-click on the empty part of the list (set_all_locked writes only flags that differ, per lock_policy::lock_all_changes, status 'Locked N items.'). The scene signal item_locked is connected with the other scene signals (queued, coalesced refresh) and disconnected with them on scene switch, detach and shutdown, so a lock changed in the OBS sources dock or by obs-websocket shows at once. Copy transform skips locked targets and the status line reads 'Skipped N (M locked): ...'. Lock changes request an autosave ('item lock', 'lock all items', 'unlock all items'). The editor has no multi-selection (VerticalSelection holds one item), so the multi-select rule is in the core only. Only compiled locally (plugin target built), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: lock an item in the vertical editor (padlock in the Sources tab or right-click > Lock), try to drag it, resize it and nudge it with the arrow keys and confirm it stays with a dashed dim outline; lock another one in the OBS sources dock (or obs-websocket SetSceneItemLocked) and confirm the plugin padlock follows; Lock all / Unlock all; copy transform skips locked scenes and reports the count (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-43)"
             result: pending
       - id: ui-vertical-dock.safe-zone-preview-only
         behavior: "A Safe zone combo (Off / TikTok (approx.) / Shorts (approx.)) above the preview, remembered in the OBS user config (section StreamMulticast, key SafeZoneProfile), draws the unsafe areas as translucent red fills (alpha 0.25), the safe rect as a thin dashed white outline and a small corner marker, below the selection handles. It is drawn in CanvasPreview::draw_overlay, after obs_canvas_render, into the display only, so nothing reaches the canvas mix, encoders or recordings (rg SafeZone src/pipeline: no match). Dragging snaps to the safe rect while a profile is on. Tooltip: Approximate areas covered by the app UI. Preview only, never recorded or streamed."
@@ -1647,6 +1653,50 @@ nodes:
             check: preview_edit_move_snaps_to_safe_zone_edge
             result: passed
             run: "ctest --test-dir build_tests -C Release -R 'safe_zone_|preview_edit_', local run 2026-10-20; 6/6 new cases failed against a stub SafeZone.cpp, 22/22 passed after; full ctest 194/194; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-37)"
+            checked_at: 2026-10-20
+    status: building
+  - id: lock-policy
+    lane: core
+    goal: "Pure lock rules of the vertical editor: which selected items a drag, resize or nudge may change and which flags a lock-all or unlock-all flips. The lock flag itself is libobs' (obs_sceneitem_locked), never stored here."
+    owns: [lock-policy.rules]
+    needs: [preview-edit, item-actions]
+    code:
+      - src/core/LockPolicy.hpp
+      - src/core/LockPolicy.cpp
+      - tests/test_vertical_lock.cpp
+    works_when:
+      - id: lock-policy.rules
+        behavior: "OBS-free and Qt-free, stateless. editable_ids(items, selection) keeps the selected ids that exist and are unlocked, once each, in selection order (locked members stay put, unlocked members move; unknown ids are ignored); can_edit(items, id) is the single-item form; lock_all_changes(items, lock) lists the ids whose flag differs from the wanted state. preview_edit::hit_item_selectable is hit_item that also returns locked items (select, outline and context menu only; hit_item still skips them, so a drag never starts on one), and item_actions::skipped_locked_count counts the scenes plan_copy_transform skipped as locked. The lock flag is read from libobs into preview_edit::Item::locked on every snapshot; nothing here or in the UI keeps a second copy (G2)."
+        verification:
+          - kind: automated
+            reference: tests/test_vertical_lock.cpp
+            check: vertical_lock_drag_skips_locked
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_lock_, local run 2026-10-20; 5/5 failed against stub LockPolicy.cpp / stub hit_item_selectable / stub skipped_locked_count, 5/5 passed after; full ctest 209/209 (TASK-43)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_lock.cpp
+            check: vertical_lock_multiselect_moves_unlocked_only
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_lock_, local run 2026-10-20; 5/5 failed against stub LockPolicy.cpp / stub hit_item_selectable / stub skipped_locked_count, 5/5 passed after; full ctest 209/209 (TASK-43)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_lock.cpp
+            check: vertical_lock_nudge_ignored_when_locked
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_lock_, local run 2026-10-20; 5/5 failed against stub LockPolicy.cpp / stub hit_item_selectable / stub skipped_locked_count, 5/5 passed after; full ctest 209/209 (TASK-43)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_lock.cpp
+            check: vertical_lock_copy_transform_skips_locked_targets
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_lock_, local run 2026-10-20; 5/5 failed against stub LockPolicy.cpp / stub hit_item_selectable / stub skipped_locked_count, 5/5 passed after; full ctest 209/209 (TASK-43)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_vertical_lock.cpp
+            check: vertical_lock_all_unlock_all_flags
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R vertical_lock_, local run 2026-10-20; 5/5 failed against stub LockPolicy.cpp / stub hit_item_selectable / stub skipped_locked_count, 5/5 passed after; full ctest 209/209 (TASK-43)"
             checked_at: 2026-10-20
     status: building
   - id: item-actions

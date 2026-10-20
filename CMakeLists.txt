@@ -77,6 +77,7 @@ target_sources(
     src/core/LayoutMath.cpp
     src/core/PreviewEdit.cpp
     src/core/ItemActions.cpp
+    src/core/LockPolicy.cpp
     src/core/SceneLink.cpp
     src/core/VerticalTransition.cpp
     src/core/CanvasScaleRef.cpp

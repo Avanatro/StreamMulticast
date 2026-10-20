@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "VerticalCanvasDock.hpp" // VerticalSelection
 #include "../core/LayoutMath.hpp"
+#include "../core/LockPolicy.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
@@ -44,6 +45,8 @@ constexpr float kSafeLinePx = 1.0f;
 constexpr float kSafeDashPx = 8.0f;
 constexpr float kSafeMarkerPx = 10.0f;
 constexpr float kHoverLinePx = 1.0f;
+constexpr float kLockedDashPx = 6.0f;  ///< dash length of a locked item's outline
+constexpr float kLockedAlpha = 0.65f;   ///< locked outline is dimmer than the red of an editable one
 constexpr float kHandleDrawPx = 4.0f; ///< half side of a handle square (hit radius is larger, see PreviewEdit)
 constexpr float kHoverColor[3] = {0.0f, 0.5f, 1.0f};
 
@@ -389,12 +392,18 @@ void CanvasPreview::draw_overlay(const Overlay &ov, layout::Size canvas, float c
 			draw_outline(ov.hovered_corners, kHoverLinePx * canvas_per_px);
 	}
 	if (ov.selected) {
-		vec4_set(&c, 1.0f, 0.0f, 0.0f, 1.0f); // OBS selection red (0xFFFF0000)
+		/* Editable: OBS selection red (0xFFFF0000) with handles. Locked: dimmer and dashed, no handles, so it is
+		 * visible why a drag does nothing. */
+		vec4_set(&c, 1.0f, 0.0f, 0.0f, ov.selected_locked ? kLockedAlpha : 1.0f);
 		gs_effect_set_vec4(color, &c);
 		while (gs_effect_loop(solid, "Solid")) {
 			const auto &k = ov.selected_corners;
-			draw_outline(k, kSelectLinePx * canvas_per_px);
-			if (!ov.selected_locked) {
+			if (ov.selected_locked) {
+				for (size_t i = 0; i < k.size(); ++i)
+					draw_dashed_line(k[i], k[(i + 1) % k.size()], kSelectLinePx * canvas_per_px,
+							 kLockedDashPx * canvas_per_px);
+			} else {
+				draw_outline(k, kSelectLinePx * canvas_per_px);
 				const float half = kHandleDrawPx * canvas_per_px;
 				for (size_t i = 0; i < k.size(); ++i) {
 					draw_square(k[i], half);
@@ -658,10 +667,10 @@ void CanvasPreview::contextMenuEvent(QContextMenuEvent *event)
 		 static_cast<float>(event->pos().y() * devicePixelRatioF())});
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
 	int64_t hit = 0;
-	if (sel && !sel->locked && sel->visible && preview_edit::hit_item({*sel}, cp) == sel->id)
+	if (sel && sel->visible && preview_edit::hit_item_selectable({*sel}, cp) == sel->id)
 		hit = sel->id;
 	if (hit == 0)
-		hit = preview_edit::hit_item(snap.items, cp);
+		hit = preview_edit::hit_item_selectable(snap.items, cp); // a locked item still gets its menu
 	if (hit == 0) {
 		event->accept();
 		return;
@@ -699,7 +708,7 @@ void CanvasPreview::mousePressEvent(QMouseEvent *event)
 
 	/* Handles of the selected item first (they reach outside its box), then the topmost item. */
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
-	if (sel && !sel->locked && sel->visible) {
+	if (sel && lock_policy::can_edit(snap.items, sel->id) && sel->visible) {
 		const preview_edit::Handle h =
 			preview_edit::hit_handle(*sel, view, wp, preview_edit::kHandleRadiusPx * dpr);
 		if (h != preview_edit::Handle::None) {
@@ -713,16 +722,20 @@ void CanvasPreview::mousePressEvent(QMouseEvent *event)
 	if (drag.mode == DragMode::None) {
 		/* Like OBS: a click inside the selected item keeps dragging it even when another item lies on top. */
 		int64_t hit = 0;
-		if (sel && !sel->locked && sel->visible && preview_edit::hit_item({*sel}, cp) == sel->id)
+		if (sel && sel->visible && preview_edit::hit_item_selectable({*sel}, cp) == sel->id)
 			hit = sel->id;
 		if (hit == 0)
-			hit = preview_edit::hit_item(snap.items, cp);
+			hit = preview_edit::hit_item_selectable(snap.items, cp);
 		if (hit == 0) {
 			m_selection.clear();
 			refresh_overlay();
 			return;
 		}
 		m_selection.set(snap.scene_uuid, hit);
+		if (!lock_policy::can_edit(snap.items, hit)) {
+			refresh_overlay(); // a locked item is selected (outline, menu, panel) but never dragged
+			return;
+		}
 		drag.mode = DragMode::Move;
 		drag.id = hit;
 		drag.start = *snap.find(hit);
@@ -815,8 +828,8 @@ void CanvasPreview::nudge_selected(int dx, int dy, bool shift)
 	if (!take_snapshot(snap))
 		return;
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
-	if (!sel || sel->locked)
-		return;
+	if (!sel || lock_policy::editable_ids(snap.items, {sel->id}).empty())
+		return; // locked (or gone): arrow keys do nothing
 	preview_edit::Item next = *sel;
 	next.pos = preview_edit::nudge(sel->pos, dx, dy, shift);
 	if (!write_item(snap.scene_uuid, next)) {
@@ -906,13 +919,14 @@ void CanvasPreview::update_hover(const preview_edit::Vec2 &widget_px)
 	const preview_edit::Item *sel = snap.find(m_selection.item_in(snap.scene_uuid));
 
 	preview_edit::Cursor cursor = preview_edit::Cursor::Arrow;
-	if (sel && !sel->locked && sel->visible) {
+	if (sel && lock_policy::can_edit(snap.items, sel->id) && sel->visible) {
 		const preview_edit::Handle h =
 			preview_edit::hit_handle(*sel, view, widget_px, preview_edit::kHandleRadiusPx * dpr);
 		if (h != preview_edit::Handle::None)
 			cursor = preview_edit::handle_cursor(h, sel->rot);
 	}
-	const int64_t hit = preview_edit::hit_item(snap.items, preview_edit::widget_to_canvas(view, widget_px));
+	const preview_edit::Vec2 canvas_pt = preview_edit::widget_to_canvas(view, widget_px);
+	const int64_t hit = preview_edit::hit_item(snap.items, canvas_pt); // editable: hover outline + move cursor
 	if (cursor == preview_edit::Cursor::Arrow && hit != 0)
 		cursor = preview_edit::Cursor::Move;
 	setCursor(to_qt(cursor));

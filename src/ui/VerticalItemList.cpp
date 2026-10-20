@@ -10,17 +10,23 @@ GPLv2 — see LICENSE for full text.
 #include "CanvasPreview.hpp" // read_preview_item
 #include "VerticalCanvasDock.hpp" // VerticalSelection
 #include "../core/ItemActions.hpp"
+#include "../core/LockPolicy.hpp"
 #include "../pipeline/Autosave.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 
 #include <obs.h>
 #include <obs-frontend-api.h>
 
+#include <QtCore/QEvent>
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtGui/QAction>
+#include <QtGui/QHelpEvent>
+#include <QtGui/QMouseEvent>
+#include <QtGui/QPainter>
+#include <QtGui/QPainterPath>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
@@ -29,6 +35,8 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QStyledItemDelegate>
+#include <QtWidgets/QToolTip>
 #include <QtWidgets/QVBoxLayout>
 
 #include <algorithm>
@@ -41,16 +49,19 @@ namespace smulti {
 namespace {
 
 constexpr const char *kCanvasSignals[] = {"channel_change", "source_remove", "source_rename"};
-constexpr const char *kSceneSignals[] = {"item_add", "item_remove", "reorder", "item_visible", "refresh"};
+constexpr const char *kSceneSignals[] = {"item_add", "item_remove", "reorder", "item_visible", "item_locked", "refresh"};
 constexpr const char *kTransformSignal = "item_transform";
 
 constexpr int kIdRole = Qt::UserRole;
+constexpr int kLockedRole = Qt::UserRole + 1; ///< bool, mirrors obs_sceneitem_locked (the only lock state)
+constexpr int kLockZoneW = 22;               ///< right-hand padlock zone of a row, px
 constexpr qint64 kReloadIntervalMs = 33; ///< transform panel / preview overlay reload, ~30 Hz
 
 struct ItemRow {
 	int64_t id = 0;
 	std::string name;
 	bool visible = true;
+	bool locked = false;
 };
 
 struct ItemRows {
@@ -65,9 +76,57 @@ bool collect_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
 	const char *n = src ? obs_source_get_name(src) : nullptr;
 	row.name = n ? n : "";
 	row.visible = obs_sceneitem_visible(item);
+	row.locked = obs_sceneitem_locked(item);
 	static_cast<ItemRows *>(param)->rows.push_back(std::move(row));
 	return true;
 }
+
+/** Right-hand padlock zone of a row (clickable, see VerticalItemList::eventFilter). */
+QRect lock_zone(const QRect &row_rect)
+{
+	return QRect(row_rect.right() - kLockZoneW + 1, row_rect.top(), kLockZoneW, row_rect.height());
+}
+
+/** Draws the row as usual, then a padlock in the lock zone: closed and solid when locked, open and faint when not. */
+class LockDelegate : public QStyledItemDelegate {
+public:
+	using QStyledItemDelegate::QStyledItemDelegate;
+
+	void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+	{
+		QStyleOptionViewItem opt(option);
+		opt.rect.adjust(0, 0, -kLockZoneW, 0);
+		QStyledItemDelegate::paint(p, opt, index);
+
+		const bool locked = index.data(kLockedRole).toBool();
+		const QRect zone = lock_zone(option.rect);
+		const QPointF c = zone.center();
+		QColor col = option.palette.color(QPalette::Text);
+		col.setAlphaF(locked ? 0.95 : 0.3);
+
+		p->save();
+		p->setRenderHint(QPainter::Antialiasing, true);
+		p->setPen(QPen(col, 1.6));
+		const QRectF body(c.x() - 5, c.y() - 1, 10, 7);
+		QPainterPath shackle;
+		if (locked) {
+			shackle.moveTo(c.x() - 3, c.y() - 1);
+			shackle.lineTo(c.x() - 3, c.y() - 4);
+			shackle.arcTo(QRectF(c.x() - 3, c.y() - 7, 6, 6), 180, -180);
+			shackle.lineTo(c.x() + 3, c.y() - 1);
+		} else {
+			shackle.moveTo(c.x() + 3, c.y() - 1);
+			shackle.lineTo(c.x() + 3, c.y() - 5);
+			shackle.arcTo(QRectF(c.x(), c.y() - 8, 6, 6), 0, 180);
+			shackle.lineTo(c.x() - 3, c.y() - 4);
+		}
+		p->setBrush(Qt::NoBrush);
+		p->drawPath(shackle);
+		p->setBrush(locked ? QBrush(col) : QBrush(Qt::NoBrush));
+		p->drawRoundedRect(body, 1.5, 1.5);
+		p->restore();
+	}
+};
 
 struct FindItem {
 	int64_t id = 0;
@@ -280,6 +339,9 @@ VerticalItemList::VerticalItemList(OwnedCanvas &canvas, VerticalSelection &selec
 
 	m_list = new QListWidget(this);
 	m_list->setSelectionMode(QAbstractItemView::SingleSelection);
+	m_list->setItemDelegate(new LockDelegate(m_list));
+	m_list->setMouseTracking(true);
+	m_list->viewport()->installEventFilter(this); // padlock click + tooltip
 	layout->addWidget(m_list, 1);
 
 	auto *buttons = new QHBoxLayout();
@@ -652,6 +714,7 @@ void VerticalItemList::refresh()
 		row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
 		row->setCheckState(it->visible ? Qt::Checked : Qt::Unchecked);
 		row->setData(kIdRole, QVariant::fromValue<qlonglong>(it->id));
+		row->setData(kLockedRole, it->locked);
 		if (it->id == previous)
 			select_row = m_list->count() - 1;
 	}
@@ -958,8 +1021,10 @@ void VerticalItemList::on_add_new()
 void VerticalItemList::on_list_context_menu(const QPoint &list_pos)
 {
 	QListWidgetItem *row = m_list->itemAt(list_pos);
-	if (!row)
+	if (!row) {
+		show_scene_lock_menu(m_list->viewport()->mapToGlobal(list_pos), m_list_scene_uuid);
 		return;
+	}
 	m_list->setCurrentItem(row); // writes the shared selection
 	show_item_menu(m_list->viewport()->mapToGlobal(list_pos), static_cast<int64_t>(row->data(kIdRole).toLongLong()),
 		       m_list_scene_uuid);
@@ -995,6 +1060,8 @@ void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id,
 	add(menu, tr("Rename..."), ItemAction::Rename);
 	menu.addSeparator();
 	add(menu, locked ? tr("Unlock") : tr("Lock"), ItemAction::ToggleLock);
+	add(menu, tr("Lock all items in this scene"), ItemAction::LockAll);
+	add(menu, tr("Unlock all items in this scene"), ItemAction::UnlockAll);
 	QMenu *transform = menu.addMenu(tr("Transform"));
 	add(*transform, tr("Fit to canvas"), ItemAction::Fit);
 	add(*transform, tr("Fill canvas"), ItemAction::Fill);
@@ -1074,11 +1141,15 @@ void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid
 		if (!ok)
 			error = tr("The item no longer exists or the active scene changed.");
 		else {
-			notify_change(); // item_locked is not a connected signal: redraw the preview handles now
+			notify_change(); // item_locked also queues a refresh; this redraws the preview outline right away
 			request_autosave("item lock");
 		}
 		break;
 	}
+	case ItemAction::LockAll:
+	case ItemAction::UnlockAll:
+		set_all_locked(scene_uuid, action == ItemAction::LockAll);
+		return;
 	case ItemAction::Fit:
 	case ItemAction::Fill:
 	case ItemAction::Reset:
@@ -1092,6 +1163,93 @@ void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid
 	}
 	if (!error.isEmpty())
 		set_status(error);
+}
+
+/* Lock/unlock every item of the scene the caller saw. Only flags that differ are written (lock_policy). */
+bool collect_lock_flag(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	preview_edit::Item f;
+	f.id = obs_sceneitem_get_id(item);
+	f.locked = obs_sceneitem_locked(item);
+	static_cast<std::vector<preview_edit::Item> *>(param)->push_back(f);
+	return true;
+}
+
+void VerticalItemList::set_all_locked(std::string scene_uuid, bool lock)
+{
+	size_t changed = 0;
+	const bool ok = with_scene(scene_uuid, [&](obs_scene_t *scene) {
+		std::vector<preview_edit::Item> flags;
+		obs_scene_enum_items(scene, collect_lock_flag, &flags);
+		for (int64_t id : lock_policy::lock_all_changes(flags, lock)) {
+			FindItem f;
+			f.id = id;
+			obs_scene_enum_items(scene, find_item, &f);
+			if (!f.found)
+				continue;
+			obs_sceneitem_set_locked(f.found, lock);
+			obs_sceneitem_release(f.found);
+			++changed;
+		}
+	});
+	if (!ok) {
+		set_status(lock ? tr("The active scene changed; nothing was locked.")
+				: tr("The active scene changed; nothing was unlocked."));
+		return;
+	}
+	set_status(lock ? tr("Locked %1 items.").arg(changed) : tr("Unlocked %1 items.").arg(changed));
+	if (changed > 0) {
+		notify_change();
+		request_autosave(lock ? "lock all items" : "unlock all items");
+	}
+}
+
+/* Menu for the empty part of the list: only the scene-wide lock actions. */
+void VerticalItemList::show_scene_lock_menu(const QPoint &global_pos, std::string scene_uuid)
+{
+	if (m_shutdown.load() || scene_uuid.empty() || !m_has_scene)
+		return;
+	QMenu menu(this);
+	QAction *lock = menu.addAction(tr("Lock all items in this scene"));
+	menu.addAction(tr("Unlock all items in this scene"));
+	QPointer<VerticalItemList> self(this);
+	QAction *chosen = menu.exec(global_pos);
+	if (!self || m_shutdown.load() || !chosen)
+		return;
+	set_all_locked(scene_uuid, chosen == lock);
+}
+
+/* Padlock zone of a row: a click toggles the lock (the row selection is left alone), the tooltip names the action. */
+bool VerticalItemList::eventFilter(QObject *obj, QEvent *event)
+{
+	if (!m_list || obj != m_list->viewport() || m_shutdown.load())
+		return QWidget::eventFilter(obj, event);
+	const auto row_at_zone = [&](const QPoint &pos) -> QListWidgetItem * {
+		QListWidgetItem *row = m_list->itemAt(pos);
+		if (!row)
+			return nullptr;
+		return lock_zone(m_list->visualItemRect(row)).contains(pos) ? row : nullptr;
+	};
+	const QEvent::Type type = event->type();
+	if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick || type == QEvent::MouseButtonRelease) {
+		auto *me = static_cast<QMouseEvent *>(event);
+		if (me->button() == Qt::LeftButton) {
+			if (QListWidgetItem *row = row_at_zone(me->pos())) {
+				if (type == QEvent::MouseButtonRelease)
+					run_item_action(ItemAction::ToggleLock, m_list_scene_uuid,
+							static_cast<int64_t>(row->data(kIdRole).toLongLong()));
+				return true; // swallow press, double click and release alike: no selection change, no editor
+			}
+		}
+	} else if (type == QEvent::ToolTip) {
+		auto *he = static_cast<QHelpEvent *>(event);
+		if (QListWidgetItem *row = row_at_zone(he->pos())) {
+			QToolTip::showText(he->globalPos(), row->data(kLockedRole).toBool() ? tr("Unlock") : tr("Lock"),
+					   m_list->viewport());
+			return true;
+		}
+	}
+	return QWidget::eventFilter(obj, event);
 }
 
 void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid, int64_t id)
@@ -1233,8 +1391,14 @@ void VerticalItemList::copy_transform_to_other_scenes(std::string scene_uuid, in
 	obs_canvas_release(canvas);
 
 	QString status = tr("Transform copied to %1 scenes").arg(applied);
-	if (!not_done.empty())
-		status += tr(". Skipped: %1").arg(skipped_text(not_done));
+	if (!not_done.empty()) {
+		item_actions::CopyPlan outcome;
+		outcome.skipped = not_done;
+		status += tr(". Skipped %1 (%2 locked): %3")
+				  .arg(not_done.size())
+				  .arg(item_actions::skipped_locked_count(outcome))
+				  .arg(skipped_text(not_done));
+	}
 	set_status(status);
 	if (applied > 0) {
 		reload_editor(true);

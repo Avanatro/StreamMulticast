@@ -157,10 +157,11 @@ std::array<Vec2, 4> corners(const Item &it)
 	return {box_point(it, {0, 0}), box_point(it, {1, 0}), box_point(it, {1, 1}), box_point(it, {0, 1})};
 }
 
-int64_t hit_item(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt)
+namespace {
+int64_t hit_topmost(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt, bool include_locked)
 {
 	for (auto it = bottom_to_top.rbegin(); it != bottom_to_top.rend(); ++it) {
-		if (!it->visible || it->locked)
+		if (!it->visible || (it->locked && !include_locked))
 			continue;
 		Vec2 u;
 		if (!canvas_to_unit(*it, canvas_pt, u))
@@ -169,6 +170,17 @@ int64_t hit_item(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt)
 			return it->id;
 	}
 	return 0;
+}
+} // namespace
+
+int64_t hit_item(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt)
+{
+	return hit_topmost(bottom_to_top, canvas_pt, false);
+}
+
+int64_t hit_item_selectable(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt)
+{
+	return hit_topmost(bottom_to_top, canvas_pt, true);
 }
 
 /* ---- handles --------------------------------------------------------------- */

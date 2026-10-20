@@ -79,6 +79,9 @@ std::array<Vec2, 4> corners(const Item &it);
 /** Topmost visible, unlocked, non-degenerate item containing pt; items in libobs order (bottom first). 0 = none. */
 int64_t hit_item(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt);
 
+/** Like hit_item, but locked items count: what a click may SELECT (highlight, context menu), never what it may drag. */
+int64_t hit_item_selectable(const std::vector<Item> &bottom_to_top, Vec2 canvas_pt);
+
 /** Handle bits: a corner has one x and one y bit, an edge one bit. */
 enum class Handle : uint32_t {
 	None = 0,
