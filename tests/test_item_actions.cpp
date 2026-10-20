@@ -105,3 +105,81 @@ SMULTI_TEST(item_actions_unique_name)
 	EXPECT_EQ(item_actions::unique_name("Webcam", {"Webcam", "Webcam 2", "Webcam 4"}), std::string("Webcam 3"));
 	EXPECT_EQ(item_actions::unique_name("Webcam", {"webcam"}), std::string("Webcam")); // exact comparison
 }
+
+// ---- copy transform to the same source in other scenes ----
+
+using item_actions::SceneItemRef;
+
+static SceneItemRef ref(const char *scene_uuid, const char *scene_name, int64_t item, const char *source, bool locked = false)
+{
+	return SceneItemRef{scene_uuid, scene_name, item, source, locked};
+}
+
+SMULTI_TEST(item_actions_copy_transform_targets_other_scenes_with_source)
+{
+	const std::vector<SceneItemRef> c = {
+		ref("u-gaming", "V Gaming", 1, "cam"),   ref("u-chat", "V Just Chatting", 4, "cam"),
+		ref("u-dev", "V Dev/Coding", 9, "cam"),  ref("u-dev", "V Dev/Coding", 10, "other"),
+		ref("u-brb", "V BRB", 2, "other"),
+	};
+	const auto plan = item_actions::plan_copy_transform("cam", "u-gaming", c);
+	EXPECT_EQ(plan.targets.size(), size_t(2));
+	// deterministic: by scene name
+	EXPECT_EQ(plan.targets[0].scene_uuid, std::string("u-dev"));
+	EXPECT_EQ(plan.targets[0].item_id, int64_t(9));
+	EXPECT_EQ(plan.targets[1].scene_uuid, std::string("u-chat"));
+	EXPECT_EQ(plan.targets[1].item_id, int64_t(4));
+	EXPECT_TRUE(plan.skipped.empty()); // a scene without the source is neither target nor skipped
+}
+
+SMULTI_TEST(item_actions_copy_transform_skips_origin_scene)
+{
+	// the origin holds the source twice: still never a target and not reported either
+	const std::vector<SceneItemRef> c = {ref("u-a", "A", 1, "cam"), ref("u-a", "A", 2, "cam")};
+	const auto plan = item_actions::plan_copy_transform("cam", "u-a", c);
+	EXPECT_TRUE(plan.targets.empty());
+	EXPECT_TRUE(plan.skipped.empty());
+}
+
+SMULTI_TEST(item_actions_copy_transform_skips_duplicate_instances)
+{
+	const std::vector<SceneItemRef> c = {ref("u-a", "A", 1, "cam"), ref("u-b", "B", 5, "cam"),
+					     ref("u-b", "B", 6, "cam"), ref("u-c", "C", 7, "cam")};
+	const auto plan = item_actions::plan_copy_transform("cam", "u-a", c);
+	EXPECT_EQ(plan.targets.size(), size_t(1));
+	EXPECT_EQ(plan.targets[0].scene_uuid, std::string("u-c"));
+	EXPECT_EQ(plan.skipped.size(), size_t(1));
+	EXPECT_EQ(plan.skipped[0].scene_name, std::string("B"));
+	EXPECT_EQ(plan.skipped[0].reason, std::string("source appears 2 times"));
+}
+
+SMULTI_TEST(item_actions_copy_transform_skips_locked)
+{
+	const std::vector<SceneItemRef> c = {ref("u-a", "A", 1, "cam"), ref("u-b", "V BRB", 5, "cam", true),
+					     ref("u-c", "C", 7, "cam")};
+	const auto plan = item_actions::plan_copy_transform("cam", "u-a", c);
+	EXPECT_EQ(plan.targets.size(), size_t(1));
+	EXPECT_EQ(plan.targets[0].scene_uuid, std::string("u-c"));
+	EXPECT_EQ(plan.skipped.size(), size_t(1));
+	EXPECT_EQ(plan.skipped[0].scene_name, std::string("V BRB"));
+	EXPECT_EQ(plan.skipped[0].reason, std::string("locked"));
+}
+
+SMULTI_TEST(item_actions_copy_transform_matches_by_uuid_not_name)
+{
+	// same display name, different source: not a target; the real one has another name
+	const std::vector<SceneItemRef> c = {ref("u-a", "A", 1, "cam-uuid"), ref("u-b", "B", 5, "other-uuid"),
+					     ref("u-c", "C", 7, "cam-uuid")};
+	const auto plan = item_actions::plan_copy_transform("cam-uuid", "u-a", c);
+	EXPECT_EQ(plan.targets.size(), size_t(1));
+	EXPECT_EQ(plan.targets[0].scene_uuid, std::string("u-c"));
+	EXPECT_TRUE(item_actions::plan_copy_transform("", "u-a", c).targets.empty()); // empty uuid matches nothing
+}
+
+SMULTI_TEST(item_actions_copy_transform_no_targets_when_unique)
+{
+	const std::vector<SceneItemRef> c = {ref("u-a", "A", 1, "cam"), ref("u-b", "B", 5, "mic")};
+	const auto plan = item_actions::plan_copy_transform("cam", "u-a", c);
+	EXPECT_TRUE(plan.targets.empty());
+	EXPECT_TRUE(plan.skipped.empty());
+}

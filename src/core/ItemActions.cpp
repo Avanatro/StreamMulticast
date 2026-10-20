@@ -8,6 +8,7 @@ GPLv2 — see LICENSE for full text.
 #include "ItemActions.hpp"
 
 #include <algorithm>
+#include <string>
 
 namespace smulti::item_actions {
 
@@ -83,6 +84,45 @@ std::string unique_name(const std::string &base, const std::vector<std::string> 
 		if (!taken(candidate))
 			return candidate;
 	}
+}
+
+CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &origin_scene_uuid,
+			     const std::vector<SceneItemRef> &candidates)
+{
+	CopyPlan plan;
+	if (source_uuid.empty())
+		return plan;
+
+	struct SceneHits {
+		std::string uuid;
+		std::string name;
+		std::vector<const SceneItemRef *> items;
+	};
+	std::vector<SceneHits> scenes;
+	for (const SceneItemRef &c : candidates) {
+		if (c.source_uuid != source_uuid || c.scene_uuid == origin_scene_uuid)
+			continue;
+		auto it = std::find_if(scenes.begin(), scenes.end(),
+				       [&](const SceneHits &s) { return s.uuid == c.scene_uuid; });
+		if (it == scenes.end()) {
+			scenes.push_back({c.scene_uuid, c.scene_name, {}});
+			it = scenes.end() - 1;
+		}
+		it->items.push_back(&c);
+	}
+	std::stable_sort(scenes.begin(), scenes.end(), [](const SceneHits &a, const SceneHits &b) {
+		return a.name != b.name ? a.name < b.name : a.uuid < b.uuid;
+	});
+
+	for (const SceneHits &s : scenes) {
+		if (s.items.size() > 1)
+			plan.skipped.push_back({s.name, "source appears " + std::to_string(s.items.size()) + " times"});
+		else if (s.items[0]->locked)
+			plan.skipped.push_back({s.name, "locked"});
+		else
+			plan.targets.push_back({s.uuid, s.items[0]->item_id});
+	}
+	return plan;
 }
 
 } // namespace smulti::item_actions

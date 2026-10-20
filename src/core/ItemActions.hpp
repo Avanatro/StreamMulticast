@@ -9,6 +9,7 @@ GPLv2 — see LICENSE for full text.
 
 #include "PreviewEdit.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -49,5 +50,38 @@ preview_edit::Vec2 center_vertically(const preview_edit::Item &item, layout::Siz
 
 /** base if free, else "base 2", "base 3", ... (the OBS naming style). Comparison is exact. */
 std::string unique_name(const std::string &base, const std::vector<std::string> &existing);
+
+/** One item of a candidate scene (adapter output): which scene, which item, which source, locked or not. */
+struct SceneItemRef {
+	std::string scene_uuid;
+	std::string scene_name;
+	int64_t item_id = 0;
+	std::string source_uuid;
+	bool locked = false;
+};
+
+struct CopyTarget {
+	std::string scene_uuid;
+	int64_t item_id = 0;
+};
+
+struct CopySkip {
+	std::string scene_name;
+	std::string reason;
+};
+
+struct CopyPlan {
+	std::vector<CopyTarget> targets; ///< ordered by scene name
+	std::vector<CopySkip> skipped;   ///< ordered by scene name
+};
+
+/**
+ * Scenes that get the origin item's transform: every scene other than the origin that holds source_uuid
+ * exactly once and unlocked. A scene with the source 2+ times is skipped ("source appears N times", never
+ * guessed), a locked one is skipped ("locked"). Scenes without the source are neither. Sources match by
+ * uuid only; an empty source_uuid matches nothing.
+ */
+CopyPlan plan_copy_transform(const std::string &source_uuid, const std::string &origin_scene_uuid,
+			     const std::vector<SceneItemRef> &candidates);
 
 } // namespace smulti::item_actions

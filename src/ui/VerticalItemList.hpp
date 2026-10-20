@@ -119,11 +119,13 @@ private slots:
 	void on_item_changed(QListWidgetItem *item);
 
 private:
-	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, Fit, Fill, Reset, CenterH, CenterV };
+	enum class ItemAction { Properties, Filters, Interact, Rename, ToggleLock, Fit, Fill, Reset, CenterH, CenterV,
+			    CopyTransformToOtherScenes };
 
 	void run_item_action(ItemAction action, std::string scene_uuid, int64_t id);
 	void rename_item(std::string scene_uuid, int64_t id);
 	void apply_transform(ItemAction action, std::string scene_uuid, int64_t id);
+	void copy_transform_to_other_scenes(std::string scene_uuid, int64_t id);
 	void on_list_context_menu(const QPoint &list_pos);
 	bool with_scene(const std::string &scene_uuid, const std::function<void(obs_scene_t *)> &fn);
 	bool with_scene_impl(const std::string *required_uuid, const SceneFn &fn);

@@ -1062,6 +1062,12 @@ nodes:
           - kind: manual
             reference: "OBS runtime check: from the vertical dock open the webcam's properties and filters, rename a source (shared warning when the main canvas uses it), lock/unlock, apply the Transform presets, create a new Color Source and Browser source (Interact works for the browser) (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-30)"
             result: pending
+      - id: ui-vertical-dock.copy-transform
+        behavior: "Transform > Copy transform to other vertical scenes (TASK-38), in the list and the preview menu, is disabled when the source is in no other scene of the owned canvas. On run it reads the origin item once (obs_sceneitem_get_info2 + get_crop, values only), enumerates the scenes of the owned canvas with obs_canvas_enum_scenes (never obs_enum_scenes, never the Aitum canvas: INV-6), plans with item_actions::plan_copy_transform, asks with a QMessageBox ('Apply to N scenes? Skipped: <scene> (<reason>)'), then looks every target up again by scene uuid + item id and writes set_info2 + set_crop inside defer_update (pos, rot, scale, alignment, bounds type/size/alignment, crop_to_bounds, crop; not visibility, lock, blending, scale filter or transitions). A locked or vanished target is reported, not fatal. The status line reads 'Transform copied to N scenes' plus the skipped list; then notify_change() and request_autosave('copy transform') once. The menu exec and the dialog hold the scene uuid by value, no libobs pointer across the dialog. Only compiled locally (plugin target built with SMULTI_STREAMLABS_TIKTOK OFF and ON), not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: in V Gaming move 'Webcam', right-click > Transform > Copy transform to other vertical scenes > confirm: V Just Chatting and V Dev/Coding show the webcam at the same place; the main canvas scenes (Gaming, Just Chatting) are unchanged"
+            result: pending
       - id: ui-vertical-dock.safe-zone-preview-only
         behavior: "A Safe zone combo (Off / TikTok (approx.) / Shorts (approx.)) above the preview, remembered in the OBS user config (section StreamMulticast, key SafeZoneProfile), draws the unsafe areas as translucent red fills (alpha 0.25), the safe rect as a thin dashed white outline and a small corner marker, below the selection handles. It is drawn in CanvasPreview::draw_overlay, after obs_canvas_render, into the display only, so nothing reaches the canvas mix, encoders or recordings (rg SafeZone src/pipeline: no match). Dragging snaps to the safe rect while a profile is on. Tooltip: Approximate areas covered by the app UI. Preview only, never recorded or streamed."
         verification:
@@ -1610,7 +1616,7 @@ nodes:
   - id: item-actions
     lane: core
     goal: "Pure helpers for the vertical dock's item actions: transform presets and unique source names."
-    owns: [item-actions.math]
+    owns: [item-actions.math, item-actions.copy-transform-plan]
     needs: [layout-math, preview-edit]
     code:
       - src/core/ItemActions.hpp
@@ -1656,6 +1662,45 @@ nodes:
             result: passed
             run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-19; 5/6 failed against a stub ItemActions.cpp (item_actions_reset equals the stub's default), 6/6 passed after; full ctest 142/142 (TASK-30)"
             checked_at: 2026-10-19
+      - id: item-actions.copy-transform-plan
+        behavior: "plan_copy_transform(source_uuid, origin_scene_uuid, candidates) decides which other scenes receive the origin item's transform. Candidates are SceneItemRef {scene_uuid, scene_name, item_id, source_uuid, locked}. A scene is a target when it is not the origin and holds the source exactly once, unlocked; 2+ instances give skipped 'source appears N times' (never guessed), a locked item gives skipped 'locked'; scenes without the source are neither. Sources match by uuid only (an empty uuid matches nothing). Targets and skipped are ordered by scene name."
+        verification:
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_targets_other_scenes_with_source
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_skips_origin_scene
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_skips_duplicate_instances
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_skips_locked
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_matches_by_uuid_not_name
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
+          - kind: automated
+            reference: tests/test_item_actions.cpp
+            check: item_actions_copy_transform_no_targets_when_unique
+            result: passed
+            run: "ctest --test-dir build_tests -C Release -R item_actions_, local run 2026-10-20; 4/6 new cases failed against a stub plan_copy_transform (the other 2 expect empty results), 12/12 passed after; full ctest 200/200; plugin built with SMULTI_STREAMLABS_TIKTOK OFF and ON (TASK-38)"
+            checked_at: 2026-10-20
     status: building
   - id: release-staging
     lane: foundation

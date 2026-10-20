@@ -18,6 +18,7 @@ GPLv2 — see LICENSE for full text.
 
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
+#include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtGui/QAction>
 #include <QtWidgets/QHBoxLayout>
@@ -82,6 +83,78 @@ bool find_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
 	obs_sceneitem_addref(item);
 	f->found = item;
 	return false;
+}
+
+/* ---- copy transform to the other vertical scenes ---------------------- */
+
+bool collect_scene_ref(void *param, obs_source_t *scene)
+{
+	obs_source_t *ref = obs_source_get_ref(scene);
+	if (ref)
+		static_cast<std::vector<obs_source_t *> *>(param)->push_back(ref);
+	return true;
+}
+
+/** Strong refs to the real (non-group) scenes of the canvas; the caller releases each. */
+std::vector<obs_source_t *> canvas_scene_refs(obs_canvas_t *canvas)
+{
+	std::vector<obs_source_t *> all;
+	obs_canvas_enum_scenes(canvas, collect_scene_ref, &all);
+	std::vector<obs_source_t *> scenes;
+	for (obs_source_t *src : all) {
+		if (obs_scene_from_source(src) && !obs_source_is_group(src))
+			scenes.push_back(src);
+		else
+			obs_source_release(src);
+	}
+	return scenes;
+}
+
+struct SceneItemCollect {
+	std::string scene_uuid;
+	std::string scene_name;
+	std::vector<item_actions::SceneItemRef> *out = nullptr;
+};
+
+bool collect_scene_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	auto *c = static_cast<SceneItemCollect *>(param);
+	obs_source_t *src = obs_sceneitem_get_source(item); // owned by the item
+	const char *uuid = src ? obs_source_get_uuid(src) : nullptr;
+	item_actions::SceneItemRef r;
+	r.scene_uuid = c->scene_uuid;
+	r.scene_name = c->scene_name;
+	r.item_id = obs_sceneitem_get_id(item);
+	r.source_uuid = uuid ? uuid : "";
+	r.locked = obs_sceneitem_locked(item);
+	c->out->push_back(std::move(r));
+	return true;
+}
+
+/** Top-level items of every scene of the given (owned) canvas. Group members are not candidates. */
+std::vector<item_actions::SceneItemRef> gather_scene_items(obs_canvas_t *canvas)
+{
+	std::vector<item_actions::SceneItemRef> out;
+	for (obs_source_t *src : canvas_scene_refs(canvas)) {
+		SceneItemCollect c;
+		const char *uuid = obs_source_get_uuid(src);
+		const char *name = obs_source_get_name(src);
+		c.scene_uuid = uuid ? uuid : "";
+		c.scene_name = name ? name : "";
+		c.out = &out;
+		obs_scene_enum_items(obs_scene_from_source(src), collect_scene_item, &c);
+		obs_source_release(src);
+	}
+	return out;
+}
+
+/** "A (reason), B (reason)" */
+QString skipped_text(const std::vector<item_actions::CopySkip> &skipped)
+{
+	QStringList parts;
+	for (const auto &s : skipped)
+		parts << QStringLiteral("%1 (%2)").arg(QString::fromStdString(s.scene_name), QString::fromStdString(s.reason));
+	return parts.join(QStringLiteral(", "));
 }
 
 struct InputNames {
@@ -899,10 +972,13 @@ void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id,
 
 	bool locked = false;
 	bool interactive = false;
+	std::string source_uuid;
 	const bool exists = with_item(scene_uuid, item_id, [&](obs_sceneitem_t *item) {
 		locked = obs_sceneitem_locked(item);
 		obs_source_t *src = obs_sceneitem_get_source(item);
 		interactive = src && (obs_source_get_output_flags(src) & OBS_SOURCE_INTERACTION) != 0;
+		const char *uuid = src ? obs_source_get_uuid(src) : nullptr;
+		source_uuid = uuid ? uuid : "";
 	});
 	if (!exists) {
 		set_status(tr("The item no longer exists or the active scene changed."));
@@ -926,6 +1002,16 @@ void VerticalItemList::show_item_menu(const QPoint &global_pos, int64_t item_id,
 	transform->addSeparator();
 	add(*transform, tr("Center horizontally"), ItemAction::CenterH);
 	add(*transform, tr("Center vertically"), ItemAction::CenterV);
+	transform->addSeparator();
+	add(*transform, tr("Copy transform to other vertical scenes"), ItemAction::CopyTransformToOtherScenes);
+	/* Disabled when the source is in no other scene of the owned canvas (computed now, re-planned on run). */
+	bool has_other_scenes = false;
+	if (obs_canvas_t *canvas = m_canvas.get_ref()) {
+		const auto plan = item_actions::plan_copy_transform(source_uuid, scene_uuid, gather_scene_items(canvas));
+		has_other_scenes = !plan.targets.empty() || !plan.skipped.empty();
+		obs_canvas_release(canvas);
+	}
+	entries.back().first->setEnabled(has_other_scenes);
 	transform->setEnabled(!locked);
 
 	/* The menu is closed before anything runs: the action opens dialogs and resolves the item afresh. */
@@ -1000,6 +1086,9 @@ void VerticalItemList::run_item_action(ItemAction action, std::string scene_uuid
 	case ItemAction::CenterV:
 		apply_transform(action, scene_uuid, id);
 		return;
+	case ItemAction::CopyTransformToOtherScenes:
+		copy_transform_to_other_scenes(scene_uuid, id);
+		return;
 	}
 	if (!error.isEmpty())
 		set_status(error);
@@ -1058,6 +1147,100 @@ void VerticalItemList::apply_transform(ItemAction action, std::string scene_uuid
 	notify_change();
 	if (ok && !locked)
 		request_autosave("item transform");
+}
+
+void VerticalItemList::copy_transform_to_other_scenes(std::string scene_uuid, int64_t id)
+{
+	/* 1. Read the origin once. Only values are kept: no libobs pointer survives into the dialog. */
+	obs_transform_info info = {};
+	obs_sceneitem_crop crop = {};
+	std::string source_uuid;
+	const bool ok = with_item(scene_uuid, id, [&](obs_sceneitem_t *item) {
+		obs_sceneitem_get_info2(item, &info);
+		obs_sceneitem_get_crop(item, &crop);
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		const char *uuid = src ? obs_source_get_uuid(src) : nullptr;
+		source_uuid = uuid ? uuid : "";
+	});
+	if (!ok || source_uuid.empty()) {
+		set_status(tr("The item no longer exists or the active scene changed."));
+		return;
+	}
+
+	/* 2. Plan over the scenes of the owned canvas only (never obs_enum_scenes: that is the main canvas). */
+	item_actions::CopyPlan plan;
+	if (obs_canvas_t *canvas = m_canvas.get_ref()) {
+		plan = item_actions::plan_copy_transform(source_uuid, scene_uuid, gather_scene_items(canvas));
+		obs_canvas_release(canvas);
+	}
+	if (plan.targets.empty()) {
+		set_status(plan.skipped.empty() ? tr("No other vertical scene contains this source.")
+						: tr("Nothing copied. Skipped: %1").arg(skipped_text(plan.skipped)));
+		return;
+	}
+
+	/* 3. Confirm (modal: the values are held by value, the scenes are looked up again afterwards). */
+	QString question = tr("Apply to %1 scenes?").arg(plan.targets.size());
+	if (!plan.skipped.empty())
+		question += QStringLiteral(" ") + tr("Skipped: %1").arg(skipped_text(plan.skipped));
+	QPointer<VerticalItemList> self(this);
+	const auto answer = QMessageBox::question(this, tr("Copy transform"), question,
+						  QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+	if (!self || m_shutdown.load() || answer != QMessageBox::Yes)
+		return;
+
+	/* 4. Apply to each target, looked up again by scene uuid + item id. */
+	obs_canvas_t *canvas = m_canvas.get_ref();
+	if (!canvas) {
+		set_status(tr("The vertical canvas is no longer available."));
+		return;
+	}
+	int applied = 0;
+	std::vector<item_actions::CopySkip> not_done = plan.skipped;
+	std::vector<obs_source_t *> scenes = canvas_scene_refs(canvas);
+	for (const auto &t : plan.targets) {
+		obs_source_t *scene_src = nullptr;
+		for (obs_source_t *sc : scenes) {
+			const char *u = obs_source_get_uuid(sc);
+			if (u && t.scene_uuid == u) {
+				scene_src = sc;
+				break;
+			}
+		}
+		const char *n = scene_src ? obs_source_get_name(scene_src) : nullptr;
+		const std::string name = n ? n : t.scene_uuid;
+		FindItem f;
+		f.id = t.item_id;
+		if (scene_src)
+			obs_scene_enum_items(obs_scene_from_source(scene_src), find_item, &f);
+		if (!f.found) {
+			not_done.push_back({name, "item vanished"});
+			continue;
+		}
+		if (obs_sceneitem_locked(f.found)) {
+			not_done.push_back({name, "locked"});
+		} else {
+			obs_sceneitem_defer_update_begin(f.found);
+			obs_sceneitem_set_info2(f.found, &info);
+			obs_sceneitem_set_crop(f.found, &crop);
+			obs_sceneitem_defer_update_end(f.found);
+			++applied;
+		}
+		obs_sceneitem_release(f.found);
+	}
+	for (obs_source_t *sc : scenes)
+		obs_source_release(sc);
+	obs_canvas_release(canvas);
+
+	QString status = tr("Transform copied to %1 scenes").arg(applied);
+	if (!not_done.empty())
+		status += tr(". Skipped: %1").arg(skipped_text(not_done));
+	set_status(status);
+	if (applied > 0) {
+		reload_editor(true);
+		notify_change();
+		request_autosave("copy transform");
+	}
 }
 
 void VerticalItemList::rename_item(std::string scene_uuid, int64_t id)
