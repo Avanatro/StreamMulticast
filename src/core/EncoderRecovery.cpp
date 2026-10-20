@@ -50,10 +50,23 @@ bool is_encoder_start_failure(const StartFailure &f)
 {
 	switch (f.kind) {
 	case StartFailureKind::EncoderCreate:  return true;
-	case StartFailureKind::StartRefused:   return f.video_encoder_error || f.service_ready;
+	case StartFailureKind::StartRefused:   return f.service_attached && (f.video_encoder_error || f.service_ready);
 	case StartFailureKind::StopBeforeLive: return f.stop_code == kStopCodeEncodeError;
 	}
 	return false;
+}
+
+const char *start_refusal_reason(const StartFailure &f)
+{
+	if (!f.service_attached)
+		return "no streaming service attached to the output";
+	if (f.output_active)
+		return "the output is still active";
+	if (!f.service_ready)
+		return "the service cannot try to connect (empty server URL)";
+	if (f.video_encoder_error)
+		return "the video encoder failed to initialize";
+	return "encoder initialization refused (video or audio)";
 }
 
 bool on_first_start_failure(EncoderRecoveryState &state, const StartFailure &f, EncoderBackend configured,

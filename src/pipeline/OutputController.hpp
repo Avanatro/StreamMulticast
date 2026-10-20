@@ -30,6 +30,8 @@ struct obs_output;
 typedef struct obs_output obs_output_t;
 struct obs_encoder;
 typedef struct obs_encoder obs_encoder_t;
+struct obs_service;
+typedef struct obs_service obs_service_t;
 struct calldata;
 typedef struct calldata calldata_t;
 struct obs_canvas;
@@ -353,6 +355,9 @@ private:
 	EncoderRecoveryState m_recovery; ///< this session only, reset by start()
 
 	obs_output_t       *m_output   {nullptr};
+	/** Strong service ref for m_output's lifetime: obs_output_set_service does NOT addref, and the last
+	 *  release nulls output->service, so obs_output_start would refuse silently. Released after m_output. */
+	obs_service_t      *m_service  {nullptr};
 	obs_encoder_t      *m_video_enc{nullptr};
 	obs_encoder_t      *m_audio_enc{nullptr};
 

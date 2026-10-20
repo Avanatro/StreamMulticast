@@ -370,8 +370,12 @@ void OutputController::do_create_output()
 		return;
 	}
 
+	/* obs_output_set_service stores the pointer without an addref (libobs
+	 * obs-output.c): our ref is the only one, so it lives in m_service until the
+	 * output is released.  Releasing it here destroyed the service at once and
+	 * actually_destroy_service() nulled output->service, so every
+	 * obs_output_start() refused silently ("(no error)"). */
 	obs_output_set_service(new_output, service);
-	obs_service_release(service); // output addref's the service
 
 	/* Register start/stop signal handlers */
 	signal_handler_t *sh = obs_output_get_signal_handler(new_output);
@@ -379,7 +383,8 @@ void OutputController::do_create_output()
 	signal_handler_connect(sh, "stop",  on_stop_signal,  this);
 
 	std::lock_guard<std::mutex> lock(m_mutex);
-	m_output = new_output;
+	m_output  = new_output;
+	m_service = service;
 }
 
 /* -----------------------------------------------------------------------
@@ -515,15 +520,18 @@ bool OutputController::start_output()
 		const char *raw_venc = obs_encoder_get_last_error(video_enc);
 		const std::string err      = raw_err ? raw_err : "";
 		const std::string venc_err = raw_venc ? raw_venc : "";
+		obs_service_t *attached = obs_output_get_service(output);
 		StartFailure failure{StartFailureKind::StartRefused};
 		failure.video_encoder_error = !venc_err.empty();
+		failure.service_attached    = attached != nullptr;
+		failure.output_active       = obs_output_active(output);
 		/* An output still active (a reconnect attempt connecting) is refused by
 		 * can_begin_data_capture: not the encoder's, no x264 retry. */
-		failure.service_ready       = !obs_output_active(output) &&
-		                              obs_service_can_try_to_connect(obs_output_get_service(output));
+		failure.service_ready       = !failure.output_active && obs_service_can_try_to_connect(attached);
 		const bool encoder_refused  = is_encoder_start_failure(failure);
-		obs_log(LOG_ERROR, "OutputController [%s]: obs_output_start failed: %s",
-		        m_endpoint.name.c_str(), err.empty() ? "(no error)" : err.c_str());
+		const char *reason          = start_refusal_reason(failure);
+		obs_log(LOG_ERROR, "OutputController [%s]: obs_output_start failed: %s (%s)",
+		        m_endpoint.name.c_str(), err.empty() ? "(no error)" : err.c_str(), reason);
 
 		bool retry;
 		{
@@ -536,7 +544,7 @@ bool OutputController::start_output()
 					m_last_error = "Encoder failed to start" +
 						       (!venc_err.empty() ? ": " + venc_err : !err.empty() ? ": " + err : std::string());
 				else
-					m_last_error = !err.empty() ? err : "Output failed to start (service not ready)";
+					m_last_error = !err.empty() ? err : std::string("Output failed to start: ") + reason;
 			}
 		}
 		if (!retry)
@@ -652,6 +660,7 @@ void OutputController::stop()
 	}
 
 	obs_output_t  *output_to_release;
+	obs_service_t *service_to_release;
 	obs_encoder_t *video_to_release;
 	obs_encoder_t *audio_to_release;
 	obs_canvas_t  *canvas_to_release;
@@ -672,13 +681,15 @@ void OutputController::stop()
 		 * From the caller's point of view the controller is Idle again
 		 * immediately — the actual (potentially blocking) teardown happens
 		 * on the reaper thread below. */
-		output_to_release = m_output;
+		output_to_release  = m_output;
+		service_to_release = m_service;
 		video_to_release  = m_video_enc;
 		audio_to_release  = m_audio_enc;
 		canvas_to_release = m_canvas;
 		reconnect_to_join = std::move(m_reconnect_thread);
 
 		m_output          = nullptr;
+		m_service         = nullptr;
 		m_video_enc       = nullptr;
 		m_audio_enc       = nullptr;
 		m_canvas          = nullptr;
@@ -708,7 +719,7 @@ void OutputController::stop()
 	 * this). */
 	auto self               = shared_from_this();
 	auto reconnect_to_join_p = std::make_shared<std::thread>(std::move(reconnect_to_join));
-	m_reaper.enqueue([self, output_to_release, video_to_release, audio_to_release,
+	m_reaper.enqueue([self, output_to_release, service_to_release, video_to_release, audio_to_release,
 	                  canvas_to_release, reconnect = std::move(reconnect_to_join_p)]() {
 		if (reconnect->joinable())
 			reconnect->join();
@@ -730,6 +741,9 @@ void OutputController::stop()
 
 		if (output_to_release)
 			obs_output_release(output_to_release);
+		/* After the output: its destroy clears service->output. */
+		if (service_to_release)
+			obs_service_release(service_to_release);
 
 		/* Last: the canvas ref is what keeps the encoders' video_t valid. */
 		if (canvas_to_release)
@@ -787,13 +801,15 @@ void OutputController::shutdown_blocking()
 	 * From here on reconnect_thread_func()'s identity guard sees m_output ==
 	 * nullptr and bails before touching the captured output. */
 	obs_output_t  *output_to_release;
+	obs_service_t *service_to_release;
 	obs_encoder_t *video_to_release;
 	obs_encoder_t *audio_to_release;
 	obs_canvas_t  *canvas_to_release;
 	std::thread    reconnect_to_join;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		output_to_release = m_output;
+		output_to_release  = m_output;
+		service_to_release = m_service;
 		video_to_release  = m_video_enc;
 		audio_to_release  = m_audio_enc;
 		canvas_to_release = m_canvas;
@@ -805,6 +821,7 @@ void OutputController::shutdown_blocking()
 		 * still-valid pointer (fully before this point) or nullptr (fully
 		 * after) — never a pointer to an obs_output_t mid-teardown. */
 		m_output    = nullptr;
+		m_service   = nullptr;
 		m_video_enc = nullptr;
 		m_audio_enc = nullptr;
 		m_canvas    = nullptr;
@@ -847,6 +864,9 @@ void OutputController::shutdown_blocking()
 		 * exists. */
 		obs_output_release(output_to_release);
 	}
+	/* After the output: its destroy clears service->output. */
+	if (service_to_release)
+		obs_service_release(service_to_release);
 
 	/* Last: the canvas ref is what keeps the encoders' video_t valid. */
 	if (canvas_to_release)

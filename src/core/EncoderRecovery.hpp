@@ -82,11 +82,22 @@ struct StartFailure {
 	StartFailureKind kind      = StartFailureKind::StartRefused;
 	bool video_encoder_error   = false; ///< StartRefused: the video encoder has a last error
 	bool service_ready         = false; ///< StartRefused: obs_service_can_try_to_connect was true
+	bool service_attached      = true;  ///< StartRefused: obs_output_get_service returned a service
+	bool output_active         = false; ///< StartRefused: obs_output_active was true
 	int  stop_code             = 0;     ///< StopBeforeLive
 };
 
 /** True when `f` is the encoder's failure (see StartFailure), never for a network or key error. */
 bool is_encoder_start_failure(const StartFailure &f);
+
+/**
+ * The libobs precondition that refused a StartRefused start, for the log and the endpoint error. libobs
+ * itself logs these refusals at LOG_DEBUG only (obs_output_start, obs_service_can_try_to_connect on a NULL
+ * service) so obs_output_get_last_error stays empty. Order follows obs_output_start: service attached,
+ * service can try to connect, output not active (can_begin_data_capture), then encoder initialization.
+ * Never contains a server URL or key.
+ */
+const char *start_refusal_reason(const StartFailure &f);
 
 /**
  * First-start refusal by the encoder: switches the session fallback on at once (no 3-failure count) and

@@ -1,6 +1,7 @@
 // Runtime encoder failure recovery: pure counting / fallback rule per endpoint session. No OBS.
 #include "TestRunner.hpp"
 #include "core/EncoderRecovery.hpp"
+#include <string>
 
 using smulti::EncoderBackend;
 using smulti::EncoderRecoveryState;
@@ -177,4 +178,33 @@ SMULTI_TEST(encoder_recovery_first_start_network_error_no_fallback)
 	EncoderRecoveryState s;
 	EXPECT_TRUE(!smulti::on_first_start_failure(s, service, EncoderBackend::NVENC, true));
 	EXPECT_TRUE(!s.fallback_active);
+}
+
+SMULTI_TEST(encoder_recovery_start_refusal_names_the_precondition)
+{
+	using smulti::StartFailure;
+	using smulti::StartFailureKind;
+	/* libobs refuses obs_output_start silently (LOG_DEBUG only) when output->service is NULL,
+	 * e.g. after the service was released right after obs_output_set_service (no addref there). */
+	StartFailure detached{StartFailureKind::StartRefused};
+	detached.service_attached = false;
+	EXPECT_EQ(std::string(smulti::start_refusal_reason(detached)), std::string("no streaming service attached to the output"));
+	EXPECT_TRUE(!smulti::is_encoder_start_failure(detached));
+
+	StartFailure active{StartFailureKind::StartRefused};
+	active.output_active = true;
+	EXPECT_EQ(std::string(smulti::start_refusal_reason(active)), std::string("the output is still active"));
+
+	StartFailure no_server{StartFailureKind::StartRefused};
+	EXPECT_EQ(std::string(smulti::start_refusal_reason(no_server)), std::string("the service cannot try to connect (empty server URL)"));
+
+	StartFailure venc{StartFailureKind::StartRefused};
+	venc.service_ready       = true;
+	venc.video_encoder_error = true;
+	EXPECT_EQ(std::string(smulti::start_refusal_reason(venc)), std::string("the video encoder failed to initialize"));
+
+	StartFailure enc{StartFailureKind::StartRefused};
+	enc.service_ready = true;
+	EXPECT_EQ(std::string(smulti::start_refusal_reason(enc)),
+		  std::string("encoder initialization refused (video or audio)"));
 }
