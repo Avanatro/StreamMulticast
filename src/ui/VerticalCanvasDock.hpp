@@ -18,6 +18,7 @@ class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
 namespace smulti {
 
@@ -27,6 +28,7 @@ class VerticalItemList;
 class VerticalSceneLink;
 class VerticalSceneList;
 class VerticalRecorder;
+class VerticalReplayBuffer;
 
 /**
  * The one selected scene item of the vertical dock (G2: single source of truth). The Sources list and
@@ -79,13 +81,14 @@ private:
 /**
  * Second dock ("StreamMulticast Vertical", id avanatro_streammulticast_vertical):
  * live preview of the owned vertical canvas on top, the "Record vertical" button,
- * and tabs for scenes, sources, links and the vertical recording settings.
+ * and tabs for scenes, sources, links and the vertical recording + replay buffer settings.
  */
 class VerticalCanvasDock : public QWidget {
 	Q_OBJECT
 
 public:
-	VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, QWidget *parent = nullptr);
+	VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, VerticalReplayBuffer &replay,
+			   QWidget *parent = nullptr);
 	~VerticalCanvasDock() override = default;
 
 	/** Tear the preview display down before the canvas or the dock go away. */
@@ -107,6 +110,9 @@ private:
 	QWidget *build_record_tab();
 	void update_record_ui(); ///< UI thread: button state from the recorder
 	void on_record_settings_changed();
+	QWidget *build_replay_group(QWidget *parent);
+	void update_replay_ui(); ///< UI thread: Start/Stop button, status line and memory note from the buffer
+	void on_replay_settings_changed();
 
 	OwnedCanvas &m_canvas;
 	VerticalRecorder &m_recorder;
@@ -116,6 +122,14 @@ private:
 	QCheckBox *m_record_with_main = nullptr;
 	QLineEdit *m_record_folder = nullptr;
 	QLabel *m_record_target = nullptr;
+	VerticalReplayBuffer &m_replay;
+	QCheckBox *m_replay_with_main = nullptr;
+	QSpinBox *m_replay_seconds = nullptr;
+	QSpinBox *m_replay_max_mb = nullptr;
+	QLineEdit *m_replay_folder = nullptr;
+	QPushButton *m_replay_toggle = nullptr;
+	QLabel *m_replay_status = nullptr;
+	QLabel *m_replay_memory = nullptr;
 	CanvasPreview *m_preview = nullptr;
 	VerticalSceneList *m_scenes = nullptr;
 	VerticalItemList *m_items = nullptr;

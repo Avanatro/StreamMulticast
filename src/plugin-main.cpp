@@ -522,7 +522,7 @@ bool obs_module_load()
 
 	/* 7. Vertical canvas dock. Registered after the owned canvas adapter exists; the canvas
 	 * itself may not exist yet (ensure() runs on FINISHED_LOADING) and the preview copes. */
-	g_vertical_dock = new smulti::VerticalCanvasDock(*g_owned_canvas, *g_vertical_recorder);
+	g_vertical_dock = new smulti::VerticalCanvasDock(*g_owned_canvas, *g_vertical_recorder, *g_vertical_replay);
 	g_vertical_dock_registered =
 		obs_frontend_add_dock_by_id(kVerticalDockId, "StreamMulticast Vertical", g_vertical_dock.data());
 	if (!g_vertical_dock_registered) {

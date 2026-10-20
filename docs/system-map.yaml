@@ -959,7 +959,7 @@ nodes:
     lane: ui
     goal: "A second dock shows the owned vertical canvas live, letterboxed to the dock size."
     owns: [ui.vertical-dock]
-    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition]
+    needs: [owned-vertical-canvas, collection-autosave, layout-math, scene-link, vertical-recording, preview-edit, item-actions, vertical-transition, vertical-replay]
     code:
       - src/ui/VerticalSceneLink.hpp
       - src/ui/VerticalSceneLink.cpp
@@ -1035,6 +1035,12 @@ nodes:
         verification:
           - kind: manual
             reference: "OBS runtime check: the button shows the checked, theme-red 'Stop vertical recording' state while recording under the Yami and light themes; the Record tab shows the target folder and refuses a C: folder (not run in this session; plugin target compiled, TASK-27)"
+            result: pending
+      - id: ui-vertical-dock.replay-group
+        behavior: "The Record tab has a group 'Vertical replay buffer': 'Run with the main replay buffer', 'Length (s)' 30..60, 'Max memory (MB)' 64..2048, the clip folder (line edit plus Browse...), a Start/Stop button for the buffer, a status line (the C: or other refusal reason, buffering or not with the folder, last clip path, last error) and the note 'Uses about <max memory> MB of RAM while buffering'. Edits are written through VerticalRecorder::set_settings (the one settings file) and apply at the next start. Only compiled locally, not run in OBS."
+        verification:
+          - kind: manual
+            reference: "OBS runtime check: the group shows the defaults (30 s, 512 MB, E:\\Videos\\Clips\\vertical), a C: folder shows the refusal and Start is refused, Start/Stop toggles the buffer and the last clip path appears after a save (not run in this session; TASK-36)"
             result: pending
       - id: ui-vertical-dock.dropdowns-readable
         behavior: "Dropdowns in the vertical dock (Links tab combos in table cells) and the endpoint dialog (Video canvas) carry no hard-coded colours, so the OBS theme styles them. Table-cell combos get a minimum contents length, a minimum column width and a row height from the combo sizeHint, so the theme's fixed input height plus margins cannot squash the selected text. Only compiled locally, not run in OBS."

@@ -14,8 +14,11 @@ GPLv2 — see LICENSE for full text.
 #include "../pipeline/Autosave.hpp"
 #include "../pipeline/OwnedCanvas.hpp"
 #include "../pipeline/VerticalRecorder.hpp"
+#include "../pipeline/VerticalReplayBuffer.hpp"
 
 #include <QFileDialog>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QPointer>
 #include <QStyle>
@@ -24,13 +27,16 @@ GPLv2 — see LICENSE for full text.
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QSpinBox>
 
 namespace smulti {
 
-VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, QWidget *parent)
+VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &recorder, VerticalReplayBuffer &replay,
+				       QWidget *parent)
 	: QWidget(parent),
 	  m_canvas(canvas),
-	  m_recorder(recorder)
+	  m_recorder(recorder),
+	  m_replay(replay)
 {
 	setObjectName("StreamMulticastVerticalDock");
 	setMinimumWidth(240);
@@ -108,7 +114,12 @@ VerticalCanvasDock::VerticalCanvasDock(OwnedCanvas &canvas, VerticalRecorder &re
 		if (self)
 			self->update_record_ui();
 	});
+	m_replay.set_state_listener([self]() {
+		if (self)
+			self->update_replay_ui();
+	});
 	update_record_ui();
+	update_replay_ui();
 }
 
 QWidget *VerticalCanvasDock::build_record_tab()
@@ -143,6 +154,7 @@ QWidget *VerticalCanvasDock::build_record_tab()
 				tab);
 	hint->setWordWrap(true);
 	v->addWidget(hint);
+	v->addWidget(build_replay_group(tab));
 	v->addStretch(1);
 
 	connect(m_record_with_main, &QCheckBox::toggled, this, [this](bool) { on_record_settings_changed(); });
@@ -165,6 +177,115 @@ void VerticalCanvasDock::on_record_settings_changed()
 	s.folder = m_record_folder->text().trimmed().toStdString();
 	m_recorder.set_settings(s);
 	update_record_ui();
+}
+
+QWidget *VerticalCanvasDock::build_replay_group(QWidget *parent)
+{
+	auto *group = new QGroupBox(tr("Vertical replay buffer"), parent);
+	auto *v = new QVBoxLayout(group);
+	v->setSpacing(4);
+
+	const VerticalReplaySettings s = m_recorder.settings().replay;
+
+	m_replay_with_main = new QCheckBox(tr("Run with the main replay buffer"), group);
+	m_replay_with_main->setChecked(s.enabled_with_main_replay);
+	m_replay_with_main->setToolTip(tr("Starting the OBS replay buffer also starts the vertical one; stopping it stops a "
+					  "vertical buffer that was started this way."));
+	v->addWidget(m_replay_with_main);
+
+	auto *form = new QFormLayout();
+	m_replay_seconds = new QSpinBox(group);
+	m_replay_seconds->setRange(kVerticalReplayMinSeconds, kVerticalReplayMaxSeconds);
+	m_replay_seconds->setValue(s.seconds);
+	form->addRow(tr("Length (s)"), m_replay_seconds);
+	m_replay_max_mb = new QSpinBox(group);
+	m_replay_max_mb->setRange(kVerticalReplayMinSizeMb, kVerticalReplayMaxSizeMb);
+	m_replay_max_mb->setSingleStep(64);
+	m_replay_max_mb->setValue(s.max_size_mb);
+	form->addRow(tr("Max memory (MB)"), m_replay_max_mb);
+	v->addLayout(form);
+
+	auto *row = new QHBoxLayout();
+	m_replay_folder = new QLineEdit(QString::fromStdString(s.folder), group);
+	m_replay_folder->setPlaceholderText(tr("Default: main recording folder/Vertical"));
+	auto *browse = new QPushButton(tr("Browse..."), group);
+	row->addWidget(m_replay_folder, 1);
+	row->addWidget(browse);
+	v->addLayout(row);
+
+	m_replay_toggle = new QPushButton(tr("Start vertical replay buffer"), group);
+	m_replay_toggle->setToolTip(tr("Save a clip with the hotkeys \"StreamMulticast: Save vertical clip\" or "
+				       "\"StreamMulticast: Save main + vertical clip\" (Settings > Hotkeys). Length, "
+				       "memory and folder apply at the next start."));
+	v->addWidget(m_replay_toggle);
+
+	m_replay_status = new QLabel(group);
+	m_replay_status->setWordWrap(true);
+	v->addWidget(m_replay_status);
+	m_replay_memory = new QLabel(group);
+	m_replay_memory->setWordWrap(true);
+	v->addWidget(m_replay_memory);
+
+	connect(m_replay_with_main, &QCheckBox::toggled, this, [this](bool) { on_replay_settings_changed(); });
+	connect(m_replay_seconds, &QSpinBox::editingFinished, this, [this]() { on_replay_settings_changed(); });
+	connect(m_replay_max_mb, &QSpinBox::editingFinished, this, [this]() { on_replay_settings_changed(); });
+	connect(m_replay_folder, &QLineEdit::editingFinished, this, [this]() { on_replay_settings_changed(); });
+	connect(browse, &QPushButton::clicked, this, [this]() {
+		const QString dir =
+			QFileDialog::getExistingDirectory(this, tr("Vertical clip folder"), m_replay_folder->text());
+		if (!dir.isEmpty()) {
+			m_replay_folder->setText(dir);
+			on_replay_settings_changed();
+		}
+	});
+	connect(m_replay_toggle, &QPushButton::clicked, this, [this]() {
+		m_replay.toggle();
+		update_replay_ui(); // a refused start keeps the button on "Start"
+	});
+	return group;
+}
+
+void VerticalCanvasDock::on_replay_settings_changed()
+{
+	VerticalRecordSettings s = m_recorder.settings();
+	s.replay.enabled_with_main_replay = m_replay_with_main->isChecked();
+	s.replay.seconds = m_replay_seconds->value();
+	s.replay.max_size_mb = m_replay_max_mb->value();
+	s.replay.folder = m_replay_folder->text().trimmed().toStdString();
+	m_recorder.set_settings(s);
+	update_replay_ui();
+}
+
+void VerticalCanvasDock::update_replay_ui()
+{
+	if (!m_replay_toggle)
+		return;
+	const VerticalReplayState state = m_replay.state();
+	m_replay_toggle->setEnabled(state != VerticalReplayState::Stopping);
+	m_replay_toggle->setText(state == VerticalReplayState::Stopping    ? tr("Stopping vertical replay buffer...")
+				 : state == VerticalReplayState::Buffering ? tr("Stop vertical replay buffer")
+									   : tr("Start vertical replay buffer"));
+
+	const VerticalReplaySettings s = m_recorder.settings().replay;
+	const VerticalRecordFolder folder = m_recorder.resolve_replay_folder();
+	const std::string clip = m_replay.last_clip();
+	const std::string error = m_replay.last_error();
+	QString text;
+	if (!folder.ok)
+		text = QString::fromStdString(folder.reason); // the recording's refusal text (never C:)
+	else if (state == VerticalReplayState::Buffering)
+		text = tr("Buffering the last %1 s for %2").arg(s.seconds).arg(QString::fromStdString(folder.folder));
+	else
+		text = tr("Not buffering. Clips go to: %1").arg(QString::fromStdString(folder.folder));
+	if (!clip.empty())
+		text += QStringLiteral("\n") + tr("Last clip: %1").arg(QString::fromStdString(clip));
+	if (!error.empty())
+		text += QStringLiteral("\n") + tr("Last error: %1").arg(QString::fromStdString(error));
+	m_replay_status->setText(text);
+	m_replay_status->setProperty("class", folder.ok && error.empty() ? "" : "text-danger");
+	m_replay_status->style()->unpolish(m_replay_status);
+	m_replay_status->style()->polish(m_replay_status);
+	m_replay_memory->setText(tr("Uses about %1 MB of RAM while buffering").arg(s.max_size_mb));
 }
 
 void VerticalCanvasDock::update_record_ui()
