@@ -43,6 +43,14 @@ struct VideoGeometry {
 VideoGeometry derive_vertical_geometry(const VideoGeometry &main);
 
 /**
+ * True when the canvas's stored fps differs from the main fps (compared as ratios). libobs obs_reset_video
+ * rebuilds non-main canvas mixes from their own stored video info (restore_canvases passes NULL and
+ * obs_init_video_mix opens the video output from it), so a main FPS change leaves the owned canvas on the old
+ * fps until its video is reset. A zero numerator or denominator on either side is "unknown": false.
+ */
+bool owned_canvas_fps_stale(const VideoGeometry &canvas, const VideoGeometry &main);
+
+/**
  * Ids of the endpoints bound to removed_uuid. Input pairs are (endpoint id,
  * bound canvas uuid). An empty removed_uuid matches nothing. Input order kept.
  */

@@ -120,9 +120,10 @@ public:
 	std::string uuid() const;
 
 	/**
-	 * True while the owned canvas exists but has no video mix (ensure() found it without video and
-	 * obs_canvas_reset_video was refused because OBS video was active). plugin-main calls ensure() again
-	 * when a main output stops. UI thread.
+	 * True while the owned canvas exists but has no video mix, or runs at an fps other than the main fps
+	 * (a main FPS change: libobs rebuilds the mix from the canvas's stored video info), because ensure()'s
+	 * obs_canvas_reset_video was refused while OBS video was active. plugin-main calls ensure() again when a
+	 * main output stops. UI thread.
 	 */
 	bool needs_video() const;
 

@@ -73,3 +73,29 @@ SMULTI_TEST(canvas_owned_removal_stops_bound_endpoints)
 	EXPECT_TRUE(ids[0] == "ep1" && ids[1] == "ep3");
 	EXPECT_TRUE(endpoints_to_stop_on_canvas_removed(eps, "").empty());
 }
+
+SMULTI_TEST(canvas_owned_stale_fps_needs_video_reset)
+{
+	VideoGeometry main;
+	main.fps_num = 60;
+	main.fps_den = 1;
+	VideoGeometry canvas = derive_vertical_geometry(main);
+	EXPECT_TRUE(!smulti::owned_canvas_fps_stale(canvas, main)); // same fps
+	/* libobs restore_canvases keeps the canvas's own ovi: after a main 60 -> 30 fps change it is stale */
+	main.fps_num = 30;
+	EXPECT_TRUE(smulti::owned_canvas_fps_stale(canvas, main));
+	/* equal ratios in another form are not stale: 60000/1001 vs 120000/2002 */
+	VideoGeometry a, b;
+	a.fps_num = 60000;
+	a.fps_den = 1001;
+	b.fps_num = 120000;
+	b.fps_den = 2002;
+	EXPECT_TRUE(!smulti::owned_canvas_fps_stale(a, b));
+	a.fps_num = 30000; // 29.97 vs 59.94
+	EXPECT_TRUE(smulti::owned_canvas_fps_stale(a, b));
+	/* unknown fps on either side never forces a reset */
+	VideoGeometry unknown;
+	unknown.fps_num = 0;
+	EXPECT_TRUE(!smulti::owned_canvas_fps_stale(unknown, main));
+	EXPECT_TRUE(!smulti::owned_canvas_fps_stale(main, unknown));
+}

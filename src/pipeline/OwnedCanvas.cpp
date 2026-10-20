@@ -163,6 +163,23 @@ bool build_vertical_ovi(obs_video_info &ovi)
 	return true;
 }
 
+/**
+ * The canvas still runs at an old fps: obs_reset_video rebuilds non-main mixes from their stored video info
+ * (restore_canvases passes NULL), so a main FPS change does not reach it. `wanted` is build_vertical_ovi.
+ */
+bool canvas_fps_stale(obs_canvas_t *canvas, const obs_video_info &wanted)
+{
+	obs_video_info current = {};
+	if (!obs_canvas_get_video_info(canvas, &current))
+		return false;
+	VideoGeometry have, want;
+	have.fps_num = current.fps_num;
+	have.fps_den = current.fps_den;
+	want.fps_num = wanted.fps_num;
+	want.fps_den = wanted.fps_den;
+	return owned_canvas_fps_stale(have, want);
+}
+
 bool collect_scene_ref(void *param, obs_source_t *scene)
 {
 	obs_source_t *ref = obs_source_get_ref(scene);
@@ -338,7 +355,17 @@ void OwnedCanvas::ensure()
 		canvas = acquire_canvas(decision.uuid);
 		if (!canvas)
 			return;
-		obs_log(LOG_INFO, "owned canvas: reused '%s'", kOwnedVerticalCanvasName);
+		if (!canvas_fps_stale(canvas, ovi)) {
+			obs_log(LOG_INFO, "owned canvas: reused '%s'", kOwnedVerticalCanvasName);
+		} else if (obs_canvas_reset_video(canvas, &ovi)) {
+			obs_log(LOG_INFO, "owned canvas: reused '%s' and rebuilt its video for the main fps %u/%u",
+				kOwnedVerticalCanvasName, ovi.fps_num, ovi.fps_den);
+		} else {
+			obs_log(LOG_WARNING,
+				"owned canvas: '%s' runs at an old fps and reset_video was refused (OBS video active?), "
+				"retried when a main stream, recording or replay buffer stops",
+				kOwnedVerticalCanvasName);
+		}
 		break;
 	}
 
@@ -486,7 +513,8 @@ bool OwnedCanvas::needs_video() const
 	obs_canvas_t *c = get_ref();
 	if (!c)
 		return false;
-	const bool missing = !obs_canvas_has_video(c);
+	obs_video_info wanted = {};
+	const bool missing = !obs_canvas_has_video(c) || (build_vertical_ovi(wanted) && canvas_fps_stale(c, wanted));
 	obs_canvas_release(c);
 	return missing;
 }

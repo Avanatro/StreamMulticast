@@ -225,9 +225,11 @@ static void ensure_owned_canvas_task(void *)
 		ensure_owned_canvas_and_follow(false);
 }
 
-/* obs_reset_video() frees every canvas mix and rebuilds the non-main ones with
- * their own size but the main fps (libobs restore_canvases / obs_init_video_mix);
- * ensure() still runs afterwards for a canvas left without video. The signal may
+/* obs_reset_video() frees every canvas mix and rebuilds the non-main ones from
+ * their own stored video info (libobs restore_canvases passes NULL), so the owned
+ * canvas keeps its old fps after a main FPS change; ensure() resets its video when
+ * the fps differs or the mix is missing (refused while video is active: retried
+ * when a main output stops). The signal may
  * fire on any thread, and the frontend canvas API is UI-thread only, so hop to
  * the UI thread. */
 static void on_video_reset(void *, calldata_t *)

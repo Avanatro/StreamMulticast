@@ -339,6 +339,7 @@ void VerticalRecorder::stop()
 	std::uint64_t session = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_pending = false; // also when Idle: a stop cancels a posted runtime restart
 		if (m_state != VerticalRecordState::Recording)
 			return;
 		m_state = VerticalRecordState::Stopping;
@@ -372,6 +373,7 @@ void VerticalRecorder::on_main_recording_stopping()
 	bool with_main;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_pending = false; // the main recording is stopping: no runtime restart after it
 		with_main = m_started_with_main && m_state == VerticalRecordState::Recording;
 	}
 	if (with_main)
@@ -383,6 +385,7 @@ void VerticalRecorder::stop_now(const char *reason)
 	obs_output_t *output = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
+		m_restart_pending = false; // also when Idle: a forced stop cancels a posted runtime restart
 		if (m_state == VerticalRecordState::Idle)
 			return;
 		output = m_session.output;
@@ -406,6 +409,7 @@ void VerticalRecorder::shutdown()
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_shut_down = true;
+		m_restart_pending = false;
 		m_listener = nullptr;
 	}
 	{
@@ -489,7 +493,10 @@ void VerticalRecorder::finish(std::uint64_t session, long long code)
 		remux = m_remux_on_stop;
 		with_main = m_started_with_main;
 		failed_encoder = m_encoder_id;
-		restart = vertical_record_runtime_fallback(code, m_encoder_id, m_runtime_restarted, available);
+		/* Never after a requested stop (Stopping): only a session that was still recording restarts. */
+		if (m_state == VerticalRecordState::Recording)
+			restart = vertical_record_runtime_fallback(code, m_encoder_id, m_runtime_restarted, available);
+		m_restart_pending = restart.has_value();
 		if (code != OBS_OUTPUT_SUCCESS) {
 			const char *err = output ? obs_output_get_last_error(output) : nullptr;
 			m_error = "The recording stopped with code " + std::to_string(code) +
@@ -530,8 +537,11 @@ void VerticalRecorder::restart_after_encode_error(const RecordEncoderChoice &cho
 {
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (m_shut_down || m_state != VerticalRecordState::Idle)
-			return; // unloaded, or started again by hand meanwhile
+		const bool pending = m_restart_pending;
+		m_restart_pending = false;
+		/* Cancelled by stop / stop_now / main recording stopping / shutdown, or started again by hand. */
+		if (!pending || m_shut_down || m_state != VerticalRecordState::Idle)
+			return;
 	}
 	if (with_main && !obs_frontend_recording_active()) {
 		obs_log(LOG_INFO, "vertical recording: not restarted, the main recording has stopped meanwhile");

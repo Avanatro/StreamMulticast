@@ -45,4 +45,11 @@ endpoints_to_stop_on_canvas_removed(const std::vector<std::pair<std::string, std
 	return ids;
 }
 
+bool owned_canvas_fps_stale(const VideoGeometry &canvas, const VideoGeometry &main)
+{
+	if (!canvas.fps_num || !canvas.fps_den || !main.fps_num || !main.fps_den)
+		return false;
+	return uint64_t(canvas.fps_num) * main.fps_den != uint64_t(main.fps_num) * canvas.fps_den;
+}
+
 } // namespace smulti
