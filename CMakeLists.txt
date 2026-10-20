@@ -88,7 +88,6 @@ target_sources(
     src/core/EndpointValidation.cpp
     src/core/MainServiceTarget.cpp
     src/core/ObsServiceImport.cpp
-    src/core/TikTokBridgeImport.cpp
     src/core/StreamlabsTikTok.cpp
     src/core/StreamlabsLogin.cpp
     src/core/AutosavePolicy.cpp

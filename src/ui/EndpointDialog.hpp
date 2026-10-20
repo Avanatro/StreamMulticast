@@ -71,7 +71,6 @@ private slots:
 	void on_show_key_toggled(bool visible);
 	void on_test_connection();
 	void on_import_from_obs();   ///< v1.0.6
-	void on_import_tiktok_bridge(); ///< v1.0.7
 	void on_save();
 
 private:
@@ -99,7 +98,6 @@ private:
 	QComboBox   *m_canvas_cb    {nullptr};   ///< Video canvas: Main (empty ref) or a canvas uuid + name
 	QCheckBox   *m_linked_cb    {nullptr};
 	QPushButton *m_import_btn   {nullptr};   ///< v1.0.6 — Import from active OBS profile
-	QPushButton *m_tiktok_bridge_btn {nullptr}; ///< v1.0.7 — Import local TikTok Bridge JSON
 	QPushButton *m_test_btn     {nullptr};
 	QPushButton *m_save_btn     {nullptr};
 	QPushButton *m_cancel_btn   {nullptr};

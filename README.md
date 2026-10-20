@@ -61,12 +61,6 @@ All three run **at the same time**, from the same OBS scene.
 - Fixed the Health tab's uptime column, which previously always showed 0
 - Internal thread-safety hardening around output start/stop/reconnect and health polling
 
-**TikTok Bridge import**
-- **Import TikTok Bridge** button in the Endpoint dialog -- reads local RTMP data from a Bridge JSON file
-- Designed for TikTok's account-gated / ephemeral stream-key workflow
-- StreamMulticast does not generate TikTok keys, perform TikTok login, or bundle third-party generators
-- Default handoff path: `%APPDATA%\obs-studio\plugin_config\streammulticast\tiktok_bridge.json`
-
 ## Not in v1.0.x (planned for v1.1+)
 
 - Per-output **resolution + FPS** (currently global)
@@ -95,8 +89,7 @@ That's it. Building from source is **only** for contributors who want to modify 
 1. Open the **Multistream** dock (`View → Docks → Multistream`)
 2. **Configure** tab → **+ Add Endpoint**
 3. Either click **Import from OBS** to pull the server URL + stream key from your active OBS profile, OR pick a template and paste the stream key manually
-4. For TikTok, optionally click **Import TikTok Bridge** to read a local bridge handoff file
-5. Choose **Output Orientation**:
+4. Choose **Output Orientation**:
    - `Source (match OBS canvas)` — your normal horizontal stream
    - `Vertical 1080×1920 — Letterbox` — for TikTok / Shorts / Reels endpoints
 6. Pick encoder backend + bitrate
@@ -155,25 +148,6 @@ Two options sit below the grid and are saved in `plugin_config/streammulticast/a
 
 When the vertical canvas follows the main scene (**Links** tab), it uses the same scene transition as the main canvas by default: the same type, a copy of its settings and the same duration, started at the same moment as the main transition (a per-scene override transition and its duration are honoured; a quick transition uses the global duration because OBS does not expose the quick transition duration). **Transition:** in the Links tab picks **Follow main (default)**, **Cut** (always instant) or one named OBS transition. For a **Stinger**, the vertical canvas plays a vertical video: **Vertical stinger video** names it (it applies only to the stinger it was chosen for, shown below the field), or leave it empty (**(auto)**) to use `<stinger>-vertical.<ext>` or `stinger-vertical.<ext>` with the same extension next to the main stinger file (a separate-file track matte needs `<matte>-vertical.<ext>` the same way). Without a vertical file the vertical canvas fades over the stinger's transition point instead (OBS would stretch the 16:9 video), and the log says so once. The vertical transition's audio is muted in the mix by design: TikTok and the other vertical endpoints take their audio from the main mix, which already carries the main stinger (and alert) sounds, so the vertical canvas adding its own would play them twice. Its stinger never monitors either. Every OBS transition is prepared on the vertical canvas ahead of use, so a stinger is normally loaded before it plays; a switch within the short moment after a transition was added or edited can show the stinger before its video has loaded (the vertical canvas then changes scene without the stinger picture). **Set active** in the Scenes tab uses the same setting. The old "Wait for stinger transition point" option is gone.
 
-### TikTok Bridge handoff format
-
-Optional helper tools can pass TikTok RTMP data to StreamMulticast by writing:
-
-```json
-{
-  "name": "TikTok Bridge",
-  "server_url": "rtmp://push-rtmp.tiktokcdn.com/live",
-  "stream_key": "paste-or-provider-key",
-  "expires_at": "2026-06-08T22:00:00Z"
-}
-```
-
-`server` may be used instead of `server_url`, and `key` may be used instead of `stream_key`. The helper remains separate from StreamMulticast; this plugin only imports the local handoff file.
-
-A minimal Windows companion script lives in `tools/tiktok-bridge/`. It can write
-the handoff file from prompts, clipboard content, or explicit command-line
-values, and can optionally start a user-chosen external helper.
-
 ### TikTok via Streamlabs (optional build flag)
 
 > **Unofficial and off by default.** This uses an unofficial Streamlabs API (it identifies itself as Streamlabs Desktop). It may stop working at any time and may violate the Streamlabs or TikTok terms of service. Use it at your own risk. Release builds do not contain it.
@@ -190,7 +164,7 @@ Build with `-DSMULTI_STREAMLABS_TIKTOK=ON` to let a TikTok endpoint fetch its RT
 
 Saving a change to a live Streamlabs TikTok endpoint restarts it, so the TikTok LIVE is ended and a new one starts.
 
-With the flag off (default) the plugin builds and behaves exactly as before; the TikTok Bridge import above stays the supported path.
+With the flag off (default) the plugin builds and behaves exactly as before; a TikTok endpoint then needs its server URL and stream key entered by hand.
 
 ---
 
@@ -248,8 +222,7 @@ src/
 │   ├── Endpoint           Per-endpoint POD + serialise/deserialise
 │   ├── ConfigStore        JSON persist in OBS plugin_config dir
 │   ├── EndpointRegistry   In-memory list + observer pattern
-│   ├── ObsServiceImport   Read active OBS profile's stream key (v1.0.6)
-│   └── TikTokBridgeImport Read local TikTok Bridge handoff JSON (v1.0.7)
+│   └── ObsServiceImport   Read active OBS profile's stream key (v1.0.6)
 ├── pipeline/
 │   ├── EncoderFactory     obs_encoder_create for x264 / NVENC / QSV / AMF
 │   ├── OutputController   1× per endpoint, state machine, reconnect backoff

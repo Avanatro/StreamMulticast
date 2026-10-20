@@ -122,14 +122,12 @@ nodes:
     status: unknown
   - id: service-import
     lane: core
-    goal: "Server and key can be imported from the active OBS profile or a TikTok bridge JSON."
-    owns: [import.obs-profile-reader, import.tiktok-bridge-reader]
+    goal: "Server and key can be imported from the active OBS profile."
+    owns: [import.obs-profile-reader]
     needs: [platform-server-table]
     code:
       - src/core/ObsServiceImport.hpp
       - src/core/ObsServiceImport.cpp
-      - src/core/TikTokBridgeImport.hpp
-      - src/core/TikTokBridgeImport.cpp
     works_when:
       - id: service-import.obs-profile
         behavior: "Active-profile service.json yields server, key, service name or a readable error."
@@ -924,7 +922,7 @@ nodes:
             reference: "OBS runtime check: save an endpoint with the same server and key as another one; a warning must appear and Yes must still save (not run in this session)"
             result: pending
       - id: ui-endpoint-dialog.canvas-selector
-        behavior: "The dialog offers Main canvas, then every canvas from snapshot_canvases() with the plugin-owned one first, and saves the chosen uuid and name; a stored canvas that no longer exists stays selected as '<name> (missing)'. The dialog never writes a legacy orientation (always SourceMatch). The TikTok bridge import selects StreamMulticast Vertical."
+        behavior: "The dialog offers Main canvas, then every canvas from snapshot_canvases() with the plugin-owned one first, and saves the chosen uuid and name; a stored canvas that no longer exists stays selected as '<name> (missing)'. The dialog never writes a legacy orientation (always SourceMatch)."
         verification:
           - kind: manual
             reference: "OBS runtime check: the dialog lists Main, StreamMulticast Vertical and Aitum Vertical; saving keeps uuid and name (not run in this session; plugin target compiled with cmake --build build_tests --target streammulticast, TASK-8)"
