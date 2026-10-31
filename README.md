@@ -29,7 +29,7 @@ All three run **at the same time**, from the same OBS scene.
 | `obs-multi-rtmp` | ❌ | ❌ | ✅ | ✅ | ✅ |
 | Aitum Multistream | 💰 (Pro) | 💰 (Pro / separate canvas plugin) | partial | ❌ | ✅ |
 | Restream / StreamYard / Castr | ✅ | ✅ | ❌ | ❌ | ❌ (cloud re-encode) |
-| **StreamMulticast** | ✅ | ✅ (Letterbox v1.0, Center-Crop v1.1) | ✅ | ✅ | ✅ |
+| **StreamMulticast** | ✅ | ✅ (own editable vertical canvas) | ✅ | ✅ | ✅ |
 
 ---
 
@@ -47,7 +47,7 @@ All three run **at the same time**, from the same OBS scene.
 ### v1.0.5 — Per-output orientation
 - **Vertical 1080×1920 (Letterbox)** — stream the same OBS scene to a TikTok / YouTube Shorts / Instagram Reels / Facebook Reels endpoint with a 9:16 frame (the horizontal canvas is letterboxed inside the vertical frame)
 - Configurable per endpoint — horizontal + vertical run in parallel from the same OBS session
-- Center-Crop variant reserved for v1.1 (needs a per-output `obs_view_t` with custom render code)
+- Superseded in v1.1 by the editable vertical canvas (see below)
 
 ### v1.0.6 — One-click import from OBS
 - **Import from OBS** button in the Endpoint dialog — reads server URL and stream key from your active OBS profile (whatever you've already connected via OBS's native "Connect Account" for Twitch / YouTube / Facebook / Kick / Trovo / Custom RTMP)
@@ -61,10 +61,20 @@ All three run **at the same time**, from the same OBS scene.
 - Fixed the Health tab's uptime column, which previously always showed 0
 - Internal thread-safety hardening around output start/stop/reconnect and health polling
 
-## Not in v1.0.x (planned for v1.1+)
+### v1.1 — Vertical canvas & live monitoring
+- **Own vertical canvas** — a plugin-owned `StreamMulticast Vertical` canvas with its own dock: live preview, scene list, scene items, transform editor (fit / fill / center), import of scenes from another canvas. Endpoints pick their video canvas in the endpoint dialog; the old framing modes are migrated automatically
+- **Click-and-drag editing** in the vertical preview (snapping, resize handles, arrow-key nudging, undo) and **source editing** from the dock (properties, filters, interact, rename, add existing / new source)
+- **Source locking** that shares the normal OBS scene item lock, and **copy transform** to the same source in other vertical scenes
+- **Follow main scene** — the vertical canvas switches with the main program scene, with the same scene transition (incl. a vertical stinger video)
+- **Safe-zone overlay** for TikTok / YouTube Shorts in the vertical preview (preview only, never in the stream)
+- **Record the vertical canvas** to a file, plus a **vertical replay buffer** with "Save vertical clip" hotkeys
+- **Live health alerts** — red rows, dock badge, optional sound and an obs-websocket vendor event on reconnects, failures, dropped frames and low bitrate
+- **Reliability** — x264 fallback after repeated runtime encoder failures, duplicate stream target guard, autosave of vertical edits, staged install with rollback and config migration scripts
+- **Optional build flag** for fetching a TikTok RTMP key via Streamlabs (unofficial, off by default, see below)
+
+## Not yet available (planned)
 
 - Per-output **resolution + FPS** (currently global)
-- Per-output **Vertical Center-Crop** (9:16 slice, not just letterboxed)
 - Per-output **health-score** with auto-failover routing
 - **Stream info push** (set title / tags / category across platforms via OAuth)
 - Per-output **recording split**
